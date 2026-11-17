@@ -142,6 +142,19 @@ jobs:
     runs-on: ubuntu-latest
     permissions: { contents: write }
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: docs/release-notes
+      # A tag push names the release "Welder x.y.z" and uses docs/release-notes/x.y.z.md as its text.
+      # Attaching builds by hand (release_tag) leaves an existing release's name and text alone.
+      - id: notes
+        shell: bash
+        run: |
+          if [ -z "${{ inputs.release_tag }}" ]; then
+            v="${GITHUB_REF_NAME#v}"
+            echo "name=Welder $v" >> "$GITHUB_OUTPUT"
+            if [ -f "docs/release-notes/$v.md" ]; then echo "body=docs/release-notes/$v.md" >> "$GITHUB_OUTPUT"; fi
+          fi
       - uses: actions/download-artifact@v4
         with:
           path: out
@@ -150,4 +163,6 @@ jobs:
         with:
           files: out/*
           tag_name: ${{ inputs.release_tag || github.ref_name }}
+          name: ${{ steps.notes.outputs.name }}
+          body_path: ${{ steps.notes.outputs.body }}
           generate_release_notes: true
