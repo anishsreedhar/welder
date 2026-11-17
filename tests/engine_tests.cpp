@@ -2657,6 +2657,19 @@ int main(int argc, char** argv) {
         CHECK_NEAR(px(img, 8, 8, "R"), 0.25, 1e-5);
     });
 
+    test("Keyer: the default range keys luminance, not a solid white alpha (#31)", [] {
+        auto c = comp(json::array({
+            {{"name", "Dark"}, {"type", "Constant"}, {"params", {{"color", {0.1, 0.1, 0.1, 1}}}}},
+            {{"name", "Mid"}, {"type", "Constant"}, {"params", {{"color", {0.5, 0.5, 0.5, 1}}}}},
+            {{"name", "KD"}, {"type", "Keyer"}, {"inputs", {"Dark"}}},
+            {{"name", "KM"}, {"type", "Keyer"}, {"inputs", {"Mid"}}},
+        }), 8, 8);
+        const float kd = px(render(*c, "KD"), 2, 2, "A"), km = px(render(*c, "KM"), 2, 2, "A");
+        CHECK(kd < 0.1f);                // dark: mostly keyed out
+        CHECK_NEAR(km, 0.5, 1e-4);       // mid grey: half (the ramp is symmetric about 0.5)
+        CHECK(kd < km);
+    });
+
     test("keyers: screen, IBK, chroma, keyer, difference, despill", [] {
         // A green screen with a skin-coloured disc in the middle and a spill-tinted ring.
         json disc = {{"name", "D"}, {"points", roto::ptsJson(roto::ellipse(32, 24, 12, 12))}, {"color", {0.8, 0.5, 0.4, 1}}};

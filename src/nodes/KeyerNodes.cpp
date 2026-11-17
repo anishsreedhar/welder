@@ -284,7 +284,8 @@ public:
 
 // ------------------------------------------------------------------ Keyer 
 // params: operation, range [A, B, C, D] (0 below A, ramps to 1 at B, 1 to C,
-// ramps to 0 at D), invert. The key value goes to alpha.
+// ramps to 0 at D), invert. The key value goes to alpha. The default range is 0 1 1 1, as in
+// Nuke, so a new Keyer's alpha follows the measured value (0 0 1 1 made it solid white, #31).
 class KeyerNode : public Node {
 public:
     ChannelSet channels(Engine& e, double f) override { return withRGBA(e.channels(input(0), f)); }
@@ -293,7 +294,7 @@ public:
         out.copyFrom(*a.fetch(input(0), a.region));
         RGBAIdx oi(out);
         const std::string op = params.str("operation", "luminance key");
-        auto rg = params.vec<4>("range", f, {0, 0, 1, 1});
+        auto rg = params.vec<4>("range", f, {0, 1, 1, 1});
         const float A = (float)rg[0], B = (float)rg[1], C = (float)rg[2], D = (float)rg[3];
         const bool inv = params.flag("invert", false);
         const Box& R = a.region;

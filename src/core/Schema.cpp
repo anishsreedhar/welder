@@ -862,7 +862,7 @@ std::vector<NodeDef> build() {
                     {"luminance key", "red keyer", "green keyer", "blue keyer", "alpha keyer", "saturation key", "min keyer",
                      "max keyer", "greenscreen keyer", "bluescreen keyer"}),
                   InfoRow("keyer_range", ""),
-                  Comps({"range", "range", Knob::Box, json::array({0, 0, 1, 1}), 0, 1, {}, "0 below A, rising to 1 at B, 1 up to C, falling to 0 at D"},
+                  Comps({"range", "range", Knob::Box, json::array({0, 1, 1, 1}), 0, 1, {}, "0 below A, rising to 1 at B, 1 up to C, falling to 0 at D"},
                         {"A", "B", "C", "D"}),
                   B("invert", "invert", false)},
                  "Pulls a key from luminance, a channel, saturation or screen dominance into alpha."});
