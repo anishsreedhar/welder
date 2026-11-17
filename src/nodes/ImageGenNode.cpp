@@ -339,6 +339,10 @@ std::vector<std::string> ImageGenNode::knobChoices(const std::string& knob) cons
         v.push_back("auto");
         for (auto& m : ml::checkpoints())
             if (m.folder && m.family.rfind("Flux2", 0) == 0) v.push_back(m.name);
+    } else if (knob == "text_encoder" || knob == "vae") {
+        v.push_back("auto");
+        for (auto& m : ml::imageGenComponents())
+            if (m.kind == knob) v.push_back(m.name);
     } else if (knob == "lora") {
         for (auto& m : ml::loras()) v.push_back(m.name);
     } else if (knob == "sampler") {
@@ -371,12 +375,13 @@ JobSpec ImageGenNode::spec(const std::string&, Engine&) {
         p["checkpoint"] = model->path;
         p["checkpoint_stamp"] = model->stamp();
         if (!model->folder) {
+            // a transformer-only file runs on a Diffusers FLUX.2 folder (its text encoder, VAE, tokenizer),
+            // or on separate text encoder and VAE files (ComfyUI's split files)
             const std::string base = params.str("base", "auto");
+            json cands = json::array();
             if (base == "auto") {
-                json cands = json::array();
                 for (auto& m : ml::checkpoints())
                     if (m.folder && m.family.rfind("Flux2", 0) == 0) cands.push_back(m.path);
-                if (cands.empty()) fail(ck + " is a transformer-only file: it needs the full Diffusers FLUX.2 model it was made from in the checkpoints folder");
                 p["base"] = "auto";
                 p["base_candidates"] = cands;
             } else if (auto b = ml::findCheckpoint(base); b && b->folder) {
@@ -384,6 +389,29 @@ JobSpec ImageGenNode::spec(const std::string&, Engine&) {
             } else {
                 fail("base model '" + base + "' isn't in the checkpoints folder");
             }
+            json parts = json::array();
+            bool haveTe = false, haveVae = false;
+            for (auto& m : ml::imageGenComponents()) {
+                parts.push_back({{"path", m.path}, {"kind", m.kind}, {"stamp", m.stamp()}});
+                haveTe |= m.kind == "text_encoder";
+                haveVae |= m.kind == "vae";
+            }
+            p["component_candidates"] = parts;
+            for (const char* k : {"text_encoder", "vae"}) {
+                const std::string v = params.str(k, "auto");
+                if (v == "auto") {
+                    p[k] = "auto";
+                } else if (auto f = ml::findComponent(v)) {
+                    p[k] = f->path;
+                    p[std::string(k) + "_stamp"] = f->stamp();
+                } else {
+                    fail(std::string(k == std::string("vae") ? "VAE" : "text encoder") + " '" + v + "' isn't in the model folders any more");
+                }
+            }
+            const bool split = params.str("text_encoder", "auto") != "auto" || params.str("vae", "auto") != "auto";
+            if (base == "auto" && cands.empty() && !split && !(haveTe && haveVae))
+                fail(ck + " is a transformer-only file: it needs a text encoder and a VAE (ComfyUI's text_encoders/ and vae/ "
+                          "folders, or the checkpoints folder) or the full Diffusers FLUX.2 model");
         }
     }
     p["dtype"] = params.str("dtype", "bf16");

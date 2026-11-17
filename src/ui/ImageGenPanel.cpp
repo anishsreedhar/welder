@@ -783,7 +783,11 @@ void drawImageGenPanel(App& app, UiState& ui, Node* n, const std::function<void(
     kit::endCard();
     if (kit::beginCard("##ig_model", "Model")) {
         knob("checkpoint");
-        if (auto m = ml::findCheckpoint(g->params.str("checkpoint", "")); m && !m->folder) knob("base");
+        if (auto m = ml::findCheckpoint(g->params.str("checkpoint", "")); m && !m->folder) {
+            knob("text_encoder");
+            knob("vae");
+            knob("base");
+        }
     }
     kit::endCard();
     if (kit::beginCard("##ig_loras", "LoRAs")) loraStack(app, *g);

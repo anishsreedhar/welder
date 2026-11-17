@@ -54,12 +54,12 @@ def tiny_tokenizer():
     return tok
 
 
-def tiny_vae():
+def tiny_vae(groups=1, quant=False):
     from diffusers import AutoencoderKLFlux2
     torch.manual_seed(0)
     return AutoencoderKLFlux2(sample_size=32, in_channels=3, out_channels=3, down_block_types=("DownEncoderBlock2D",) * 4,
                               up_block_types=("UpDecoderBlock2D",) * 4, block_out_channels=(8, 8, 8, 8), layers_per_block=1,
-                              latent_channels=4, norm_num_groups=1, use_quant_conv=False, use_post_quant_conv=False)
+                              latent_channels=4, norm_num_groups=groups, use_quant_conv=quant, use_post_quant_conv=quant)
 
 
 def tiny_transformer(guidance):
@@ -89,13 +89,17 @@ def build_dev(path):
     return pipe
 
 
-def build_klein(path, distilled=False):
+def build_klein(path, distilled=False, split_like=False):
+    """split_like: the settings ComfyUI's split files imply (Qwen3's rope theta, a VAE with quant convs and
+    as many groups as channels), so a folder and its split files give the same images."""
     from diffusers import FlowMatchEulerDiscreteScheduler, Flux2KleinPipeline
     from transformers import Qwen3Config, Qwen3ForCausalLM
     torch.manual_seed(0)
+    extra = {"rope_parameters": {"rope_type": "default", "rope_theta": 1000000.0}} if split_like else {}
     te = Qwen3ForCausalLM(Qwen3Config(intermediate_size=16, hidden_size=16, num_hidden_layers=28, num_attention_heads=2,
-                                      num_key_value_heads=2, vocab_size=64, max_position_embeddings=1024))
-    pipe = Flux2KleinPipeline(scheduler=FlowMatchEulerDiscreteScheduler(**FLUX2_SCHEDULER), vae=tiny_vae(), text_encoder=te,
+                                      num_key_value_heads=2, vocab_size=64, max_position_embeddings=1024, **extra))
+    vae = tiny_vae(groups=8, quant=True) if split_like else tiny_vae()
+    pipe = Flux2KleinPipeline(scheduler=FlowMatchEulerDiscreteScheduler(**FLUX2_SCHEDULER), vae=vae, text_encoder=te,
                               tokenizer=tiny_tokenizer(), transformer=tiny_transformer(False), is_distilled=distilled)
     pipe.save_pretrained(path)
     return pipe
@@ -160,6 +164,32 @@ def to_bfl(sd):
     return out
 
 
+def vae_to_ldm(sd, levels=4):
+    """A Diffusers AutoencoderKLFlux2 state dict in BFL / LDM naming (flux2-vae.safetensors), for the split-file tests."""
+    import re
+    out = {}
+    for k, v in sd.items():
+        n = k
+        if k.startswith("quant_conv."):
+            n = "encoder." + k
+        elif k.startswith("post_quant_conv."):
+            n = "decoder." + k
+        elif not k.startswith("bn."):
+            n = re.sub(r"encoder\.down_blocks\.(\d+)\.resnets\.(\d+)", r"encoder.down.\1.block.\2", n)
+            n = re.sub(r"encoder\.down_blocks\.(\d+)\.downsamplers\.0\.conv", r"encoder.down.\1.downsample.conv", n)
+            n = re.sub(r"decoder\.up_blocks\.(\d+)\.resnets\.(\d+)", lambda m: f"decoder.up.{levels - 1 - int(m[1])}.block.{m[2]}", n)
+            n = re.sub(r"decoder\.up_blocks\.(\d+)\.upsamplers\.0\.conv", lambda m: f"decoder.up.{levels - 1 - int(m[1])}.upsample.conv", n)
+            n = re.sub(r"(en|de)coder\.mid_block\.resnets\.(\d)", lambda m: f"{m[1]}coder.mid.block_{int(m[2]) + 1}", n)
+            if ".mid_block.attentions.0." in n:
+                n = n.replace("mid_block.attentions.0.", "mid.attn_1.").replace("group_norm", "norm").replace("to_out.0", "proj_out")
+                n = n.replace("to_q", "q").replace("to_k", "k").replace("to_v", "v")
+                if v.ndim == 2:
+                    v = v[:, :, None, None]
+            n = n.replace("conv_norm_out", "norm_out").replace("conv_shortcut", "nin_shortcut")
+        out[n] = v
+    return out
+
+
 def comfy_fp8(sd, prefix="model.diffusion_model.", per_channel=False):
     """ComfyUI-style "fp8 mixed": 2-D weights as float8_e4m3fn with a weight_scale, a comfy_quant marker
     and an input_scale; everything else bf16; all keys under `prefix`."""
@@ -206,7 +236,8 @@ class ImageGenTests(unittest.TestCase):
     def setUpClass(cls):
         from strata_ml import worker as W
         from strata_ml.tasks import imagegen
-        cls.W, cls.ig = W, imagegen
+        from strata_ml.tasks import imagegen_parts
+        cls.W, cls.ig, cls.parts = W, imagegen, imagegen_parts
         W.load_tasks()
         cls.tmp = tempfile.mkdtemp(prefix="imagegen-test-")
         cls.home = os.path.join(cls.tmp, "home")
@@ -325,6 +356,81 @@ class ImageGenTests(unittest.TestCase):
             path = os.path.join(self.tmp, name)
             save_file({k: v.contiguous() for k, v in sd.items()}, path)
             self.assertEqual(self.ig.pick_base(path, [self.dev, self.klein, distilled]), want, name)
+
+    def split_files(self):
+        """ComfyUI's split files of a tiny [klein] base: models/diffusion_models/<transformer>,
+        models/text_encoders/<qwen3> (+ its tokenizer folder) and models/vae/<vae>, plus a Diffusers folder
+        with the same weights to compare against, and a text encoder that doesn't fit."""
+        from safetensors.torch import save_file
+        if getattr(type(self), "_split", None):
+            return type(self)._split
+        root = os.path.join(self.tmp, "comfy", "models")
+        folder = os.path.join(self.tmp, "klein-split-ref")
+        pipe = build_klein(folder, split_like=True)
+        f32 = lambda sd: {k: v.detach().float().contiguous() for k, v in sd.items()}  # noqa: E731
+        paths = {}
+        for sub, name, sd in (("diffusion_models", "flux-2-klein-base-tiny.safetensors",
+                               {"model.diffusion_model." + k: v for k, v in to_bfl(f32(pipe.transformer.state_dict())).items()}),
+                              ("text_encoders", "qwen_3_tiny.safetensors",
+                               {"model." + k: v for k, v in f32(pipe.text_encoder.model.state_dict()).items()}),
+                              ("vae", "flux2-vae.safetensors", vae_to_ldm(f32(pipe.vae.state_dict())))):
+            os.makedirs(os.path.join(root, sub), exist_ok=True)
+            paths[sub] = os.path.join(root, sub, name)
+            save_file(sd, paths[sub])
+        pipe.tokenizer.save_pretrained(os.path.join(root, "text_encoders", "tokenizer"))
+        from transformers import Qwen3Config, Qwen3Model
+        decoy = os.path.join(root, "text_encoders", "qwen_3_small.safetensors")
+        save_file({"model." + k: v.contiguous() for k, v in Qwen3Model(Qwen3Config(
+            intermediate_size=8, hidden_size=8, num_hidden_layers=2, num_attention_heads=2, num_key_value_heads=2,
+            vocab_size=64)).state_dict().items()}, decoy)
+        cands = [{"path": decoy, "kind": "text_encoder"}, {"path": paths["text_encoders"], "kind": "text_encoder"},
+                 {"path": paths["vae"], "kind": "vae"}]
+        type(self)._split = (folder, paths, cands)
+        return type(self)._split
+
+    def test_split_files_load_without_a_diffusers_folder(self):
+        folder, paths, cands = self.split_files()
+        cfg = self.parts.transformer_config(self.parts.file_shapes(paths["diffusion_models"]))
+        self.assertEqual((cfg["num_layers"], cfg["num_single_layers"], cfg["joint_attention_dim"], cfg["in_channels"]), (1, 2, 48, 16))
+        self.assertEqual(self.parts.pick_parts(paths["diffusion_models"], "auto", "auto", cands),
+                         (paths["text_encoders"], paths["vae"]), "the Qwen3 whose width fits, not the decoy")
+        p = {"guidance": 3.0, "negative_prompt": "a blue sky", "seed": 5}
+        jd, r = self.run_job(dict(p, checkpoint=paths["diffusion_models"], base="auto", base_candidates=[self.dev],
+                                  text_encoder="auto", vae="auto", component_candidates=cands))
+        info = self.ig._STATE["info"]
+        self.assertEqual(info["class"], "Flux2KleinPipeline")
+        self.assertFalse(info["distilled"], "a '...base...' file is the undistilled [klein]")
+        ref, _ = self.run_job(dict(p, checkpoint=folder))
+        self.assertLess(np.abs(self.take(jd) - self.take(ref)).max(), 1e-4, "the same images as the Diffusers folder")
+
+    def test_split_files_picked_by_hand(self):
+        folder, paths, cands = self.split_files()
+        self.run_job({"checkpoint": paths["diffusion_models"], "text_encoder": paths["text_encoders"], "vae": paths["vae"],
+                      "base_candidates": [], "component_candidates": cands, "seed": 1})
+        jd, _ = self.run_job({"checkpoint": paths["diffusion_models"], "text_encoder": cands[0]["path"], "vae": paths["vae"],
+                              "component_candidates": cands}, expect="error")
+        self.assertIn("doesn't fit", read(jd, "status.json")["message"])
+
+    def test_split_files_errors(self):
+        folder, paths, cands = self.split_files()
+        with self.assertRaisesRegex(RuntimeError, "no FLUX.2 VAE"):
+            self.parts.pick_parts(paths["diffusion_models"], "auto", "auto", cands[:2])
+        with self.assertRaisesRegex(RuntimeError, "no text encoder fits"):
+            self.parts.pick_parts(paths["diffusion_models"], "auto", "auto", cands[:1] + cands[2:])
+        with self.assertRaisesRegex(RuntimeError, r"\[dev\]"):
+            self.parts.pick_parts(self.single, "auto", "auto", cands)
+
+    def test_vae_conversion_round_trip(self):
+        vae = tiny_vae(groups=8, quant=True)
+        sd = {k: v.detach().float() for k, v in vae.state_dict().items()}
+        ldm = vae_to_ldm(sd)
+        cfg = self.parts.vae_config({k: tuple(v.shape) for k, v in ldm.items()})
+        self.assertEqual((cfg["block_out_channels"], cfg["layers_per_block"], cfg["latent_channels"], cfg["norm_num_groups"],
+                          cfg["use_quant_conv"], cfg["patch_size"]), ([8, 8, 8, 8], 1, 4, 8, True, [2, 2]))
+        back = self.parts.convert_vae(ldm, cfg)
+        for k, v in sd.items():
+            if not k.endswith("num_batches_tracked"):
+                self.assertTrue(torch.equal(back[k], v), k)
 
     def test_read_transformer_file_dequantises(self):
         from safetensors.torch import save_file
