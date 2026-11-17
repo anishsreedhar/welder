@@ -8,7 +8,7 @@ working, and the node shows the result when it's ready.
 | Node | What it does | Model |
 |---|---|---|
 | **AlphaGen** | Makes a matte for a clip with no green screen: white is foreground, grey is partial. Outputs the plate with the matte as alpha. | LTX-2.5 + the Alpha Gen IC-LoRA (beta) |
-| **LTX** | LTX-2.5 video-to-video with an IC-LoRA. The src clip guides the result. Presets: Pixel Upscaler x2, Water Simulation, Colorization, Decompression, Deblur, Day to Night, Union Control (depth / edges / as is), Motion Control, Inpaint, Relight, Layout to Render, Alpha Gen. A style input sets the first frame, and a LoRA stack adds your own LoRAs. | LTX-2.5 + the preset's IC-LoRA |
+| **LTX** | LTX-2.5 video-to-video with an IC-LoRA. The src clip guides the result. Presets: Pixel Upscaler x2 / x4, Water Simulation, Colorization, Decompression, Deblur, Day to Night, Union Control (depth / edges / pose / as is), Motion Control, Inpaint, Outpaint, Relight, Layout to Render, Clean Plate, Ingredients, Instant Shave, SDR to HDR, Alpha Gen. A style input sets the first frame, and a LoRA stack adds your own LoRAs. | LTX-2.5 + the preset's IC-LoRA |
 | **GaussianSplat** | Trains Gaussian splats from a plate and its camera, refining the camera as it trains. Outputs splats for **SplatRender** and the 3D view, plus the refined camera. | none (trained per shot) |
 | **Reconstruct** | One pass of MapAnything gives every frame's camera (pose and focal), a depth.Z pass and a coloured point cloud. No training: it's a generalizable model. | MapAnything (Apache 2.0 weights) |
 | **Depth** | Video Depth Anything: depth for the whole shot that stays steady from frame to frame (no flicker), as depth.Z. Relative (the scene's shape) or metric (metres). Splits a cut sequence at its cuts. | Video Depth Anything Small (Apache 2.0); Base / Large (non-commercial) |
@@ -52,7 +52,7 @@ welder-0.1.0-win64\
     ltx-2.5\                  LTX-2.5: the transformer, Gemma text encoder, VAEs, upscaler
     ltx-ic-alpha-gen\         one folder per IC-LoRA (ltx-ic-upscaler, ltx-ic-relight, ...)
     mapanything\              whole repository
-    depth-anything-v2-small\  whole repository
+    dwpose\                    yolox_l.onnx and dw-ll_ucoco_384.onnx (Union Control pose)
 ```
 
 Each folder has a `PUT_FILES_HERE.txt` with the Hugging Face page and the exact
@@ -179,14 +179,19 @@ the model folders Welder uses from `<ml home>\model_dirs.json`.
   * `preset`: what the preset expects.
   * `input`: src as is, for example a depth pass from ScanlineRender, or your
     own edges or pose.
-  * `depth`: made with Depth Anything V2.
-  * `canny`: edges.
+  * `depth`: made with Video Depth Anything Small, which stays steady over
+    time.
+  * `canny`: edges. The Union edges preset defaults to Lightricks' 92 / 200.
+  * `pose`: skeletons (body, hands, face) made with DWPose.
   * `inpaint`: the mask is painted #66FF00 into the reference.
+  * `outpaint`: the same, for the new area: the mask input's alpha, or, with
+    no mask, wherever src has no alpha.
   * `relight`: a shaded ball showing **light azimuth / elevation** is drawn
     top right.
 * **stages:**
   * `preset` (the default): the preset's recipe. Layout to Render runs
-    `two + IC-LoRA`. The others run `one`.
+    `two + IC-LoRA`, Outpaint `two + IC-LoRA`, the Union Control presets
+    `two` (Lightricks' Union Control recipe). The others run `one`.
   * `one`: a single pass at native size. Lightricks recommend this for most
     IC-LoRAs because it holds identity better.
   * `two`: adds LTX's 2x latent upscale pass. Sizes snap to multiples of 64.
@@ -208,10 +213,31 @@ the model folders Welder uses from `<ml home>\model_dirs.json`.
   * prompt: one or two sentences describing the finished shot, matching the
     style frame. Don't write "clay", "3D" or "Unreal".
   * 24 fps; 1920x1088 is a known good size (set **max size** to 1920).
-* **Union Control, Motion Control, Inpaint and Relight** are LTX-2.3
-  adapters. Lightricks' own LTX-2.5 workflows load them onto LTX-2.5.
-* **Pixel Upscaler x2** outputs twice the input size. It invents plausible
-  detail rather than recovering real detail.
+* **Union Control** (depth, edges, pose or as is) follows src's structure.
+  Describe the look, not the motion. Lower **LoRA strength** to 0.5-0.8 for
+  a looser guide.
+* **Clean Plate** removes people or objects. Describe the scene as it looks
+  empty and name what to remove.
+* **Outpaint** extends the frame. Put src on the bigger canvas first
+  (Reformat or Crop with transparent padding), or connect a mask whose alpha
+  marks the new area. Describe only what goes there.
+* **Ingredients** keeps characters, props and a location consistent from a
+  reference sheet: one image with a clean panel per element on black.
+  Connect the sheet to src (a still is fine). The frame range sets the
+  length; each pass is at least 121 frames. The prompt has two parts:
+  `Reference sheet: …` and `Generated video: …`. It was trained at 768x448, so
+  max size defaults to 768.
+* **Instant Shave** removes beards. Keep `REMOVEBEARD` at the start of the
+  prompt.
+* **SDR to HDR** turns an SDR plate into scene-linear HDR (values above 1)
+  with Lightricks' HDR pipeline. The whole range goes through in one pass,
+  with no prompt. It needs its own copy of the LTX-2.5 video VAE (1.5 GB).
+* **Union Control, Motion Control, Inpaint, Outpaint, Relight, Instant Shave
+  and Pixel Upscaler x4** are LTX-2.3 adapters. Lightricks' own LTX-2.5
+  workflows load these 2.3 adapters onto LTX-2.5 the same way.
+* **Pixel Upscaler x2 / x4** output two or four times the input size. They
+  invent plausible detail rather than recovering real detail. x4 works best
+  from a small draft (around 280p).
 
 ### GaussianSplat
 * **Inputs:** src (the plate), cam, and mask (optional).

@@ -445,6 +445,100 @@ class WorkerTests(unittest.TestCase):
         finally:
             ltx.generate, ltx.get_pipeline = old_g, old_p
 
+    def test_ltx_new_presets(self):
+        """Outpaint paints where src has no alpha; pose uses DWPose's drawing; Ingredients windows are at least
+        121 frames; SDR to HDR runs the HDR pipeline once and writes scene-linear values above 1."""
+        from strata_ml.tasks import ltx
+        for m in ("ltx-2.5", "ltx-ic-inoutpaint", "ltx-ic-union", "ltx-ic-ingredients", "ltx-ic-sdr-to-hdr",
+                  "ltx-2.5-video-vae", "dwpose"):
+            os.makedirs(os.path.join(self.home, "models", m), exist_ok=True)
+            open(os.path.join(self.home, "models", m, ".complete"), "w").close()
+        calls = []
+
+        def fake_generate(ctx, pipe, ref_path, prompt, seed, out_w, out_h, n, fps, ref_strength, two_stage, images=()):
+            import av
+            c = av.open(ref_path)
+            frames = [fr.to_ndarray(format="rgb24").astype(np.float32) / 255 for fr in c.decode(video=0)]
+            c.close()
+            calls.append((n, two_stage, len(frames)))
+            return frames
+
+        posed = []
+
+        def fake_pose(ctx, frames):
+            posed.append(len(frames))
+            return [np.full_like(f, 0.25) for f in frames]
+
+        hdr_calls = []
+
+        def fake_hdr(ctx, pipe, path, seed):
+            import av
+            c = av.open(path)
+            n = sum(1 for _ in c.decode(video=0))
+            c.close()
+            hdr_calls.append(n)
+            out = np.full((n, 48, 64, 3), 0.7, np.float32)  # ACEScct 0.7: about 5.8 linear
+            return out
+
+        saved = (ltx.generate, ltx.get_pipeline, ltx.pose_frames, ltx.hdr_generate, ltx.get_hdr_pipeline)
+        ltx.generate, ltx.get_pipeline = fake_generate, lambda *a, **k: object()
+        ltx.pose_frames, ltx.hdr_generate, ltx.get_hdr_pipeline = fake_pose, fake_hdr, lambda *a: object()
+        try:
+            frames = list(range(1, 10))
+            imgs = []
+            for _ in frames:
+                a = np.zeros((48, 64, 4), np.float32)
+                a[:, 16:48, :3] = 0.2
+                a[:, 16:48, 3] = 1  # the plate in the middle, transparent padding left and right
+                imgs.append(a)
+            jd = write_job(self.home, "outpaint", "ltx", {"preset": "Outpaint", "control": "outpaint", "max_size": 64,
+                                                          "mask_grow": 0, "chunk_frames": 9, "colorspace": "linear"},
+                           {"src": (frames, imgs)})
+            self.run_queue()
+            self.assertEqual(status(jd)["state"], "done", status(jd))
+            out = np.load(os.path.join(jd, "out", "rgba.1.npy")).astype(np.float32)
+            self.assertGreater(out[24, 4, 1], 0.8)   # the padding became #66FF00 in the reference
+            self.assertLess(out[24, 32, 1], 0.3)     # the plate stays
+            jd = write_job(self.home, "pose", "ltx", {"preset": "Union Control (pose)", "control": "pose", "max_size": 64,
+                                                      "chunk_frames": 9}, {"src": (frames, imgs)})
+            self.run_queue()
+            self.assertEqual(status(jd)["state"], "done", status(jd))
+            self.assertEqual(posed, [9])
+            calls.clear()
+            jd = write_job(self.home, "ingredients", "ltx", {"preset": "Ingredients", "max_size": 64, "chunk_frames": 97},
+                           {"src": (frames, imgs)})
+            self.run_queue()
+            self.assertEqual(status(jd)["state"], "done", status(jd))
+            self.assertEqual(calls, [(121, False, 121)])  # 9 frames of a sheet, looped to 121
+            self.assertEqual(len(json.load(open(os.path.join(jd, "result.json")))["outputs"]["rgba"]["frames"]), 9)
+            frames = list(range(1, 13))
+            jd = write_job(self.home, "hdr", "ltx", {"preset": "SDR to HDR", "max_size": 64},
+                           {"src": (frames, [imgs[0]] * 12)})
+            self.run_queue()
+            self.assertEqual(status(jd)["state"], "done", status(jd))
+            self.assertEqual(hdr_calls, [17])  # one pass, 8k+1
+            out = np.load(os.path.join(jd, "out", "rgba.12.npy")).astype(np.float32)
+            self.assertEqual(out.shape, (48, 64, 4))
+            self.assertGreater(float(out[..., :3].mean()), 2.0)
+            # the colour maths: ACEScct mid grey (0.4135) is 0.18 linear, and grey stays grey
+            g = ltx.acescct_to_linear709(np.full((1, 1, 3), 0.4135284, np.float32))[0, 0]
+            self.assertTrue(np.allclose(g, 0.18, atol=2e-3), g)
+        finally:
+            ltx.generate, ltx.get_pipeline, ltx.pose_frames, ltx.hdr_generate, ltx.get_hdr_pipeline = saved
+
+    def test_dwpose_vendored(self):
+        """The vendored DWPose formats and draws a skeleton (no ONNX models: the estimator is stubbed)."""
+        from strata_ml.vendor.dwpose import dwpose as dw
+        det = dw.DWposeDetector.__new__(dw.DWposeDetector)
+        kp = np.zeros((1, 134, 2), np.float32)
+        sc = np.zeros((1, 134), np.float32)
+        kp[0, :18] = [[100 + 10 * (i % 4), 80 + 20 * (i // 4)] for i in range(18)]
+        sc[0, :18] = 0.9
+        det.pose_estimation = lambda img: (kp.copy(), sc.copy())
+        out = det(np.zeros((256, 320, 3), np.uint8))
+        self.assertEqual(out.shape, (256, 320, 3))
+        self.assertGreater(int(out.max()), 0)
+
     def test_splat_in_child_process(self):
         """Splat training handed to another Python (the splat environment), progress and result coming back."""
         means, cols, cams, imgs = synthetic_scene(n_frames=4, w=32, h=24)

@@ -148,6 +148,85 @@
    "license": "LTX-2 Community License",
    "license_url": "https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Layout-To-Render"
   },
+  "ltx-ic-clean-plate": {
+   "label": "LTX-2.5 IC-LoRA: Clean Plate",
+   "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Clean-Plate",
+   "files": [
+    "ltx-2.5-22b-ic-lora-clean-plate-1.0.safetensors"
+   ],
+   "size_gb": 0.33,
+   "gated": true,
+   "license": "LTX-2 Community License",
+   "license_url": "https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Clean-Plate"
+  },
+  "ltx-ic-ingredients": {
+   "label": "LTX-2.5 IC-LoRA: Ingredients (reference sheet)",
+   "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Ingredients",
+   "files": [
+    "ltx-2.5-22b-ic-lora-ingredients-0.9.safetensors"
+   ],
+   "size_gb": 1.31,
+   "gated": true,
+   "license": "LTX-2 Community License",
+   "license_url": "https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Ingredients"
+  },
+  "ltx-ic-upscaler-x4": {
+   "label": "LTX-2.3 IC-LoRA: Pixel Upscaler x4",
+   "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Pixel-Spatial-Upscaler",
+   "files": [
+    "ltx-2.3-22b-ic-lora-pixel-spatial-upscaler-x4-0.9.safetensors"
+   ],
+   "size_gb": 0.65,
+   "gated": true,
+   "license": "LTX-2 Community License",
+   "license_url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Pixel-Spatial-Upscaler"
+  },
+  "ltx-ic-instant-shave": {
+   "label": "LTX-2.3 IC-LoRA: Instant Shave",
+   "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Instant-Shave",
+   "files": [
+    "ltx-2.3-22b-ic-lora-instant-shave-0.9.safetensors"
+   ],
+   "size_gb": 0.65,
+   "gated": true,
+   "license": "LTX-2 Community License",
+   "license_url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Instant-Shave"
+  },
+  "ltx-ic-sdr-to-hdr": {
+   "label": "LTX-2.5 IC-LoRA: SDR to HDR (with its scene embeddings)",
+   "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR",
+   "files": [
+    "ltx-2.5-22b-ic-lora-sdr-to-hdr-1.0.safetensors",
+    "ltx-2.5-22b-ic-lora-sdr-to-hdr-scene-emb.safetensors"
+   ],
+   "size_gb": 1.32,
+   "gated": true,
+   "license": "LTX-2 Community License",
+   "license_url": "https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR"
+  },
+  "ltx-2.5-video-vae": {
+   "label": "LTX-2.5 video VAE (the one SDR to HDR decodes with)",
+   "repo": "Lightricks/LTX-2.5",
+   "files": [
+    "vae/ltx-2.5-video-vae-bf16.safetensors"
+   ],
+   "size_gb": 1.47,
+   "gated": true,
+   "license": "LTX-2 Community License (free under $10M annual revenue)",
+   "license_url": "https://huggingface.co/Lightricks/LTX-2.5"
+  },
+  "dwpose": {
+   "label": "DWPose (pose skeletons for Union Control)",
+   "repo": "yzd-v/DWPose",
+   "files": [
+    "yolox_l.onnx",
+    "dw-ll_ucoco_384.onnx"
+   ],
+   "size_gb": 0.35,
+   "gated": false,
+   "license": "Apache 2.0",
+   "license_url": "https://huggingface.co/yzd-v/DWPose"
+  },
   "mapanything": {
    "label": "MapAnything (Apache 2.0 weights): cameras + depth from frames",
    "repo": "facebook/map-anything-apache",
@@ -156,15 +235,6 @@
    "gated": false,
    "license": "Apache 2.0",
    "license_url": "https://huggingface.co/facebook/map-anything-apache"
-  },
-  "depth-anything-v2-small": {
-   "label": "Depth Anything V2 Small (depth for Union Control)",
-   "repo": "depth-anything/Depth-Anything-V2-Small-hf",
-   "snapshot": true,
-   "size_gb": 0.1,
-   "gated": false,
-   "license": "Apache 2.0",
-   "license_url": "https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf"
   },
   "video-depth-anything-small": {
    "label": "Video Depth Anything Small (relative depth, steady over time)",
@@ -278,7 +348,7 @@
   }
  },
  "ic_loras": {
-  "_comment": "Presets for the LTX node. model: the models entry; control: what the reference video is made of (input = the src input as is). prompt: the template the panel's 'template' button puts in the prompt; replace the <...> parts. stages: the default recipe ('one', 'two', 'two + IC-LoRA'). style: 'wanted' warns when the style input is empty. src_label: what the src input is called on this preset.",
+  "_comment": "Presets for the LTX node. model: the models entry; control: what the reference video is made of (input = the src input as is). prompt: the template the panel's 'template' button puts in the prompt; replace the <...> parts. stages: the default recipe ('one', 'two', 'two + IC-LoRA'). style: 'wanted' warns when the style input is empty. src_label: what the src input is called on this preset. canny: [low, high] defaults. max_size / chunk_frames: the preset's defaults for those knobs; min_frames: windows are at least this long. pipeline 'hdr': Lightricks' SDR-to-HDR pipeline instead of the IC-LoRA one.",
   "Layout to Render": {
    "model": "ltx-ic-layout",
    "strength": 1.0,
@@ -293,6 +363,84 @@
    "style": "wanted",
    "src_label": "layout",
    "note": "layout: a clay render, playblast or blocky previs (camera, motion, placement). style: a finished-looking first frame (make one with ImageGen), not a grey clay frame. Don't write 'clay', '3D' or 'Unreal' in the prompt. 24 fps; 1920x1088 is a known good size."
+  },
+  "Clean Plate": {
+   "model": "ltx-ic-clean-plate",
+   "strength": 1.0,
+   "control": "input",
+   "prompt": "<describe the empty scene>. No <what to remove>.",
+   "trained": [
+    1024,
+    576,
+    49
+   ],
+   "note": "Removes people or objects from the shot. Describe the scene as it looks empty and name what to remove. Validated up to 1920x1088."
+  },
+  "Outpaint": {
+   "model": "ltx-ic-inoutpaint",
+   "strength": 1.0,
+   "control": "outpaint",
+   "prompt": "<describe what fills the new area>",
+   "trained": [
+    1920,
+    1088,
+    121
+   ],
+   "stages": "two + IC-LoRA",
+   "note": "Put src on the bigger canvas first (Reformat / Crop with transparent padding): what has no alpha is the new area. Or connect a mask (alpha = new area). Describe only what goes there."
+  },
+  "Ingredients": {
+   "model": "ltx-ic-ingredients",
+   "strength": 1.0,
+   "control": "input",
+   "prompt": "Reference sheet: <one line per panel: the character, the prop, the location>. Generated video: <the action>",
+   "trained": [
+    768,
+    448,
+    121
+   ],
+   "max_size": 768,
+   "chunk_frames": 121,
+   "min_frames": 121,
+   "note": "src: a reference sheet (one image: a clean panel per character / prop and one for the location, on black); a still is fine. The frame range sets the length (121 frames or more). Its aspect sets the output's; trained at 768x448."
+  },
+  "Instant Shave": {
+   "model": "ltx-ic-instant-shave",
+   "strength": 1.0,
+   "control": "input",
+   "prompt": "REMOVEBEARD <describe the person and the scene>",
+   "trained": [
+    960,
+    544,
+    49
+   ],
+   "note": "LTX-2.3 adapter. Removes beards; keep REMOVEBEARD at the start of the prompt."
+  },
+  "Pixel Upscaler x4": {
+   "model": "ltx-ic-upscaler-x4",
+   "strength": 1.0,
+   "control": "input",
+   "prompt": "",
+   "scale": 4,
+   "trained": [
+    1920,
+    1088,
+    121
+   ],
+   "note": "LTX-2.3 adapter. Output is four times the input size; best from a small draft (around 280p). It invents detail."
+  },
+  "SDR to HDR": {
+   "model": "ltx-ic-sdr-to-hdr",
+   "strength": 1.0,
+   "control": "input",
+   "prompt": "",
+   "pipeline": "hdr",
+   "trained": [
+    1920,
+    1088,
+    121
+   ],
+   "note": "Lightricks' HDR pipeline: the whole range in one pass, no prompt. The result is scene-linear HDR (values above 1). src should be an SDR plate (sRGB)."
   },
   "Alpha Gen": {
    "model": "ltx-ic-alpha-gen",
@@ -389,7 +537,8 @@
     1088,
     121
    ],
-   "note": "LTX-2.3 adapter on LTX-2.5 (as Lightricks' 2.5 workflows do). The depth video is made from src (or feed a depth pass and choose control 'input')."
+   "note": "LTX-2.3 adapter on LTX-2.5 (as Lightricks' 2.5 workflows do). The depth video is made from src with Video Depth Anything Small (or feed a depth pass and choose control 'input'). Describe the look, not the motion.",
+   "stages": "two"
   },
   "Union Control (edges)": {
    "model": "ltx-ic-union",
@@ -401,7 +550,12 @@
     1088,
     121
    ],
-   "note": "LTX-2.3 adapter on LTX-2.5. Canny edges are made from src."
+   "note": "LTX-2.3 adapter on LTX-2.5 (as Lightricks' 2.5 workflows do). Canny edges are made from src (Lightricks use thresholds 92 / 200). Describe the look, not the motion.",
+   "stages": "two",
+   "canny": [
+    92,
+    200
+   ]
   },
   "Union Control (as is)": {
    "model": "ltx-ic-union",
@@ -413,7 +567,21 @@
     1088,
     121
    ],
-   "note": "Feed a depth, pose or edge video into src yourself."
+   "note": "LTX-2.3 adapter on LTX-2.5 (as Lightricks' 2.5 workflows do). Feed a depth, pose or edge video into src yourself. Describe the look, not the motion.",
+   "stages": "two"
+  },
+  "Union Control (pose)": {
+   "model": "ltx-ic-union",
+   "strength": 1.0,
+   "control": "pose",
+   "prompt": "<describe the result>",
+   "trained": [
+    1920,
+    1088,
+    121
+   ],
+   "stages": "two",
+   "note": "LTX-2.3 adapter on LTX-2.5 (as Lightricks' 2.5 workflows do). Pose skeletons (body, hands, face) are made from src with DWPose. Describe the look, not the motion."
   },
   "Motion Control": {
    "model": "ltx-ic-motion",

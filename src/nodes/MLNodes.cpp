@@ -257,6 +257,11 @@ public:
 
     std::string preset() const { return params.str("preset", "Pixel Upscaler x2"); }
 
+    static int cannyDefault(const json& lora, int i, int def) {
+        if (lora.contains("canny") && lora["canny"].is_array() && (int)lora["canny"].size() > i) return lora["canny"][i].get<int>();
+        return def;
+    }
+
     // The stages recipe: "one", "two" or "two + IC-LoRA". "preset" (the default) takes the preset's;
     // comps saved before the stages knob have the old two_stage checkbox.
     std::string stages(const json& lora) const {
@@ -300,9 +305,10 @@ public:
         s.params = pick(params, {{"preset", preset()}, {"prompt", lora.value("prompt", "")},
                                  {"lora_strength", lora.value("strength", 1.0)}, {"ref_strength", 1.0},
                                  {"style_strength", 1.0}, {"chain_windows", true},
-                                 {"seed", 1234}, {"max_size", 1280}, {"chunk_frames", 97}, {"overlap", 8},
+                                 {"seed", 1234}, {"max_size", lora.value("max_size", 1280)},
+                                 {"chunk_frames", lora.value("chunk_frames", 97)}, {"overlap", 8},
                                  {"quantization", "fp8"}, {"offload", "cpu"},
-                                 {"canny_low", 100}, {"canny_high", 200}, {"light_azimuth", 45},
+                                 {"canny_low", cannyDefault(lora, 0, 100)}, {"canny_high", cannyDefault(lora, 1, 200)}, {"light_azimuth", 45},
                                  {"light_elevation", 30}, {"mask_grow", 8}, {"colorspace", "sRGB"}});
         std::string control = params.str("control", "preset");
         s.params["control"] = control == "preset" ? lora.value("control", "input") : control;
@@ -325,7 +331,9 @@ public:
         s.params["loras"] = loras;
         s.models = {"ltx-2.5"};
         if (lora.contains("model")) s.models.push_back(lora["model"]);
-        if (s.params["control"] == "depth") s.models.push_back("depth-anything-v2-small");
+        if (s.params["control"] == "depth") s.models.push_back("video-depth-anything-small");
+        if (s.params["control"] == "pose") s.models.push_back("dwpose");
+        if (lora.value("pipeline", std::string()) == "hdr") s.models.push_back("ltx-2.5-video-vae");
         if (!input(0)) s.error = "connect the src input";
         return s;
     }
