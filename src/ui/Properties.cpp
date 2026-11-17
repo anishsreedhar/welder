@@ -3170,6 +3170,16 @@ void nodePanel(App& app, UiState& ui, Node* n, bool* keepOpen) {
     } else if (n->type == "Roto" || n->type == "RotoPaint") {
         drawRotoPanel(app, ui, n);
         for (const char* k : {"shapes", "output", "premultiply", "motionblur", "shutter", "shutter_offset", "clip_to", "replace"}) shown.insert(k);
+    } else if (n->type == "ImageGen" && def) {
+        drawImageGenPanel(app, ui, n, [&](const char* name) {
+            for (auto& k : def->knobs)
+                if (k.name == name) {
+                    if (whenOk(n, *def, k)) knob(c, k);
+                    return;
+                }
+        });
+        for (auto& k : def->knobs) shown.insert(k.name);
+        for (const char* k : {"ml", "history", "promoted"}) shown.insert(k);
     } else if (n->type == "Shuffle") {
         drawShufflePanel(app, ui, n);
         for (const char* k : {"mapping", "in1", "in2", "in1_input", "in2_input", "out1", "out2", "new_layers"}) shown.insert(k);
