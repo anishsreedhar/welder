@@ -127,7 +127,7 @@ struct ModelFile {
     std::string name;    // what the menus show and the node stores: the path below its folder, '/'-separated
     std::string path;    // absolute
     bool folder = false; // a Diffusers model folder (model_index.json); else a single .safetensors file
-    std::string family;  // a folder's pipeline class ("Flux2Pipeline", "Flux2KleinPipeline", ...); "" for files
+    std::string family;  // a folder's pipeline class ("Flux2Pipeline", "Flux2KleinPipeline", "Flux3...", ...); "" for files
     uint64_t size = 0;   // files only
     int64_t mtime = 0;   // seconds
     std::string stamp() const { return std::to_string(size) + ":" + std::to_string(mtime); }

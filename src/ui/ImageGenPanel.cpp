@@ -585,10 +585,11 @@ void modeMenu(App& app, ImageGenNode& g) {
 }
 
 // ------------------------------------------------------------------ reference
-// What FLUX.2 gets as reference images: the reference input, and the source when use_reference is on.
+// What the model gets as reference images: the reference input, and the source when use_reference is on.
 void referenceRow(ImageGenNode& g) {
-    kit::rowLabel("reference", "A separate image FLUX.2 follows (a style, a character, a product): connect the node's "
-                               "reference input. It never becomes the base image and doesn't change the mode.");
+    kit::rowLabel("reference", "A separate image the model follows (a style, a character, a product): connect the node's "
+                               "reference input. It never becomes the base image and doesn't change the mode. "
+                               "FLUX 3 prompts can name references as <ref_image_0>, <ref_image_1>, ...");
     std::string refs;
     if (Node* r = g.input(2)) refs = r->name;
     if (g.params.flag("use_reference", false) && (g.input(0) || g.promotedTake().active))
