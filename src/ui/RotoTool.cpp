@@ -990,9 +990,10 @@ void pointToolClick(App& app, UiState& ui, Node* n, const std::vector<Disp>& ds,
 }  // namespace
 
 Node* activeToolNode(App& app) {
-    // The most recently opened panel among the nodes with viewer tools.
+    // The most recently opened panel among the nodes with viewer tools. A panel folded in the
+    // properties bin hides its overlays, as closing it would (#29).
     for (auto& p : app.panels)
-        if (Node* n = app.node(p))
+        if (Node* n = app.node(p); n && !app.panelsCollapsed.count(p))
             if (n->type == "Roto" || n->type == "RotoPaint" || n->type == "SplineWarp" || n->type == "SplineFlow" || n->type == "Tracker" || n->type == "PlanarTracker" ||
                 n->type == "CameraTracker" || n->type == "FlowField" || n->type == "TrackMask" || n->type == "Transform" || n->type == "Position" || n->type == "CornerPin2D" ||
                 n->type == "TransformMasked" || n->type == "GridWarp" || hasKnobHandles(n->type))

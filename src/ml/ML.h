@@ -127,11 +127,16 @@ struct ModelFile {
     std::string name;    // what the menus show and the node stores: the path below its folder, '/'-separated
     std::string path;    // absolute
     bool folder = false; // a Diffusers model folder (model_index.json); else a single .safetensors file
-    std::string family;  // a folder's pipeline class ("Flux2Pipeline", "Flux2KleinPipeline", ...); "" for files
+    std::string family;  // a folder's pipeline class ("Flux2Pipeline", "Flux2KleinPipeline", "Flux3...", ...); "" for files
     uint64_t size = 0;   // files only
     int64_t mtime = 0;   // seconds
+    // files: what the .safetensors holds, from its header: "transformer" (a diffusion model),
+    // "text_encoder", "vae", or "" (couldn't tell: offered as a checkpoint)
+    std::string kind;
     std::string stamp() const { return std::to_string(size) + ":" + std::to_string(mtime); }
 };
+// What a .safetensors file holds, from the tensor names in its header (see ModelFile::kind).
+std::string safetensorsKind(const std::string& path);
 struct ImageGenDirs {
     std::vector<std::string> checkpoints, loras;
 };
@@ -139,7 +144,13 @@ ImageGenDirs imageGenDirs();                  // the configured folders (default
 void setImageGenDirs(const ImageGenDirs& d);  // empty lists = back to the defaults
 // What's in the folders: checkpoints (Diffusers folders, then single files), LoRAs (.safetensors).
 // Cached for a few seconds; `rescan` forces a fresh look.
+// Checkpoints are the Diffusers folders and the files that aren't a text encoder or a VAE.
 std::vector<ModelFile> checkpoints(bool rescan = false);
+// The separate text encoders and VAEs a transformer-only file can run with (ComfyUI's split files):
+// such files in the checkpoints folders, and everything in the text_encoders/, clip/ and vae/ folders
+// beside or inside each checkpoints folder (ComfyUI's models/ layout).
+std::vector<ModelFile> imageGenComponents(bool rescan = false);
+std::optional<ModelFile> findComponent(const std::string& nameOrPath);
 std::vector<ModelFile> loras(bool rescan = false);
 // A stored name (or an absolute path) -> the file; nullopt when it isn't there any more.
 std::optional<ModelFile> findCheckpoint(const std::string& nameOrPath);

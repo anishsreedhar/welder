@@ -927,6 +927,127 @@ int main(int argc, char** argv) {
         ml::setHome("");
     });
 
+    test("ImageGen: ComfyUI split files (transformer, text encoder, VAE) are told apart by their headers", [&] {
+        namespace fs = std::filesystem;
+        auto root = tmp / "imagegen_split";
+        fs::remove_all(root);
+        auto models = root / "models", ck = models / "checkpoints", lo = models / "loras";
+        // a .safetensors with these tensor names (the 8-byte header length, then the JSON header)
+        auto st = [](const fs::path& p, std::vector<std::string> keys) {
+            fs::create_directories(p.parent_path());
+            json h = json::object();
+            for (auto& k : keys) h[k] = {{"dtype", "BF16"}, {"shape", json::array({1})}, {"data_offsets", json::array({0, 2})}};
+            std::string s = h.dump();
+            uint64_t n = s.size();
+            std::ofstream f(p, std::ios::binary);
+            for (int i = 0; i < 8; ++i) f.put(char((n >> (8 * i)) & 0xFF));
+            f << s << "xx";
+        };
+        st(ck / "flux-2-klein-base-9b.safetensors", {"model.diffusion_model.double_blocks.0.img_attn.qkv.weight", "model.diffusion_model.img_in.weight"});
+        st(ck / "qwen_3_8b.safetensors", {"model.embed_tokens.weight", "model.layers.0.self_attn.q_proj.weight"});
+        st(ck / "flux2-vae.safetensors", {"decoder.conv_in.weight", "encoder.conv_in.weight", "bn.running_mean"});
+        st(models / "text_encoders" / "qwen_3_4b.safetensors", {"model.layers.0.self_attn.k_proj.weight"});
+        st(models / "vae" / "other-vae.safetensors", {"first_stage_model.decoder.up.0.block.0.conv1.weight"});
+        std::ofstream(ck / "mystery.safetensors") << "not a safetensors file";
+        fs::create_directories(lo);
+        CHECK(ml::safetensorsKind((ck / "flux-2-klein-base-9b.safetensors").string()) == "transformer");
+        CHECK(ml::safetensorsKind((ck / "qwen_3_8b.safetensors").string()) == "text_encoder");
+        CHECK(ml::safetensorsKind((ck / "flux2-vae.safetensors").string()) == "vae");
+        CHECK(ml::safetensorsKind((ck / "mystery.safetensors").string()).empty());
+        ml::setHome((root / "home").string());
+        setCacheRoot((root / "cache").string());
+        ml::setImageGenDirs({{ck.string()}, {lo.string()}});
+        auto cks = ml::checkpoints(true);
+        std::vector<std::string> names;
+        for (auto& m : cks) names.push_back(m.name);
+        CHECK((names == std::vector<std::string>{"flux-2-klein-base-9b.safetensors", "mystery.safetensors"}));  // no TE / VAE
+        auto parts = ml::imageGenComponents();
+        names.clear();
+        for (auto& m : parts) names.push_back(m.name + "=" + m.kind);
+        std::sort(names.begin(), names.end());
+        CHECK((names == std::vector<std::string>{"flux2-vae.safetensors=vae", "qwen_3_8b.safetensors=text_encoder",
+                                                 "text_encoders/qwen_3_4b.safetensors=text_encoder", "vae/other-vae.safetensors=vae"}));
+        CHECK(ml::findComponent("text_encoders/qwen_3_4b.safetensors").has_value());
+        imagegen::ImageGenNode n;
+        auto te = n.knobChoices("text_encoder"), vae = n.knobChoices("vae");
+        CHECK(te.size() == 3 && te.front() == "auto" && vae.size() == 3 && vae.front() == "auto");
+
+        // the job: no Diffusers folder, so the parts go along
+        auto c = comp(json::array({{{"name", "Gen"}, {"type", "ImageGen"},
+                                    {"params", {{"checkpoint", "flux-2-klein-base-9b.safetensors"}, {"positive_prompt", "a red house"}}}}}));
+        auto* g = dynamic_cast<imagegen::ImageGenNode*>(c->find("Gen"));
+        CHECK(g != nullptr);
+        Engine e;
+        if (g) {
+            auto s = g->spec("main", e);
+            CHECK(s.error.empty());
+            CHECK(s.params["text_encoder"] == "auto" && s.params["vae"] == "auto" && s.params["component_candidates"].size() == 4);
+            CHECK(s.params["base_candidates"].empty());
+            g->params.data["text_encoder"] = "text_encoders/qwen_3_4b.safetensors";
+            s = g->spec("main", e);
+            CHECK(s.error.empty() && s.params["text_encoder"] == (models / "text_encoders" / "qwen_3_4b.safetensors").string());
+            CHECK(s.params.contains("text_encoder_stamp"));
+            g->params.data["vae"] = "gone.safetensors";
+            CHECK(g->spec("main", e).error.find("VAE 'gone.safetensors'") != std::string::npos);
+            // nothing to run it with
+            g->params.data.erase("text_encoder");
+            g->params.data.erase("vae");
+            fs::remove_all(models / "text_encoders");
+            fs::remove_all(models / "vae");
+            fs::remove(ck / "qwen_3_8b.safetensors");
+            ml::checkpoints(true);
+            CHECK(g->spec("main", e).error.find("needs a text encoder and a VAE") != std::string::npos);
+        }
+        ml::setHome("");
+    });
+
+    test("ImageGen: FLUX 3 folders are listed next to FLUX.2", [&] {
+        namespace fs = std::filesystem;
+        auto root = tmp / "imagegen_scan_flux3";
+        fs::remove_all(root);
+        auto ck = root / "checkpoints", lo = root / "loras";
+        fs::create_directories(ck / "flux2-klein");
+        std::ofstream(ck / "flux2-klein" / "model_index.json") << R"({"_class_name": "Flux2KleinPipeline"})";
+        // the Hugging Face FLUX 3 repos are modular pipelines: modular_model_index.json, no model_index.json
+        fs::create_directories(ck / "flux-3-image-klein" / "transformer");
+        std::ofstream(ck / "flux-3-image-klein" / "modular_model_index.json") << R"({"_class_name": "Flux3DistilledModularPipeline"})";
+        // a folder whose index names something else is still FLUX 3 when its transformer is
+        fs::create_directories(ck / "flux3-base-copy" / "transformer");
+        std::ofstream(ck / "flux3-base-copy" / "model_index.json") << R"({"_class_name": "DiffusionPipeline"})";
+        std::ofstream(ck / "flux3-base-copy" / "transformer" / "config.json") << R"({"_class_name": "Flux3Transformer2DModel"})";
+        // the prompt upsampler (a transformers model folder): neither a checkpoint nor its shards
+        fs::create_directories(ck / "flux-3-image-klein-pup");
+        std::ofstream(ck / "flux-3-image-klein-pup" / "config.json") << R"({"architectures": ["Qwen3_5ForConditionalGeneration"]})";
+        std::ofstream(ck / "flux-3-image-klein-pup" / "model-00001-of-00002.safetensors") << "x";
+        std::ofstream(ck / "flux-3-image-klein.safetensors") << "xx";
+        fs::create_directories(lo);
+        ml::setHome((root / "home").string());
+        ml::setImageGenDirs({{ck.string()}, {lo.string()}});
+        auto cks = ml::checkpoints(true);
+        CHECK(cks.size() == 4);
+        if (cks.size() == 4) {
+            CHECK(cks[0].name == "flux-3-image-klein" && cks[0].folder && cks[0].family == "Flux3DistilledModularPipeline");
+            CHECK(cks[1].name == "flux2-klein" && cks[1].family == "Flux2KleinPipeline");
+            CHECK(cks[2].name == "flux3-base-copy" && cks[2].family == "Flux3ModularPipeline");
+            CHECK(cks[3].name == "flux-3-image-klein.safetensors" && !cks[3].folder);
+        }
+        CHECK(ml::findCheckpoint((ck / "flux-3-image-klein").string()).has_value());  // an absolute path works too
+        imagegen::ImageGenNode n;
+        CHECK((n.knobChoices("checkpoint") ==
+               std::vector<std::string>{"flux-3-image-klein", "flux2-klein", "flux3-base-copy", "flux-3-image-klein.safetensors"}));
+        CHECK((n.knobChoices("base") == std::vector<std::string>{"auto", "flux-3-image-klein", "flux2-klein", "flux3-base-copy"}));
+        // a single file gets every FLUX.2 and FLUX 3 folder as a base candidate; the worker picks the matching one
+        Engine e;
+        n.params.data["checkpoint"] = "flux-3-image-klein.safetensors";
+        n.params.data["prompt_upsampler"] = true;
+        auto s = n.spec("main", e);
+        CHECK(s.params["base"] == "auto" && s.params["base_candidates"].size() == 3);
+        CHECK(s.params["prompt_upsampler"] == true);
+        n.params.data["checkpoint"] = "flux-3-image-klein";
+        CHECK(n.spec("main", e).error.find("FLUX") == std::string::npos);
+        ml::setHome("");
+    });
+
     test("LTX: Layout to Render, the style input, stages and the LoRA stack in the job spec", [&] {
         namespace fs = std::filesystem;
         if (!ml::registry().contains("ic_loras")) {
@@ -2655,6 +2776,19 @@ int main(int argc, char** argv) {
         }));
         img = render(*c3, "RP");
         CHECK_NEAR(px(img, 8, 8, "R"), 0.25, 1e-5);
+    });
+
+    test("Keyer: the default range keys luminance, not a solid white alpha (#31)", [] {
+        auto c = comp(json::array({
+            {{"name", "Dark"}, {"type", "Constant"}, {"params", {{"color", {0.1, 0.1, 0.1, 1}}}}},
+            {{"name", "Mid"}, {"type", "Constant"}, {"params", {{"color", {0.5, 0.5, 0.5, 1}}}}},
+            {{"name", "KD"}, {"type", "Keyer"}, {"inputs", {"Dark"}}},
+            {{"name", "KM"}, {"type", "Keyer"}, {"inputs", {"Mid"}}},
+        }), 8, 8);
+        const float kd = px(render(*c, "KD"), 2, 2, "A"), km = px(render(*c, "KM"), 2, 2, "A");
+        CHECK(kd < 0.1f);                // dark: mostly keyed out
+        CHECK_NEAR(km, 0.5, 1e-4);       // mid grey: half (the ramp is symmetric about 0.5)
+        CHECK(kd < km);
     });
 
     test("keyers: screen, IBK, chroma, keyer, difference, despill", [] {
