@@ -377,6 +377,12 @@ struct FloatPanel {
 
 struct UiState {
     std::vector<FloatPanel> floatPanels;
+    // ImageGen's contact sheet: Space over it toggles the 1:1 view of the selected take (not maximize)
+    struct ImageGenUi {
+        int sheetHoverFrame = -10;  // the last frame the mouse was over a contact sheet
+        std::string spaceNode;      // whose
+        bool spaceToggle = false;   // Space was pressed there (the panel consumes it)
+    } imageGen;
     ViewerState viewer;
     CurveEditorState curves;
     DopeSheetState dope;
@@ -574,6 +580,11 @@ bool viewer3DHotkeys(App& app, UiState& ui);
 void drawViewer3DIn2D(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec2 p1, const ViewXf& xf, bool hovered);
 void drawCamTrackerPanel(App& app, UiState& ui, Node* n);
 void drawMLPanel(App& app, UiState& ui, Node* n);  // ML nodes: worker, models, run
+// The ML worker's row (state, Set up ML, HF token); `needPkg`: a Python package the node needs.
+void drawMLWorker(App& app, const std::string& needPkg);
+// ImageGen's panel (ImageGenPanel.cpp): Generate bar, contact sheet, source chip, mode, LoRA stack,
+// size presets. `knob` draws one of the node's schema knobs by name with the panel's own widgets.
+void drawImageGenPanel(App& app, UiState& ui, Node* n, const std::function<void(const char*)>& knob);
 void drawTrackerViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec2 p1, const ViewXf& xf, bool hovered);
 // The Tracker's row of tools over the viewer (add track, grab, track, keyframes, clear, centre).
 void drawTrackerToolbar(App& app, UiState& ui);

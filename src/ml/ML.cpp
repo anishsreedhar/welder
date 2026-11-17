@@ -543,6 +543,7 @@ JobStatus jobStatus(const std::string& key) {
         s.state = j.value("state", "");
         s.progress = j.value("progress", 0.0);
         s.message = j.value("message", "");
+        if (j.contains("detail") && j["detail"].is_object()) s.detail = j["detail"];
         return s;
     }
     if (exists(S(P(d) / "job.json"))) s.state = "queued";
@@ -765,5 +766,229 @@ std::shared_ptr<const NpyImage> outputFrame(const std::string& key, const std::s
     }
     return img;
 }
+
+std::shared_ptr<const NpyImage> liveFrame(const std::string& key, const std::string& rel) {
+    static std::mutex m;
+    static std::map<std::string, std::pair<fs::file_time_type, std::shared_ptr<const NpyImage>>> cache;
+    if (key.empty()) return nullptr;
+    const fs::path path = P(jobDir(key)) / P(rel);
+    std::error_code ec;
+    auto t = fs::last_write_time(path, ec);
+    if (ec) return nullptr;
+    const std::string id = key + "/" + rel;
+    {
+        std::lock_guard<std::mutex> l(m);
+        auto it = cache.find(id);
+        if (it != cache.end() && it->second.first == t) return it->second.second;
+    }
+    auto img = std::make_shared<NpyImage>();
+    if (!readNpy(S(path), *img)) return nullptr;  // being replaced right now: the next look gets it
+    std::lock_guard<std::mutex> l(m);
+    if (cache.size() > 32) cache.clear();
+    cache[id] = {t, img};
+    return img;
+}
+
+json jobFile(const std::string& key, const std::string& rel) {
+    if (key.empty()) return json();
+    return readJson(S(P(jobDir(key)) / P(rel)));
+}
+
+// ------------------------------------------------------------ ImageGen models
+namespace {
+
+std::vector<std::string> envList(const char* name) {
+    std::vector<std::string> out;
+    const char* e = std::getenv(name);
+    if (!e || !*e) return out;
+#ifdef _WIN32
+    const char sep = ';';
+#else
+    const char sep = ':';
+#endif
+    std::string s = e;
+    size_t a = 0;
+    while (a <= s.size()) {
+        size_t b = s.find(sep, a);
+        if (b == std::string::npos) b = s.size();
+        if (b > a) out.push_back(s.substr(a, b - a));
+        a = b + 1;
+    }
+    return out;
+}
+
+std::vector<std::string> jsonStrings(const json& j, const char* key) {
+    std::vector<std::string> v;
+    if (j.is_object() && j.contains(key) && j[key].is_array())
+        for (auto& x : j[key])
+            if (x.is_string() && !x.get<std::string>().empty()) v.push_back(x);
+    return v;
+}
+
+void addUnique(std::vector<std::string>& v, const std::vector<std::string>& more) {
+    for (auto& x : more)
+        if (std::find(v.begin(), v.end(), x) == v.end()) v.push_back(x);
+}
+
+int64_t mtimeSeconds(const fs::path& p) {
+    std::error_code ec;
+    auto t = fs::last_write_time(p, ec);
+    if (ec) return 0;
+    return (int64_t)std::chrono::duration_cast<std::chrono::seconds>(t.time_since_epoch()).count();
+}
+
+std::string relName(const fs::path& root, const fs::path& p) {
+    std::error_code ec;
+    fs::path r = fs::relative(p, root, ec);
+    std::string s = S(ec || r.empty() ? p.filename() : r);
+    std::replace(s.begin(), s.end(), '\\', '/');
+    return s;
+}
+
+bool isSafetensors(const fs::path& p) {
+    std::string e = S(p.extension());
+    for (auto& c : e) c = (char)std::tolower((unsigned char)c);
+    return e == ".safetensors" || e == ".sft";
+}
+
+// Diffusers folders (not descended into) and single files, at most `depth` levels below each root.
+void scanDir(const std::string& root, bool wantFolders, int depth, std::vector<ModelFile>& out) {
+    std::error_code ec;
+    const fs::path base = P(root);
+    if (!fs::is_directory(base, ec)) return;
+    std::vector<std::pair<fs::path, int>> stack = {{base, 0}};
+    std::vector<ModelFile> folders, files;
+    while (!stack.empty()) {
+        auto [dir, d] = stack.back();
+        stack.pop_back();
+        if (wantFolders && dir != base && fs::exists(dir / "model_index.json", ec)) {
+            ModelFile m;
+            m.name = relName(base, dir);
+            m.path = S(dir);
+            m.folder = true;
+            json idx = readJson(S(dir / "model_index.json"));
+            m.family = idx.is_object() ? idx.value("_class_name", std::string()) : std::string();
+            m.mtime = mtimeSeconds(dir / "model_index.json");
+            folders.push_back(std::move(m));
+            continue;
+        }
+        fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), endIt;
+        for (; !ec && it != endIt; it.increment(ec)) {
+            const fs::path& q = it->path();
+            const std::string fn = S(q.filename());
+            if (fn.empty() || fn[0] == '.') continue;
+            std::error_code e2;
+            if (it->is_directory(e2)) {
+                if (d < depth) stack.emplace_back(q, d + 1);
+            } else if (isSafetensors(q)) {
+                ModelFile m;
+                m.name = relName(base, q);
+                m.path = S(q);
+                m.size = (uint64_t)it->file_size(e2);
+                m.mtime = mtimeSeconds(q);
+                files.push_back(std::move(m));
+            }
+        }
+    }
+    auto byName = [](const ModelFile& a, const ModelFile& b) { return a.name < b.name; };
+    std::sort(folders.begin(), folders.end(), byName);
+    std::sort(files.begin(), files.end(), byName);
+    out.insert(out.end(), folders.begin(), folders.end());
+    out.insert(out.end(), files.begin(), files.end());
+}
+
+struct ScanCache {
+    std::mutex m;
+    double time = -1e9;
+    std::vector<ModelFile> ckpts, loras;
+};
+ScanCache& scanCache() {
+    static ScanCache c;
+    return c;
+}
+
+void rescanIfOld(bool force) {
+    auto& c = scanCache();
+    {
+        std::lock_guard<std::mutex> l(c.m);
+        if (!force && nowSeconds() - c.time < 5.0) return;
+    }
+    ImageGenDirs d = imageGenDirs();
+    std::vector<ModelFile> ck, lo;
+    auto keepFirst = [](std::vector<ModelFile>& v) {  // the same name in two folders: the first folder wins
+        std::vector<ModelFile> out;
+        for (auto& m : v)
+            if (std::none_of(out.begin(), out.end(), [&](const ModelFile& o) { return o.name == m.name; })) out.push_back(m);
+        v.swap(out);
+    };
+    for (auto& r : d.checkpoints) scanDir(r, true, 3, ck);
+    for (auto& r : d.loras) scanDir(r, false, 4, lo);
+    keepFirst(ck);
+    keepFirst(lo);
+    std::lock_guard<std::mutex> l(c.m);
+    c.ckpts.swap(ck);
+    c.loras.swap(lo);
+    c.time = nowSeconds();
+}
+
+std::optional<ModelFile> findIn(const std::vector<ModelFile>& v, const std::string& nameOrPath, bool folders) {
+    if (nameOrPath.empty()) return std::nullopt;
+    for (auto& m : v)
+        if (m.name == nameOrPath || m.path == nameOrPath) return m;
+    // an absolute path outside the folders
+    std::error_code ec;
+    fs::path p = P(nameOrPath);
+    if (!p.is_absolute() || !fs::exists(p, ec)) return std::nullopt;
+    ModelFile m;
+    m.name = nameOrPath;
+    m.path = nameOrPath;
+    if (fs::is_directory(p, ec)) {
+        if (!folders || !fs::exists(p / "model_index.json", ec)) return std::nullopt;
+        m.folder = true;
+        json idx = readJson(S(p / "model_index.json"));
+        m.family = idx.is_object() ? idx.value("_class_name", std::string()) : std::string();
+        m.mtime = mtimeSeconds(p / "model_index.json");
+    } else {
+        m.size = (uint64_t)fs::file_size(p, ec);
+        m.mtime = mtimeSeconds(p);
+    }
+    return m;
+}
+
+}  // namespace
+
+ImageGenDirs imageGenDirs() {
+    json j = readJson(S(P(home()) / "imagegen_dirs.json"));
+    ImageGenDirs d;
+    d.checkpoints = jsonStrings(j, "checkpoints");
+    d.loras = jsonStrings(j, "loras");
+    if (d.checkpoints.empty()) d.checkpoints = {S(P(installDir()) / "checkpoints")};
+    if (d.loras.empty()) d.loras = {S(P(installDir()) / "loras")};
+    addUnique(d.checkpoints, envList("WELDER_CHECKPOINTS"));
+    addUnique(d.loras, envList("WELDER_LORAS"));
+    return d;
+}
+
+void setImageGenDirs(const ImageGenDirs& d) {
+    std::error_code ec;
+    fs::create_directories(P(home()), ec);
+    writeFileAtomic(S(P(home()) / "imagegen_dirs.json"), json{{"checkpoints", d.checkpoints}, {"loras", d.loras}}.dump(1));
+    rescanIfOld(true);
+}
+
+std::vector<ModelFile> checkpoints(bool rescan) {
+    rescanIfOld(rescan);
+    std::lock_guard<std::mutex> l(scanCache().m);
+    return scanCache().ckpts;
+}
+
+std::vector<ModelFile> loras(bool rescan) {
+    rescanIfOld(rescan);
+    std::lock_guard<std::mutex> l(scanCache().m);
+    return scanCache().loras;
+}
+
+std::optional<ModelFile> findCheckpoint(const std::string& nameOrPath) { return findIn(checkpoints(), nameOrPath, true); }
+std::optional<ModelFile> findLora(const std::string& nameOrPath) { return findIn(loras(), nameOrPath, false); }
 
 }  // namespace strata::ml

@@ -236,6 +236,8 @@ void modelRow(App& app, const std::string& id) {
 
 }  // namespace
 
+void drawMLWorker(App& app, const std::string& needPkg) { workerSection(app, needPkg); }
+
 void drawMLPanel(App& app, UiState& ui, Node* n) {
     (void)ui;
     auto* m = dynamic_cast<mlnodes::MLNode*>(n);

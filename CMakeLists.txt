@@ -138,6 +138,7 @@ add_library(strata_core STATIC
   src/nodes/RetimeNodes.cpp
   src/nodes/Splat.cpp
   src/nodes/MLNodes.cpp
+  src/nodes/ImageGenNode.cpp
   src/nodes/ColorMgmtNodes.cpp
   src/color/Color.cpp
   src/ml/ML.cpp
@@ -351,6 +352,9 @@ if(Python3_FOUND)
   add_test(NAME ml_worker
            COMMAND ${Python3_EXECUTABLE} -m unittest tests/test_ml_worker.py
            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  add_test(NAME ml_imagegen
+           COMMAND ${Python3_EXECUTABLE} -m unittest tests/test_ml_imagegen.py
+           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
   add_test(NAME nk_importer
            COMMAND ${Python3_EXECUTABLE} -m unittest tests/test_nk2strata.py
            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
@@ -428,6 +432,7 @@ if(STRATA_BUILD_UI)
   src/ui/TrackMaskTool.cpp
   src/ui/AppML.cpp
   src/ui/MLPanel.cpp
+  src/ui/ImageGenPanel.cpp
   src/ui/CurveEditor.cpp
   src/ui/Splash.cpp
   ${WELDER_EMBEDDED}

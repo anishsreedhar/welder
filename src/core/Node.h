@@ -209,6 +209,10 @@ public:
     // Facts for the editor (file metadata, the file's format...); null by default.
     virtual json info(Engine& e, double frame) { (void)e; (void)frame; return json(); }
 
+    // The entries of a Choice knob whose list depends on the node or the machine (the checkpoints
+    // ImageGen finds on disk, ...). Asked for when the knob's schema has no options of its own.
+    virtual std::vector<std::string> knobChoices(const std::string& knob) const { (void)knob; return {}; }
+
     // Hash of parameters that affect the output (frame-aware).
     virtual uint64_t localHash(double frame) const;
     // For nodes whose frame f is built from every frame before it (Feedback, SurfaceLock,
