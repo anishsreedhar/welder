@@ -2170,7 +2170,7 @@ const std::vector<float>& keyerHistogram(App& app, Node* n) {
 void keyerRangeGraph(Ctx& c) {
     Node* n = c.node;
     const double frame = c.frame;
-    auto rg = n->params.vec<4>("range", frame, {0, 0, 1, 1});
+    auto rg = n->params.vec<4>("range", frame, {0, 1, 1, 1});
     float v[4] = {(float)rg[0], (float)rg[1], (float)rg[2], (float)rg[3]};
     static std::string dragKey;   // "<node>:<what>" while dragging
     static float dom0 = 0, dom1 = 1, startV[4], startX = 0;
@@ -3008,6 +3008,10 @@ void nodePanel(App& app, UiState& ui, Node* n, bool* keepOpen) {
     ImGui::PushFont(theme().medium, 0.0f);
     if (!ImGui::GetCurrentWindow()->SkipItems && app.panelsToExpand.erase(n->name)) ImGui::SetNextItemOpen(true);  // opened again (double-click...): expanded
     bool open = ImGui::CollapsingHeader((n->name + "###hdr").c_str(), keepOpen, ImGuiTreeNodeFlags_DefaultOpen);
+    if (keepOpen && !ImGui::GetCurrentWindow()->SkipItems) {  // (a hidden bin draws nothing: leave the state alone)
+        if (open) app.panelsCollapsed.erase(n->name);
+        else app.panelsCollapsed.insert(n->name);
+    }
     ImGui::PopFont();
     ImGui::PopStyleColor(2);
     if (keepOpen && ImGui::BeginPopupContextItem("panel_menu")) {  // (not on a floating panel itself)

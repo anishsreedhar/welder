@@ -130,6 +130,7 @@ public:
     std::set<std::string> selection;
     std::deque<std::string> panels;         // properties bin, most recent first
     std::set<std::string> panelsToExpand;   // just opened: shown expanded (even if collapsed before), the bin brought forward
+    std::set<std::string> panelsCollapsed;  // panels folded in the bin: their viewer overlays and tools are off (#29)
     int maxPanels = 6;
     std::string status;                     // one-line status message
     std::deque<std::string> log;            // messages panel
