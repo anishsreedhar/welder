@@ -440,7 +440,7 @@ class WorkerTests(unittest.TestCase):
                                                          "loras": [{"file": "/nope.safetensors", "weight": 1}]},
                            {"src": (frames[:9], layout[:9])})
             self.run_queue()
-            self.assertEqual(status(jd)["state"], "failed", status(jd))
+            self.assertEqual(status(jd)["state"], "error", status(jd))
             self.assertIn("LoRA not found", status(jd).get("error", "") + status(jd).get("message", ""))
         finally:
             ltx.generate, ltx.get_pipeline = old_g, old_p
@@ -472,7 +472,7 @@ class WorkerTests(unittest.TestCase):
         """The LTX node's preset menu (Schema.cpp) lists exactly the registry's IC-LoRA presets."""
         import re
         from strata_ml.models import registry
-        src = open(os.path.join(HERE, "..", "src", "ui", "Schema.cpp"), encoding="utf-8").read()
+        src = open(os.path.join(HERE, "..", "src", "core", "Schema.cpp"), encoding="utf-8").read()
         m = re.search(r'C\("preset", "IC-LoRA", "[^"]*",\s*\{([^}]*)\}', src)
         self.assertIsNotNone(m)
         menu = re.findall(r'"([^"]+)"', m.group(1))

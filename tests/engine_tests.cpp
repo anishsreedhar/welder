@@ -927,6 +927,67 @@ int main(int argc, char** argv) {
         ml::setHome("");
     });
 
+    test("LTX: Layout to Render, the style input, stages and the LoRA stack in the job spec", [&] {
+        namespace fs = std::filesystem;
+        if (!ml::registry().contains("ic_loras")) {
+            std::printf("    (no ml package next to the tests: skipped)\n");
+            return;
+        }
+        auto root = tmp / "ltx_node";
+        fs::remove_all(root);
+        auto lo = root / "loras";
+        fs::create_directories(lo);
+        std::ofstream(lo / "anime.safetensors") << "x";
+        ml::setHome((root / "home").string());
+        ml::setImageGenDirs({{(root / "checkpoints").string()}, {lo.string()}});
+        ml::loras(true);
+        auto c = comp(json::array({
+            {{"name", "Clay"}, {"type", "Constant"}, {"params", {{"color", {0.5, 0.5, 0.5, 1}}}}},
+            {{"name", "Look"}, {"type", "Constant"}, {"params", {{"color", {1, 0, 0, 1}}}}},
+            {{"name", "L"}, {"type", "LTX"}, {"params", {{"preset", "Layout to Render"}, {"range", "custom"}, {"first", 5}, {"last", 40}}}},
+        }));
+        auto* n = dynamic_cast<mlnodes::MLNode*>(c->find("L"));
+        CHECK(n != nullptr);
+        if (!n) return;
+        Engine e;
+        CHECK(n->maxInputs() == 3 && n->inputLabel(0) == "layout" && n->inputLabel(1) == "mask" && n->inputLabel(2) == "style");
+        CHECK(n->spec("main", e).error.find("src") != std::string::npos);
+        c->setInput(n, 0, c->find("Clay"));
+        c->setInput(n, 2, c->find("Look"));
+        auto s = n->spec("main", e);
+        CHECK(s.error.empty());
+        CHECK(s.first == 5 && s.last == 40);
+        auto style = std::find_if(s.inputs.begin(), s.inputs.end(), [](const mlnodes::InputSpec& i) { return i.name == "style"; });
+        CHECK(style != s.inputs.end() && style->index == 2 && !style->required && style->frame == 5);
+        CHECK(s.params["two_stage"] == true && s.params["stage_2_ic_lora"] == true);  // the preset's recipe
+        CHECK(s.params["style_frame"] == 5 && s.params["style_strength"] == 1.0 && s.params["chain_windows"] == true);
+        CHECK(std::find(s.models.begin(), s.models.end(), "ltx-ic-layout") != s.models.end());
+        CHECK(s.params["loras"].empty());
+        // the stages knob overrides the preset; old comps' two_stage checkbox still counts
+        n->params.data["stages"] = "one";
+        CHECK(n->spec("main", e).params["two_stage"] == false);
+        n->params.data.erase("stages");
+        n->params.data["two_stage"] = false;
+        s = n->spec("main", e);
+        CHECK(s.params["two_stage"] == false && s.params["stage_2_ic_lora"] == false);
+        n->params.data.erase("two_stage");
+        n->params.data["preset"] = "Relight";  // a one-stage preset: src is called src
+        CHECK(n->spec("main", e).params["two_stage"] == false && n->inputLabel(0) == "src");
+        n->params.data["preset"] = "Layout to Render";
+        // the LoRA stack: enabled rows, resolved to files
+        imagegen::setLoras(n->params, {{true, "anime.safetensors", 0.7}, {false, "anime.safetensors", 1.0}});
+        s = n->spec("main", e);
+        CHECK(s.error.empty() && s.params["loras"].size() == 1);
+        if (s.params["loras"].size() == 1) {
+            CHECK(s.params["loras"][0]["file"] == (lo / "anime.safetensors").string());
+            CHECK_NEAR(s.params["loras"][0]["weight"].get<double>(), 0.7, 1e-9);
+        }
+        CHECK((n->knobChoices("lora") == std::vector<std::string>{"anime.safetensors"}));
+        imagegen::setLoras(n->params, {{true, "gone.safetensors", 1.0}});
+        CHECK(n->spec("main", e).error.find("isn't in the LoRAs folder") != std::string::npos);
+        ml::setHome("");
+    });
+
     test("ImageGen: modes, job spec, seeds, takes and output", [&] {
         namespace fs = std::filesystem;
         auto root = tmp / "imagegen_node";

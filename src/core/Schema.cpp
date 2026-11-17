@@ -48,10 +48,6 @@ KnobDef Ocio(const char* n, const char* l, Knob t) { return {n, l, t, "", 0, 1, 
 
 constexpr int kImageGenMinSize = 256;
 
-KnobDef Tip(KnobDef k, const char* tip) {
-    k.tip = tip;
-    return k;
-}
 KnobDef When(KnobDef k, const char* cond) {
     k.when = cond;
     return k;
