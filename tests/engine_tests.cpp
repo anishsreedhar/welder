@@ -968,6 +968,15 @@ int main(int argc, char** argv) {
         CHECK(g->effectiveMode() == imagegen::Mode::Inpaint);
         s = g->spec("main", e);
         CHECK(s.inputs.size() == 2 && s.inputs[1].name == "mask" && s.params["mask_channel"] == "alpha");
+        // ---- the reference input: a FLUX.2 reference in any mode, never the base
+        CHECK(g->maxInputs() == 3 && g->inputLabel(2) == "reference");
+        c->setInput(g, 2, c->find("Src"));
+        CHECK(g->effectiveMode() == imagegen::Mode::Inpaint);  // the mode doesn't change
+        s = g->spec("main", e);
+        CHECK(s.inputs.size() == 3 && std::any_of(s.inputs.begin(), s.inputs.end(), [](const mlnodes::InputSpec& i) {
+                  return i.name == "ref" && i.index == 2 && i.required;
+              }));
+        c->setInput(g, 2, nullptr);
         g->params.data["mode"] = "Txt2Img";  // an explicit mode wins
         CHECK(g->spec("main", e).inputs.empty());
         g->params.data["mode"] = "Inpaint";
@@ -1077,6 +1086,7 @@ int main(int argc, char** argv) {
 
         // ---- Branch to New Node: a new ImageGen below, the take as its source, same prompt and LoRAs
         g->ui = {{"x", 100}, {"y", 200}};
+        c->setInput(g, 2, c->find("Matte"));
         auto* b = imagegen::branchTakeToNewNode(*c, *g, key, 1);
         CHECK(b != nullptr && b != g && b->type == "ImageGen");
         if (b) {
@@ -1088,10 +1098,12 @@ int main(int argc, char** argv) {
             CHECK(bp.active && bp.found && bp.job == key && bp.index == 1 && bp.seed == 101);
             CHECK(b->effectiveMode() == imagegen::Mode::Img2Img && b->spec("main", e).error.empty());
             CHECK(b->history().empty() && b->result("main").empty() && !b->input(0));
+            CHECK(b->input(2) == g->input(2));  // the same reference (or none)
             auto* b2 = imagegen::branchTakeToNewNode(*c, *g, key, 0);  // a second branch goes below the first
             CHECK(b2 && b2->ui.value("y", 0.0) > b->ui.value("y", 0.0));
         }
         CHECK(!imagegen::branchTakeToNewNode(*c, *g, key, 7));  // no such take
+        c->setInput(g, 2, nullptr);
 
         g->clearPromoted();
         CHECK(g->effectiveMode() == imagegen::Mode::Txt2Img);

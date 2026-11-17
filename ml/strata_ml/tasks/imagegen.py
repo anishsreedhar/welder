@@ -13,8 +13,9 @@ Modes
            back to the source noised to the current sigma, then the decoded
            image is composited over the source with the (grown, feathered)
            mask so unmasked pixels stay exactly as they were.
-  use_reference (any mode) also hands the source to FLUX.2 as a reference
-           image, the model's own editing / style conditioning.
+  references (any mode) the "ref" input (a separate image: a style, a character, a product to
+           keep) and, with use_reference, the source too, go to FLUX.2 as reference images, the
+           model's own editing / style conditioning. A reference never becomes the base image.
 
 What stays in memory between jobs (the worker is one long-running process):
   the pipeline, as long as checkpoint + base + dtype + offload are unchanged;
@@ -701,6 +702,27 @@ def _source(ctx, p):
     return src.rgb(src.frames[0]).astype(np.float32)
 
 
+MAX_REF_SIDE = 2048  # FLUX.2 scales references down to about a megapixel itself: no need to send more
+
+
+def _references(ctx, p, src):
+    """FLUX.2 reference images, display-referred [0,1] RGB: the "ref" input, then the (fitted) source
+    when use_reference is on."""
+    out = []
+    r = ctx.input("ref")
+    if r is not None:
+        rgb = np.clip(srgb_encode(r.rgb(r.frames[0]).astype(np.float32)), 0, 1)
+        h, w = rgb.shape[:2]
+        s = MAX_REF_SIDE / max(h, w)
+        if s < 1:
+            import cv2
+            rgb = cv2.resize(rgb, (max(1, round(w * s)), max(1, round(h * s))), interpolation=cv2.INTER_AREA)
+        out.append(rgb)
+    if src is not None and p.get("use_reference"):
+        out.append(src)
+    return out
+
+
 def _mask(ctx, p):
     m = ctx.input("mask")
     if m is None:
@@ -765,7 +787,7 @@ def run(ctx, p):
         if int(p.get("preview_every", 1)) > 0 else None
     watch = CancelWatch(ctx, pipe.transformer)
     cap = X0Capture(pipe.transformer, h * w) if preview else None
-    ref = [Image.fromarray((src * 255 + 0.5).astype(np.uint8))] if (src is not None and p.get("use_reference")) else None
+    ref = [Image.fromarray((r * 255 + 0.5).astype(np.uint8)) for r in _references(ctx, p, src)] or None
     detail = {"steps": steps, "batch_size": batch, "takes_done": 0, "preview_seq": 0, "seeds": [seed0 + i for i in range(batch)]}
     takes = []
     t_start = time.time()
@@ -843,7 +865,7 @@ def run(ctx, p):
                 "index": bi, "seed": seed, "width": W, "height": H, "mode": mode, "steps": steps, "sampler": sampler,
                 "guidance": float(p.get("guidance", 4.0)), "denoise": denoise if mode != "txt2img" else 1.0,
                 "prompt": prompt, "negative_prompt": negative if info["negative"] else "",
-                "checkpoint": p.get("checkpoint", ""), "loras": applied, "reference": bool(ref),
+                "checkpoint": p.get("checkpoint", ""), "loras": applied, "reference": bool(ref), "references": len(ref or []),
                 "seconds": round(time.time() - t0, 2),
             })
             detail["takes_done"] = bi + 1

@@ -584,6 +584,20 @@ void modeMenu(App& app, ImageGenNode& g) {
     }
 }
 
+// ------------------------------------------------------------------ reference
+// What FLUX.2 gets as reference images: the reference input, and the source when use_reference is on.
+void referenceRow(ImageGenNode& g) {
+    kit::rowLabel("reference", "A separate image FLUX.2 follows (a style, a character, a product): connect the node's "
+                               "reference input. It never becomes the base image and doesn't change the mode.");
+    std::string refs;
+    if (Node* r = g.input(2)) refs = r->name;
+    if (g.params.flag("use_reference", false) && (g.input(0) || g.promotedTake().active))
+        refs += refs.empty() ? "the source" : " + the source";
+    ImGui::AlignTextToFramePadding();
+    if (refs.empty()) ImGui::TextDisabled("none (connect the reference input)");
+    else ImGui::TextUnformatted(refs.c_str());
+}
+
 // ------------------------------------------------------------------ LoRA stack
 void loraStack(App& app, ImageGenNode& g) {
     auto rows = imagegen::lorasOf(g.params);
@@ -736,6 +750,7 @@ void drawImageGenPanel(App& app, UiState& ui, Node* n, const std::function<void(
         knob("positive_prompt");
         knob("negative_prompt");
         modeMenu(app, *g);
+        referenceRow(*g);
         ImGui::BeginDisabled(g->effectiveMode() == imagegen::Mode::Txt2Img);
         knob("denoise_strength");
         ImGui::EndDisabled();
