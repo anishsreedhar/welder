@@ -2046,7 +2046,7 @@ std::vector<NodeDef> build() {
                       Adv(B("invert_mask", "invert mask", false)), Adv(I("mask_grow", "grow", 8, -64, 64)),
                       Adv(I("mask_feather", "feather", 8, 0, 64)),
                       Adv(Div("Memory")), Adv(C("dtype", "precision", "bf16", {"bf16", "fp16", "fp32"})),
-                      Adv(C("offload", "offload", "model", {"model", "sequential", "none"})),
+                      Adv(C("offload", "offload", "auto", {"auto", "model", "group", "sequential", "none"})),
                       Adv(B("vae_tiling", "VAE tiling", false)),
                       Adv(Div("Preview")), Adv(I("preview_every", "every n steps", 1, 0, 10)),
                       Adv(I("preview_size", "size", 512, 64, 1024))},

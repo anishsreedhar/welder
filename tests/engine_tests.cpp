@@ -1057,6 +1057,42 @@ int main(int argc, char** argv) {
         s = g->spec("main", e);
         CHECK(s.error.empty() && s.inputs.empty() && s.params["source_file"].get<std::string>().find("take.0.npy") != std::string::npos);
         CHECK(g->matchInput(e) && g->params.num("width", 0) == 256 && g->params.num("height", 0) == 256);  // 32 x 16, snapped
+        // ---- the contact sheet's read accessors
+        CHECK(g->selectedTakeIndex() == std::optional<int>(1));  // (take 9, clamped)
+        CHECK(g->selectedTakeIndex(key) == std::optional<int>(1));
+        CHECK(!g->selectedTakeIndex("another-run"));
+        imagegen::PromotedTake pt = g->promotedTake();
+        CHECK(pt.active && pt.found && pt.job == key && pt.index == 0 && pt.seed == 100);
+        g->promoteTake("gone-run", 3);  // its run was cleared from the cache: still active, seed unknown
+        pt = g->promotedTake();
+        CHECK(pt.active && !pt.found && pt.index == 3);
+        // promoting turns a denoise still at 1.0 down to 0.55 (refine the take, don't replace it) ...
+        g->params.data["denoise_strength"] = 1.0;
+        g->promoteTake(key, 1);
+        CHECK(g->params.num("denoise_strength", 0) == imagegen::kRefineDenoise);
+        // ... and leaves one the user set alone
+        g->params.data["denoise_strength"] = 0.3;
+        g->promoteTake(key, 0);
+        CHECK(g->params.num("denoise_strength", 0) == 0.3);
+
+        // ---- Branch to New Node: a new ImageGen below, the take as its source, same prompt and LoRAs
+        g->ui = {{"x", 100}, {"y", 200}};
+        auto* b = imagegen::branchTakeToNewNode(*c, *g, key, 1);
+        CHECK(b != nullptr && b != g && b->type == "ImageGen");
+        if (b) {
+            CHECK(b->ui.value("x", 0.0) == 100 && b->ui.value("y", 0.0) > 200);
+            CHECK(b->params.num("denoise_strength", 0) == imagegen::kRefineDenoise);
+            CHECK(b->params.str("positive_prompt", "") == "a red house" && b->params.str("checkpoint", "") == "flux2-klein");
+            CHECK(imagegen::lorasOf(b->params).size() == imagegen::lorasOf(g->params).size());
+            imagegen::PromotedTake bp = b->promotedTake();
+            CHECK(bp.active && bp.found && bp.job == key && bp.index == 1 && bp.seed == 101);
+            CHECK(b->effectiveMode() == imagegen::Mode::Img2Img && b->spec("main", e).error.empty());
+            CHECK(b->history().empty() && b->result("main").empty() && !b->input(0));
+            auto* b2 = imagegen::branchTakeToNewNode(*c, *g, key, 0);  // a second branch goes below the first
+            CHECK(b2 && b2->ui.value("y", 0.0) > b->ui.value("y", 0.0));
+        }
+        CHECK(!imagegen::branchTakeToNewNode(*c, *g, key, 7));  // no such take
+
         g->clearPromoted();
         CHECK(g->effectiveMode() == imagegen::Mode::Txt2Img);
 
