@@ -432,6 +432,7 @@ if(STRATA_BUILD_UI)
   src/ui/TrackMaskTool.cpp
   src/ui/AppML.cpp
   src/ui/MLPanel.cpp
+  src/ui/ImageGenPanel.cpp
   src/ui/CurveEditor.cpp
   src/ui/Splash.cpp
   ${WELDER_EMBEDDED}

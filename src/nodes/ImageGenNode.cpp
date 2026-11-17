@@ -124,6 +124,28 @@ int ImageGenNode::takeIndex() const {
     return n > 0 ? std::clamp(t, 0, n - 1) : 0;
 }
 
+std::optional<int> ImageGenNode::selectedTakeIndex(const std::string& key) const {
+    const std::string res = result("main");
+    if (res.empty() || (!key.empty() && key != res)) return std::nullopt;
+    if (takes().empty()) return std::nullopt;
+    return takeIndex();
+}
+
+PromotedTake ImageGenNode::promotedTake() const {
+    PromotedTake p;
+    auto pr = promoted();
+    if (!pr) return p;
+    p.active = true;
+    p.job = pr->first;
+    p.index = pr->second;
+    for (auto& t : takes(pr->first))
+        if (t.index == pr->second) {
+            p.seed = t.seed;
+            p.found = true;
+        }
+    return p;
+}
+
 std::vector<std::string> ImageGenNode::history() const { return params.strList("history"); }
 
 bool ImageGenNode::running() const {
@@ -174,6 +196,7 @@ void ImageGenNode::selectTake(int index, const std::string& key) {
 void ImageGenNode::promoteTake(const std::string& key, int index) {
     if (key.empty()) return;
     params.data["promoted"] = {{"job", key}, {"take", std::max(0, index)}};
+    if (params.num("denoise_strength", 0, 0.75) >= 0.999) params.data["denoise_strength"] = kRefineDenoise;
 }
 
 void ImageGenNode::clearPromoted() { params.data.erase("promoted"); }
@@ -235,6 +258,39 @@ void ImageGenNode::resultAttached(const std::string&, const std::string& key) {
     params.data["history"] = h;
     int n = (int)takes(key).size();
     if ((int)params.num("take", 0, 0) >= n) params.data["take"] = 0;
+}
+
+json ImageGenNode::branchParams(const std::string& key, int index) const {
+    json p = params.data.is_object() ? params.data : json::object();
+    for (const char* k : {"ml", "history", "take", "promoted"}) p.erase(k);
+    p["promoted"] = {{"job", key}, {"take", std::max(0, index)}};
+    p["mode"] = "Auto";  // a promoted take and no mask: Img2Img
+    p["denoise_strength"] = kRefineDenoise;
+    p["batch_count"] = params.num("batch_count", 0, 1);
+    return p;
+}
+
+ImageGenNode* branchTakeToNewNode(Comp& c, ImageGenNode& from, const std::string& key0, int index) {
+    const std::string key = key0.empty() ? from.result("main") : key0;
+    if (key.empty()) return nullptr;
+    auto ts = from.takes(key);
+    if (std::none_of(ts.begin(), ts.end(), [&](const Take& t) { return t.index == index; })) return nullptr;
+    // below `from`, past anything already hanging under it (the graph runs top to bottom)
+    const double x = from.ui.value("x", 0.0);
+    double y = from.ui.value("y", 0.0) + 90;
+    for (bool moved = true; moved;) {
+        moved = false;
+        for (auto& n : c.nodes)
+            if (n.get() != &from && n->group == from.group && std::fabs(n->ui.value("x", 0.0) - x) < 60 &&
+                std::fabs(n->ui.value("y", 0.0) - y) < 40) {
+                y += 70;
+                moved = true;
+            }
+    }
+    Node* n = c.addNode("ImageGen", from.name + "_take" + std::to_string(index + 1), from.branchParams(key, index),
+                        {{"x", std::round(x)}, {"y", std::round(y)}});
+    n->group = from.group;  // no inputs: the take is the source, so Auto runs Img2Img on it
+    return dynamic_cast<ImageGenNode*>(n);
 }
 
 // ================================================================= pixels
@@ -330,7 +386,7 @@ JobSpec ImageGenNode::spec(const std::string&, Engine&) {
         }
     }
     p["dtype"] = params.str("dtype", "bf16");
-    p["offload"] = params.str("offload", "model");
+    p["offload"] = params.str("offload", "auto");
     p["vae_tiling"] = params.flag("vae_tiling", false);
 
     // ---- prompts and sampling

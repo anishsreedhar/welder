@@ -114,6 +114,72 @@ def make_lora(pipe, path, seed):
     pipe.transformer.delete_adapters("tmp")
 
 
+def to_bfl(sd):
+    """A Diffusers FLUX.2 transformer state dict in the original BFL / ComfyUI naming (the inverse of
+    Diffusers' convert_flux2_transformer_checkpoint_to_diffusers), for the single-file tests."""
+    import re
+    simple = {"x_embedder": "img_in", "context_embedder": "txt_in",
+              "time_guidance_embed.timestep_embedder.linear_1": "time_in.in_layer",
+              "time_guidance_embed.timestep_embedder.linear_2": "time_in.out_layer",
+              "time_guidance_embed.guidance_embedder.linear_1": "guidance_in.in_layer",
+              "time_guidance_embed.guidance_embedder.linear_2": "guidance_in.out_layer",
+              "double_stream_modulation_img.linear": "double_stream_modulation_img.lin",
+              "double_stream_modulation_txt.linear": "double_stream_modulation_txt.lin",
+              "single_stream_modulation.linear": "single_stream_modulation.lin",
+              "proj_out": "final_layer.linear"}
+    double = {"attn.norm_q": "img_attn.norm.query_norm", "attn.norm_k": "img_attn.norm.key_norm",
+              "attn.to_out.0": "img_attn.proj", "ff.linear_in": "img_mlp.0", "ff.linear_out": "img_mlp.2",
+              "attn.norm_added_q": "txt_attn.norm.query_norm", "attn.norm_added_k": "txt_attn.norm.key_norm",
+              "attn.to_add_out": "txt_attn.proj", "ff_context.linear_in": "txt_mlp.0", "ff_context.linear_out": "txt_mlp.2"}
+    single = {"attn.to_qkv_mlp_proj": "linear1", "attn.to_out": "linear2", "attn.norm_q": "norm.query_norm",
+              "attn.norm_k": "norm.key_norm"}
+    out, qkv = {}, {}
+    for k, v in sd.items():
+        name, kind = k.rsplit(".", 1)
+        norm = lambda n: kind if not n.endswith(("norm_q", "norm_k", "norm_added_q", "norm_added_k")) else "scale"  # noqa: E731
+        if name == "norm_out.linear":
+            sh, sc = v.chunk(2, dim=0)
+            out["final_layer.adaLN_modulation.1." + kind] = torch.cat([sc, sh], 0)
+        elif name in simple:
+            out[simple[name] + "." + kind] = v
+        elif (m := re.match(r"transformer_blocks\.(\d+)\.(.+)$", name)):
+            i, rest = m.groups()
+            q = re.match(r"attn\.(to|add)_(q|k|v)(_proj)?$", rest)
+            if q:
+                side = "img" if q.group(1) == "to" else "txt"
+                qkv.setdefault((f"double_blocks.{i}.{side}_attn.qkv.{kind}"), {})["qkv".index(q.group(2))] = v
+            else:
+                out[f"double_blocks.{i}.{double[rest]}.{norm(rest)}"] = v
+        elif (m := re.match(r"single_transformer_blocks\.(\d+)\.(.+)$", name)):
+            i, rest = m.groups()
+            out[f"single_blocks.{i}.{single[rest]}.{norm(rest)}"] = v
+        else:
+            raise KeyError(k)
+    for k, parts in qkv.items():
+        out[k] = torch.cat([parts[0], parts[1], parts[2]], 0)
+    return out
+
+
+def comfy_fp8(sd, prefix="model.diffusion_model.", per_channel=False):
+    """ComfyUI-style "fp8 mixed": 2-D weights as float8_e4m3fn with a weight_scale, a comfy_quant marker
+    and an input_scale; everything else bf16; all keys under `prefix`."""
+    out = {}
+    marker = torch.tensor(list(json.dumps({"format": "float8_e4m3fn"}).encode()), dtype=torch.uint8)
+    for k, v in sd.items():
+        if k.endswith(".weight") and v.ndim == 2 and not k.startswith(("img_in", "final_layer")):
+            amax = v.abs().amax(dim=1) if per_channel else v.abs().max()
+            scale = (amax / 448.0).clamp(min=1e-12).float()
+            q = (v.float() / (scale.reshape(-1, 1) if per_channel else scale)).to(torch.float8_e4m3fn)
+            base = k[: -len(".weight")]
+            out[prefix + k] = q
+            out[prefix + base + ".weight_scale"] = scale
+            out[prefix + base + ".input_scale"] = torch.tensor(1.0)
+            out[prefix + base + ".comfy_quant"] = marker.clone()
+        else:
+            out[prefix + k] = v.to(torch.bfloat16) if v.is_floating_point() else v
+    return out
+
+
 def write_job(home, key, params, inputs=None):
     jd = os.path.join(home, "jobs", key)
     os.makedirs(os.path.join(jd, "in"), exist_ok=True)
@@ -154,7 +220,8 @@ class ImageGenTests(unittest.TestCase):
         # a transformer-only single file (as finetunes are often shared) for the dev base
         from safetensors.torch import save_file
         cls.single = os.path.join(cls.ckpts, "flux2-dev-finetune.safetensors")
-        save_file({k: v.contiguous() for k, v in dev.transformer.state_dict().items()}, cls.single)
+        cls.dev_transformer_sd = {k: v.detach().clone() for k, v in dev.transformer.state_dict().items()}
+        save_file({k: v.contiguous() for k, v in cls.dev_transformer_sd.items()}, cls.single)
         cls.lora_a = os.path.join(cls.loras, "style_a.safetensors")
         cls.lora_b = os.path.join(cls.loras, "style_b.safetensors")
         make_lora(dev, cls.lora_a, 1)
@@ -232,6 +299,64 @@ class ImageGenTests(unittest.TestCase):
         self.assertEqual(self.ig._STATE["info"]["folder"], self.dev)
         ref, _ = self.run_job({"seed": 3})
         self.assertLess(np.abs(self.take(jd) - self.take(ref)).max(), 1e-4, "same weights as the folder's transformer")
+
+    def test_comfy_fp8_single_file(self):
+        """Comfy-Org / BFL single files: original naming, "model.diffusion_model." prefix, fp8 with scales."""
+        from safetensors.torch import save_file
+        ref_sd = {k: v.detach().float() for k, v in self.dev_transformer_sd.items()}
+        for per_channel in (False, True):
+            path = os.path.join(self.ckpts, f"flux2_dev_fp8mixed{'_pc' if per_channel else ''}.safetensors")
+            save_file({k: v.contiguous() for k, v in comfy_fp8(to_bfl(ref_sd), per_channel=per_channel).items()}, path)
+            self.assertEqual(self.ig.pick_base(path, [self.klein, self.dev]), self.dev)
+            jd, r = self.run_job({"checkpoint": path, "base": "auto", "base_candidates": [self.klein, self.dev], "seed": 3})
+            self.assertEqual(self.ig._STATE["info"]["folder"], self.dev)
+            ref, _ = self.run_job({"seed": 3})
+            other, _ = self.run_job({"seed": 4})
+            err = np.abs(self.take(jd) - self.take(ref)).mean()
+            self.assertLess(err, 0.25 * np.abs(self.take(other) - self.take(ref)).mean(),
+                            f"fp8 weights are scaled back: close to the bf16 model ({err})")
+
+    def test_klein_file_picks_distilled_or_base_folder(self):
+        from safetensors.torch import save_file
+        distilled = os.path.join(self.tmp, "klein-distilled")
+        pipe = build_klein(distilled, distilled=True)
+        sd = comfy_fp8(to_bfl({k: v.detach().float() for k, v in pipe.transformer.state_dict().items()}))
+        for name, want in (("flux-2-klein-4b-fp8.safetensors", distilled), ("flux-2-klein-base-4b-fp8.safetensors", self.klein)):
+            path = os.path.join(self.tmp, name)
+            save_file({k: v.contiguous() for k, v in sd.items()}, path)
+            self.assertEqual(self.ig.pick_base(path, [self.dev, self.klein, distilled]), want, name)
+
+    def test_read_transformer_file_dequantises(self):
+        from safetensors.torch import save_file
+        sd = {"a.weight": torch.randn(8, 4), "a.bias": torch.randn(8)}
+        path = os.path.join(self.tmp, "q.safetensors")
+        save_file(comfy_fp8(sd, per_channel=True), path)
+        out = self.ig.read_transformer_file(path, torch.float32)
+        self.assertEqual(sorted(out), ["a.bias", "a.weight"], "prefix dropped, scales and markers gone")
+        rel = (out["a.weight"] - sd["a.weight"]).abs().max() / sd["a.weight"].abs().max()
+        self.assertLess(float(rel), 0.08)
+
+    def test_packed_4bit_file_is_refused(self):
+        from safetensors.torch import save_file
+        path = os.path.join(self.tmp, "nvfp4.safetensors")
+        marker = torch.tensor(list(json.dumps({"format": "nvfp4"}).encode()), dtype=torch.uint8)
+        save_file({"model.diffusion_model.a.weight": torch.zeros(8, 2, dtype=torch.uint8),
+                   "model.diffusion_model.a.comfy_quant": marker}, path)
+        with self.assertRaisesRegex(RuntimeError, "nvfp4"):
+            self.ig.read_transformer_file(path, torch.bfloat16)
+
+    def test_offload_plan(self):
+        gb = 2 ** 30
+        plan = self.ig.plan_offload
+        # FLUX.2 [dev] bf16 on 24 GB: neither the 32B transformer nor the 24B text encoder fits -> group
+        self.assertEqual(plan("auto", {"transformer": 64 * gb, "text_encoder": 48 * gb, "vae": gb // 4}, 24 * gb), "group")
+        # [klein] 4B on 24 GB: one component at a time fits -> model offload
+        self.assertEqual(plan("auto", {"transformer": 8 * gb, "text_encoder": 8 * gb, "vae": gb // 4}, 24 * gb), "model")
+        # "none" that can't fit falls back instead of running out of memory
+        self.assertEqual(plan("none", {"transformer": 10 * gb, "text_encoder": 10 * gb}, 24 * gb), "model")
+        self.assertEqual(plan("none", {"transformer": 4 * gb, "text_encoder": 2 * gb}, 24 * gb), "none")
+        self.assertEqual(plan("sequential", {"transformer": 4 * gb}, 24 * gb), "sequential")
+        self.assertEqual(plan("auto", {"transformer": 4 * gb}, 0), "none", "no GPU")
 
     def test_samplers(self):
         for s in self.ig.SAMPLERS:

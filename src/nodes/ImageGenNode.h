@@ -24,7 +24,7 @@
 //   fit               "crop" | "pad" | "stretch": how the source meets width x height
 //   mask_channel ("alpha" | "luminance"), invert_mask, mask_grow (px), mask_feather (px)
 //   use_reference     also hand the source to FLUX.2 as a reference image
-//   dtype ("bf16" | "fp16" | "fp32"), offload ("model" | "sequential" | "none"), vae_tiling
+//   dtype ("bf16" | "fp16" | "fp32"), offload ("auto" | "model" | "group" | "sequential" | "none"), vae_tiling
 //   preview_every     steps between live previews (0 = none), preview_size (px)
 //   promoted          {"job": key, "take": i} or null: a take used as the source
 //   history           [job keys], newest first (the node's finished runs)
@@ -38,6 +38,10 @@
 
 #include "../ml/ML.h"
 #include "MLNodes.h"
+
+namespace strata {
+class Comp;
+}
 
 namespace strata::imagegen {
 
@@ -71,6 +75,19 @@ struct Take {
     int width = 0, height = 0;
     json meta;  // everything it was made with: prompt, steps, sampler, guidance, denoise, loras, seconds, ...
 };
+
+// The take the node uses as its source ("Active Source: Take #X (Seed Y)").
+struct PromotedTake {
+    bool active = false;  // a take is promoted
+    std::string job;      // its run
+    int index = 0;        // 0-based (the UI shows index + 1)
+    uint32_t seed = 0;
+    bool found = false;   // its run is still in the ML cache (seed is only known then)
+};
+
+// What branchTakeToNewNode sets the new node's denoise to, and what promoting a take sets it to
+// when it was still at 1.0 (a take is a finished image: refine it, don't replace it).
+constexpr double kRefineDenoise = 0.55;
 
 // A running job, for the node's panel: steps of the current image, and where the batch is.
 struct Live {
@@ -112,6 +129,10 @@ public:
     // A take's pixels (linear Rec.709 RGBA, top row first, full resolution), from the ML cache.
     std::shared_ptr<const ml::NpyImage> takeImage(int index, const std::string& key = {}) const;
     int takeIndex() const;                      // the take the node outputs (clamped)
+    // The take of run `key` (default: the current result) the node outputs; nullopt when that run
+    // isn't the node's result (or has no takes). For highlighting the selected tile.
+    std::optional<int> selectedTakeIndex(const std::string& key = {}) const;
+    PromotedTake promotedTake() const;          // the promoted take, with its seed
     std::vector<std::string> history() const;   // finished runs, newest first
     Live live() const;                          // the submitted job (if it isn't the result yet)
     std::shared_ptr<const ml::NpyImage> livePreview() const;  // display-referred RGB, small
@@ -119,7 +140,7 @@ public:
 
     // ---------------------------------------------------------------- edits (call inside App::edit)
     void selectTake(int index, const std::string& key = {});   // a take of another run makes that run the result
-    void promoteTake(const std::string& key, int index);       // use a take as the source
+    void promoteTake(const std::string& key, int index);       // use a take as the source (denoise 1.0 -> 0.55)
     void clearPromoted();
     void setSize(int width, int height);       // snapped
     bool matchInput(Engine& e);                // width x height = the source's (snapped); false without one
@@ -127,8 +148,17 @@ public:
     void removeLora(int row);
     void advanceSeed();                        // what seed_mode does after each run
 
+    // The params a branch starts from: everything but the node's runs, its take and its source.
+    json branchParams(const std::string& key, int index) const;
+
 private:
     std::string takesKey(const std::string& key) const { return key.empty() ? result("main") : key; }
 };
+
+// Editor action: a new ImageGen node below `from` in the graph whose source is take `index` of run
+// `key` (promoted, so Auto runs Img2Img on it), with the same prompts, model, LoRA stack and
+// settings, and denoise_strength 0.55. Call inside App::edit; returns the new node (null if `from`
+// has no such take).
+ImageGenNode* branchTakeToNewNode(Comp& c, ImageGenNode& from, const std::string& key, int index);
 
 }  // namespace strata::imagegen

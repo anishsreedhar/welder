@@ -311,6 +311,10 @@ void handleHotkeys(App& app, UiState& ui) {
     }
     if (key(ImGuiKey_F12, false, true)) { ui.resetWorkspace = true; return; }
     if (key(ImGuiKey_F12)) { app.clearCaches(); return; }
+    if (key(ImGuiKey_Space) && ImGui::GetFrameCount() - ui.imageGen.sheetHoverFrame <= 1) {  // ImageGen: 1:1 take
+        ui.imageGen.spaceToggle = true;
+        return;
+    }
     if (key(ImGuiKey_Space)) { ui.toggleMaximize = panel.empty() ? std::string("Viewer") : panel; return; }
     if (key(ImGuiKey_S, false, true)) { ui.showPrefs = true; return; }
     if (key(ImGuiKey_I, true)) { ui.newViewer = app.newViewer(); return; }

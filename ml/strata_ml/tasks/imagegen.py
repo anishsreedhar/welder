@@ -26,6 +26,19 @@ What stays in memory between jobs (the worker is one long-running process):
            the finished takes (until the first fit the preview is grey-scale
            structure from the latents' first principal component).
 
+Single files and memory
+  A checkpoint can be a transformer-only .safetensors in Diffusers naming, or in the original
+  BFL / ComfyUI layout (Comfy-Org's flux2_dev_fp8mixed.safetensors, BFL's flux-2-klein-*-fp8
+  files): a "model.diffusion_model." prefix is dropped and fp8 weights are scaled back up by
+  their weight_scale (ComfyUI "scaled fp8" / "fp8 mixed") to `dtype` before Diffusers converts
+  the names. The rest of the pipeline (text encoder, VAE) comes from the matching Diffusers folder.
+  offload "auto" (the default) measures the loaded components against the GPU: when the largest
+  one (FLUX.2 [dev]'s 32B transformer or 24B text encoder, [klein]'s 4B / 9B ones) fits with room
+  for activations it uses enable_model_cpu_offload() (one component on the GPU at a time, so a
+  24 GB card never holds the text encoder and the transformer together); when it doesn't, block-
+  level group offloading streams the transformer and text encoder through the GPU a block at a
+  time (the VAE stays on the GPU).
+
 Live progress goes into status.json "detail": step / steps, batch_index /
 batch_size, takes_done and preview_seq; the preview itself is out/preview.npy
 (small, display-referred RGB). Cancel stops inside the transformer within one
@@ -158,17 +171,92 @@ def _hidden_size(shapes):
     return None
 
 
+COMFY_PREFIXES = ("model.diffusion_model.", "diffusion_model.")
+_SCALE_SUFFIXES = (".weight_scale", ".scale_weight")          # fp8 weight = stored * scale
+_DROP_SUFFIXES = (".input_scale", ".scale_input", ".comfy_quant", ".weight_scale_2")
+_DROP_KEYS = ("scaled_fp8",)
+
+
+def strip_prefix(key):
+    for p in COMFY_PREFIXES:
+        if key.startswith(p):
+            return key[len(p):]
+    return key
+
+
+def _comfy_quant_format(t):
+    """A ComfyUI `<layer>.comfy_quant` entry (JSON in a uint8 tensor) -> its format name, or None."""
+    try:
+        return json.loads(bytes(t.cpu().numpy().tobytes()).decode("utf-8")).get("format")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def read_transformer_file(path, dtype):
+    """A single-file transformer's state dict, ready for Diffusers: ComfyUI's "model.diffusion_model."
+    prefix dropped, fp8 weights (scaled or not) turned into `dtype`, quantisation bookkeeping removed.
+    Tensors are converted one at a time so the fp8 and the `dtype` copy of the whole model never
+    both sit in memory."""
+    import torch
+    from safetensors.torch import load_file
+    raw = load_file(path)
+    fp8 = tuple(getattr(torch, n) for n in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
+                if hasattr(torch, n))
+    sd = {strip_prefix(k): raw.pop(k) for k in list(raw)}
+    for k in [k for k in sd if k.endswith(".comfy_quant")]:
+        fmt = _comfy_quant_format(sd[k])
+        if fmt and not str(fmt).startswith("float8"):
+            raise RuntimeError(f"{os.path.basename(path)} is quantised as '{fmt}' (a ComfyUI-only format): "
+                               "use the fp8, bf16 or fp16 file of the model")
+    scales = {}
+    for k in list(sd):
+        for suf in _SCALE_SUFFIXES:
+            if k.endswith(suf):
+                scales[k[: -len(suf)] + ".weight"] = sd.pop(k)
+                break
+    for k in list(sd):
+        if k in _DROP_KEYS or k.endswith(_DROP_SUFFIXES):
+            sd.pop(k)
+    for k in list(sd):
+        t = sd[k]
+        if t.dtype in fp8:
+            t = t.to(torch.float32)
+            s = scales.get(k)
+            if s is not None:
+                s = s.to(torch.float32)
+                if s.numel() > 1 and t.ndim >= 1 and s.numel() == t.shape[0]:
+                    s = s.reshape(-1, *([1] * (t.ndim - 1)))
+                t = t * s
+            sd[k] = t.to(dtype)
+        elif t.dtype == torch.uint8 and k.endswith(".weight"):
+            raise RuntimeError(f"{os.path.basename(path)} has packed (4-bit) weights Diffusers can't load: "
+                               "use the fp8, bf16 or fp16 file of the model")
+        elif t.is_floating_point() and t.dtype != dtype:
+            sd[k] = t.to(dtype)
+    return sd
+
+
+def _folder_distilled(folder):
+    try:
+        with open(os.path.join(folder, "model_index.json"), encoding="utf-8") as f:
+            return bool(json.load(f).get("is_distilled", False))
+    except (OSError, ValueError):
+        return None
+
+
 def pick_base(file, candidates):
     """For a single-file transformer: the Diffusers folder whose transformer has the same blocks,
-    width and guidance embedding ([dev] has one, [klein] doesn't)."""
+    width and guidance embedding ([dev] has one, [klein] doesn't). [klein] and [klein] base share an
+    architecture: a file named "...base..." prefers the undistilled folder, any other the distilled one."""
     try:
-        shapes = _safetensors_shapes(file)
+        shapes = {strip_prefix(k): v for k, v in _safetensors_shapes(file).items()}
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"can't read {os.path.basename(file)}: {e}") from e
     keys = list(shapes)
     want = _block_counts(keys)
     guidance = any("guidance_embedder" in k or "guidance_in" in k for k in keys)
     width = _hidden_size(shapes)
+    matches = []
     for c in candidates:
         try:
             with open(os.path.join(c, "transformer", "config.json"), encoding="utf-8") as f:
@@ -182,7 +270,13 @@ def pick_base(file, candidates):
         if width is not None and cfg.get("num_attention_heads") and cfg.get("attention_head_dim") \
                 and cfg["num_attention_heads"] * cfg["attention_head_dim"] != width:
             continue
-        return c
+        matches.append(c)
+    if matches:
+        want_distilled = "base" not in os.path.basename(file).lower()
+        for c in matches:
+            if _folder_distilled(c) in (None, want_distilled):
+                return c
+        return matches[0]
     raise RuntimeError(f"{os.path.basename(file)} is a transformer-only checkpoint ({want[0]} double / {want[1]} single "
                        "blocks) and none of the Diffusers model folders matches it: put the full Diffusers model "
                        "(the same FLUX.2 variant) in the checkpoints folder, or pick its base")
@@ -190,19 +284,71 @@ def pick_base(file, candidates):
 
 def load_single_transformer(file, folder, dtype):
     """A transformer-only .safetensors: the original BFL / ComfyUI layout (converted by Diffusers'
-    from_single_file), or one already in Diffusers naming (loaded straight into the base's config)."""
+    from_single_file), or one already in Diffusers naming (loaded straight into the base's config).
+    Either may carry ComfyUI's prefix and fp8 weights (read_transformer_file)."""
     import diffusers
-    keys = _safetensors_shapes(file)
-    if any(k.startswith(("transformer_blocks.", "single_transformer_blocks.")) for k in keys):
+    sd = read_transformer_file(file, dtype)
+    if any(k.startswith(("transformer_blocks.", "single_transformer_blocks.")) for k in sd):
         from accelerate import init_empty_weights
-        from safetensors.torch import load_file
         cfg = diffusers.Flux2Transformer2DModel.load_config(folder, subfolder="transformer")
         with init_empty_weights():
             m = diffusers.Flux2Transformer2DModel.from_config(cfg)
-        sd = {k: v.to(dtype) for k, v in load_file(file).items()}
         m.load_state_dict(sd, strict=True, assign=True)
         return m.to(dtype)
-    return diffusers.Flux2Transformer2DModel.from_single_file(file, config=folder, subfolder="transformer", torch_dtype=dtype)
+    try:
+        return diffusers.Flux2Transformer2DModel.from_single_file(sd, config=folder, subfolder="transformer",
+                                                                  torch_dtype=dtype)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"can't load {os.path.basename(file)} as a FLUX.2 transformer on "
+                           f"{os.path.basename(folder.rstrip(os.sep))}: {e}") from e
+
+
+# ================================================================= GPU memory
+OFFLOADS = ("auto", "model", "group", "sequential", "none")
+_HEADROOM = 1.25        # activations, the VAE and CUDA's own context on top of the biggest component
+_HEADROOM_GB = 2.5
+
+
+def component_bytes(pipe):
+    """Bytes of parameters (and buffers) of each torch component of the pipeline."""
+    import torch
+    out = {}
+    for name, m in pipe.components.items():
+        if isinstance(m, torch.nn.Module):
+            out[name] = sum(t.numel() * t.element_size() for t in list(m.parameters()) + list(m.buffers()))
+    return out
+
+
+def plan_offload(requested, sizes, vram_bytes):
+    """What `offload` means on this machine: "auto" -> "model" when the largest component fits in VRAM
+    with room for activations, else "group"; "none" -> "model" when the whole pipeline doesn't fit."""
+    requested = requested if requested in OFFLOADS else "auto"
+    if vram_bytes <= 0:
+        return "none"
+    biggest = max(sizes.values()) if sizes else 0
+    room = vram_bytes - _HEADROOM_GB * 2 ** 30
+    if requested == "auto":
+        return "model" if biggest * _HEADROOM <= room else "group"
+    if requested == "none" and sum(sizes.values()) * _HEADROOM > room:
+        return "model" if biggest * _HEADROOM <= room else "group"
+    return requested
+
+
+def place_pipeline(pipe, offload):
+    import torch
+    cuda = torch.device("cuda")
+    if offload == "sequential":
+        pipe.enable_sequential_cpu_offload()
+    elif offload == "model":
+        pipe.enable_model_cpu_offload()
+    elif offload == "group":
+        # the transformer and text encoder go through the GPU a block at a time (prefetched on a side
+        # stream); the VAE is small and stays on the GPU
+        pipe.enable_group_offload(onload_device=cuda, offload_device=torch.device("cpu"), offload_type="block_level",
+                                  num_blocks_per_group=1, use_stream=True, low_cpu_mem_usage=True,
+                                  exclude_modules=["vae"])
+    else:
+        pipe.to("cuda")
 
 
 def load_pipeline(ctx, p):
@@ -217,7 +363,7 @@ def load_pipeline(ctx, p):
         base = pick_base(ckpt, p.get("base_candidates", []))
     folder = base if single else ckpt
     dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}.get(p.get("dtype", "bf16"), torch.bfloat16)
-    offload = p.get("offload", "model")
+    offload = p.get("offload", "auto")
     if not torch.cuda.is_available():
         offload = "none"
     key = (ckpt, _stamp(ckpt), folder, str(dtype), offload)
@@ -238,13 +384,14 @@ def load_pipeline(ctx, p):
         ctx.log(f"transformer {ckpt} on base {folder}")
         kw["transformer"] = load_single_transformer(ckpt, folder, dtype)
     pipe = cls.from_pretrained(folder, **kw)
+    used = "none"
     if torch.cuda.is_available():
-        if offload == "sequential":
-            pipe.enable_sequential_cpu_offload()
-        elif offload == "model":
-            pipe.enable_model_cpu_offload()
-        else:
-            pipe.to("cuda")
+        sizes = component_bytes(pipe)
+        vram = torch.cuda.get_device_properties(0).total_memory
+        used = plan_offload(offload, sizes, vram)
+        ctx.log("components (GB): " + ", ".join(f"{k} {v / 2 ** 30:.1f}" for k, v in sizes.items())
+                + f"; GPU {vram / 2 ** 30:.1f} GB; offload {offload} -> {used}")
+        place_pipeline(pipe, used)
     if p.get("vae_tiling") and hasattr(pipe.vae, "enable_tiling"):
         pipe.vae.enable_tiling()
     info = {
@@ -252,6 +399,7 @@ def load_pipeline(ctx, p):
         "distilled": bool(getattr(pipe.config, "is_distilled", False)) if cls_name == "Flux2KleinPipeline" else True,
         "negative": cls_name == "Flux2KleinPipeline",
         "folder": folder,
+        "offload": used,
         "id": hashlib.sha1(f"{ckpt}|{_stamp(ckpt)}".encode()).hexdigest()[:16],
     }
     if cls_name == "Flux2KleinPipeline":
