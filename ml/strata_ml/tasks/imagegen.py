@@ -1,4 +1,5 @@
-"""All-in-one image generation for the ImageGen node: FLUX.2 [dev] and FLUX.2 [klein] through Diffusers.
+"""All-in-one image generation for the ImageGen node: FLUX.2 [dev], FLUX.2 [klein] and FLUX 3 [klein]
+through Diffusers (FLUX 3: imagegen_flux3.py, driven through the same code below).
 
 One job = one press of Generate: `batch_count` takes with seeds seed, seed+1, ...,
 each written to out/take.<i>.npy as soon as it is finished (linear Rec.709 RGBA,
@@ -60,6 +61,7 @@ import numpy as np
 from ..util import Cancelled, atomic_write_json, srgb_decode, srgb_encode
 
 SUPPORTED = ("Flux2Pipeline", "Flux2KleinPipeline")
+FLUX3 = "Flux3"  # info["class"] of a FLUX 3 [klein] model (its folders name modular pipeline classes)
 PATCH = 16  # pixels per latent token (VAE x8, then 2x2 patches)
 
 # FLUX.2's pipelines always hand the scheduler a sigma schedule (and a resolution shift `mu`), so only
@@ -254,6 +256,10 @@ def pick_base(file, candidates):
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"can't read {os.path.basename(file)}: {e}") from e
     keys = list(shapes)
+    from . import imagegen_flux3 as flux3
+    if flux3.is_flux3_keys(keys):
+        return flux3.pick_base(file, keys, candidates)
+    candidates = [c for c in candidates if not flux3.is_flux3_folder(c)]
     want = _block_counts(keys)
     guidance = any("guidance_embedder" in k or "guidance_in" in k for k in keys)
     width = _hidden_size(shapes)
@@ -393,19 +399,27 @@ def load_pipeline(ctx, p):
         ctx.log(f"split files: transformer {ckpt}, text encoder {parts[0]}, VAE {parts[1]}")
         pipe = imagegen_parts.build_pipeline(ckpt, parts[0], parts[1], dtype, p.get("tokenizer", ""))
         return _finish_load(ctx, p, pipe, "Flux2KleinPipeline", ckpt, os.path.dirname(parts[0]), offload, key)
-    with open(os.path.join(folder, "model_index.json"), encoding="utf-8") as f:
-        cls_name = json.load(f).get("_class_name", "")
-    if cls_name not in SUPPORTED:
+    from . import imagegen_flux3 as flux3
+    is_flux3 = flux3.is_flux3_folder(folder)
+    if is_flux3:
+        cls_name = FLUX3
+    else:
+        with open(os.path.join(folder, "model_index.json"), encoding="utf-8") as f:
+            cls_name = json.load(f).get("_class_name", "")
+    if cls_name not in SUPPORTED and not is_flux3:
         raise RuntimeError(f"{os.path.basename(folder)} is a {cls_name or 'unknown'} model; ImageGen runs "
-                           f"{' / '.join(SUPPORTED)} (FLUX.2 [dev] and [klein])")
+                           f"{' / '.join(SUPPORTED)} (FLUX.2 [dev] and [klein]) and FLUX 3 [klein]")
     import diffusers
-    cls = getattr(diffusers, cls_name)
     ctx.progress(0.0, f"loading {os.path.basename(ckpt.rstrip(os.sep))}", force=True)
     kw = {"torch_dtype": dtype}
     if single:
         ctx.log(f"transformer {ckpt} on base {folder}")
-        kw["transformer"] = load_single_transformer(ckpt, folder, dtype)
-    pipe = cls.from_pretrained(folder, **kw)
+        kw["transformer"] = (flux3.load_transformer_file(ckpt, folder, dtype, read_transformer_file) if is_flux3
+                             else load_single_transformer(ckpt, folder, dtype))
+    if is_flux3:
+        pipe = flux3.load(folder, kw.get("transformer"), dtype)
+    else:
+        pipe = getattr(diffusers, cls_name).from_pretrained(folder, **kw)
     return _finish_load(ctx, p, pipe, cls_name, ckpt, folder, offload, key)
 
 
@@ -423,13 +437,14 @@ def _finish_load(ctx, p, pipe, cls_name, ckpt, folder, offload, key):
         pipe.vae.enable_tiling()
     info = {
         "class": cls_name,
-        "distilled": bool(getattr(pipe.config, "is_distilled", False)) if cls_name == "Flux2KleinPipeline" else True,
-        "negative": cls_name == "Flux2KleinPipeline",
+        "family": "flux3" if cls_name == FLUX3 else "flux2",
+        "distilled": bool(getattr(pipe.config, "is_distilled", False)) if cls_name in ("Flux2KleinPipeline", FLUX3) else True,
+        "negative": cls_name in ("Flux2KleinPipeline", FLUX3),
         "folder": folder,
         "offload": used,
         "id": hashlib.sha1(f"{ckpt}|{_stamp(ckpt)}".encode()).hexdigest()[:16],
     }
-    if cls_name == "Flux2KleinPipeline":
+    if cls_name in ("Flux2KleinPipeline", FLUX3):
         info["negative"] = not info["distilled"]
     _STATE.update(key=key, pipe=pipe, info=info, adapters={}, embeds=[],
                   base_scheduler=(type(pipe.scheduler), dict(pipe.scheduler.config)))
@@ -800,9 +815,20 @@ def run(ctx, p):
         warnings.append("this model doesn't use a negative prompt (guidance-distilled): it was ignored")
     if info["class"] == "Flux2KleinPipeline" and info["distilled"] and float(p.get("guidance", 4.0)) > 1.0:
         warnings.append("distilled klein ignores guidance")
+    caption = None
+    ref = [Image.fromarray((r * 255 + 0.5).astype(np.uint8)) for r in _references(ctx, p, src)] or None
+    if info["class"] == FLUX3:
+        if info["distilled"] and float(p.get("guidance", 4.0)) > 1.0:
+            warnings.append("distilled FLUX 3 [klein] ignores guidance")
+        if info["distilled"] and steps > 16:
+            warnings.append("distilled FLUX 3 [klein] is made for 4 to 16 steps")
+        if p.get("prompt_upsampler"):
+            from . import imagegen_flux3 as flux3
+            caption = flux3.upsample(ctx, info["folder"], prompt, ref, pipe.dtype, p.get("upsampler", ""))
+            ctx.log(f"upsampled prompt: {caption}")
 
     ctx.progress(0.0, "encoding prompt", force=True)
-    emb = prompt_embeds(pipe, info, prompt)
+    emb = prompt_embeds(pipe, info, caption or prompt)
     neg_emb = prompt_embeds(pipe, info, negative) if info["negative"] and float(p.get("guidance", 4.0)) > 1.0 else None
 
     patch = int(getattr(pipe, "vae_scale_factor", 8)) * 2
@@ -813,7 +839,6 @@ def run(ctx, p):
         if int(p.get("preview_every", 1)) > 0 else None
     watch = CancelWatch(ctx, pipe.transformer)
     cap = X0Capture(pipe.transformer, h * w) if preview else None
-    ref = [Image.fromarray((r * 255 + 0.5).astype(np.uint8)) for r in _references(ctx, p, src)] or None
     detail = {"steps": steps, "batch_size": batch, "takes_done": 0, "preview_seq": 0, "seeds": [seed0 + i for i in range(batch)]}
     takes = []
     t_start = time.time()
@@ -891,6 +916,7 @@ def run(ctx, p):
                 "index": bi, "seed": seed, "width": W, "height": H, "mode": mode, "steps": steps, "sampler": sampler,
                 "guidance": float(p.get("guidance", 4.0)), "denoise": denoise if mode != "txt2img" else 1.0,
                 "prompt": prompt, "negative_prompt": negative if info["negative"] else "",
+                **({"caption": caption} if caption else {}),
                 "checkpoint": p.get("checkpoint", ""), "loras": applied, "reference": bool(ref), "references": len(ref or []),
                 "seconds": round(time.time() - t0, 2),
             })

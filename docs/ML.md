@@ -239,6 +239,27 @@ the model folders Welder uses from `<ml home>\model_dirs.json`.
   invent plausible detail rather than recovering real detail. x4 works best
   from a small draft (around 280p).
 
+### ImageGen
+* **Models:** FLUX.2 [dev] and [klein], and FLUX 3 [klein]. Put a Diffusers
+  folder in the checkpoints folder (FLUX 3: `black-forest-labs/flux-3-image-klein`
+  or `flux-3-image-klein-base`, the whole repository; you accept BFL's terms on
+  Hugging Face first). A transformer-only `.safetensors` runs on the matching
+  folder (**base model: auto**): BFL's own FLUX 3 files, their fp8r / nvfp4
+  versions and ComfyUI fp8 files all work.
+* **FLUX 3 [klein]** is distilled: 4 to 16 **steps** and no guidance or
+  negative prompt. **[klein] base** takes about 50 steps, **guidance** around
+  3.5 and a negative prompt. Prompts can name the reference images as
+  `<ref_image_0>`, `<ref_image_1>`, ... (the reference input first, then the
+  source with **source as reference**).
+* **prompt upsampler** (Advanced, FLUX 3 only, off by default) rewrites the
+  prompt with BFL's 9B upsampler before generating. Put
+  `black-forest-labs/flux-3-image-klein-pup` next to the FLUX 3 folder. It is
+  loaded for the caption and freed again, so it never shares a 24 GB card with
+  the image model; the caption is kept with each take.
+* **Memory:** FLUX 3 [klein] is about 11 GB in bf16 (6 GB in fp8) plus an 8 GB
+  text encoder, so **offload: auto** keeps one of them on a 24 GB card at a
+  time. fp8r runs fast on RTX 40-series and newer; nvfp4 needs an RTX 50-series.
+
 ### GaussianSplat
 * **Inputs:** src (the plate), cam, and mask (optional).
 * **cam** is usually a solved CameraTracker; its 3D points seed the splats.
@@ -332,6 +353,7 @@ the model folders Welder uses from `<ml home>\model_dirs.json`.
 
 | Model | Licence |
 |---|---|
+| FLUX 3 [klein] and [klein] base, its prompt upsampler | FLUX Kommunity License: free commercial use of outputs for companies under $5M annual revenue (with content filtering or review of outputs); larger companies need a licence from BFL. The Qwen3-VL text encoder is Apache 2.0 |
 | LTX-2.5 and its IC-LoRAs | LTX-2 Community License: free for entities under $10M annual revenue; larger companies need a commercial licence from Lightricks |
 | MapAnything (`facebook/map-anything-apache`) | Apache 2.0 |
 | Depth Anything V2 Small | Apache 2.0 |

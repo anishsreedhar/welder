@@ -1001,6 +1001,53 @@ int main(int argc, char** argv) {
         ml::setHome("");
     });
 
+    test("ImageGen: FLUX 3 folders are listed next to FLUX.2", [&] {
+        namespace fs = std::filesystem;
+        auto root = tmp / "imagegen_scan_flux3";
+        fs::remove_all(root);
+        auto ck = root / "checkpoints", lo = root / "loras";
+        fs::create_directories(ck / "flux2-klein");
+        std::ofstream(ck / "flux2-klein" / "model_index.json") << R"({"_class_name": "Flux2KleinPipeline"})";
+        // the Hugging Face FLUX 3 repos are modular pipelines: modular_model_index.json, no model_index.json
+        fs::create_directories(ck / "flux-3-image-klein" / "transformer");
+        std::ofstream(ck / "flux-3-image-klein" / "modular_model_index.json") << R"({"_class_name": "Flux3DistilledModularPipeline"})";
+        // a folder whose index names something else is still FLUX 3 when its transformer is
+        fs::create_directories(ck / "flux3-base-copy" / "transformer");
+        std::ofstream(ck / "flux3-base-copy" / "model_index.json") << R"({"_class_name": "DiffusionPipeline"})";
+        std::ofstream(ck / "flux3-base-copy" / "transformer" / "config.json") << R"({"_class_name": "Flux3Transformer2DModel"})";
+        // the prompt upsampler (a transformers model folder): neither a checkpoint nor its shards
+        fs::create_directories(ck / "flux-3-image-klein-pup");
+        std::ofstream(ck / "flux-3-image-klein-pup" / "config.json") << R"({"architectures": ["Qwen3_5ForConditionalGeneration"]})";
+        std::ofstream(ck / "flux-3-image-klein-pup" / "model-00001-of-00002.safetensors") << "x";
+        std::ofstream(ck / "flux-3-image-klein.safetensors") << "xx";
+        fs::create_directories(lo);
+        ml::setHome((root / "home").string());
+        ml::setImageGenDirs({{ck.string()}, {lo.string()}});
+        auto cks = ml::checkpoints(true);
+        CHECK(cks.size() == 4);
+        if (cks.size() == 4) {
+            CHECK(cks[0].name == "flux-3-image-klein" && cks[0].folder && cks[0].family == "Flux3DistilledModularPipeline");
+            CHECK(cks[1].name == "flux2-klein" && cks[1].family == "Flux2KleinPipeline");
+            CHECK(cks[2].name == "flux3-base-copy" && cks[2].family == "Flux3ModularPipeline");
+            CHECK(cks[3].name == "flux-3-image-klein.safetensors" && !cks[3].folder);
+        }
+        CHECK(ml::findCheckpoint((ck / "flux-3-image-klein").string()).has_value());  // an absolute path works too
+        imagegen::ImageGenNode n;
+        CHECK((n.knobChoices("checkpoint") ==
+               std::vector<std::string>{"flux-3-image-klein", "flux2-klein", "flux3-base-copy", "flux-3-image-klein.safetensors"}));
+        CHECK((n.knobChoices("base") == std::vector<std::string>{"auto", "flux-3-image-klein", "flux2-klein", "flux3-base-copy"}));
+        // a single file gets every FLUX.2 and FLUX 3 folder as a base candidate; the worker picks the matching one
+        Engine e;
+        n.params.data["checkpoint"] = "flux-3-image-klein.safetensors";
+        n.params.data["prompt_upsampler"] = true;
+        auto s = n.spec("main", e);
+        CHECK(s.params["base"] == "auto" && s.params["base_candidates"].size() == 3);
+        CHECK(s.params["prompt_upsampler"] == true);
+        n.params.data["checkpoint"] = "flux-3-image-klein";
+        CHECK(n.spec("main", e).error.find("FLUX") == std::string::npos);
+        ml::setHome("");
+    });
+
     test("LTX: Layout to Render, the style input, stages and the LoRA stack in the job spec", [&] {
         namespace fs = std::filesystem;
         if (!ml::registry().contains("ic_loras")) {

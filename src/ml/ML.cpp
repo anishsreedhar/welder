@@ -851,6 +851,36 @@ bool isSafetensors(const fs::path& p) {
     return e == ".safetensors" || e == ".sft";
 }
 
+// A Diffusers folder's index: model_index.json, or modular_model_index.json (FLUX 3's repos are modular
+// pipelines). Empty when the folder has neither.
+fs::path diffusersIndex(const fs::path& dir) {
+    std::error_code ec;
+    for (const char* f : {"model_index.json", "modular_model_index.json"})
+        if (fs::exists(dir / f, ec)) return dir / f;
+    return {};
+}
+
+// The pipeline class a Diffusers folder names. A FLUX 3 folder (its transformer is a Flux3Transformer2DModel)
+// is "Flux3..." whatever its index says, so ImageGen can tell it from FLUX.2 by the prefix alone.
+std::string diffusersFamily(const fs::path& dir, const fs::path& index) {
+    json idx = readJson(S(index));
+    std::string fam = idx.is_object() ? idx.value("_class_name", std::string()) : std::string();
+    if (fam.rfind("Flux3", 0) != 0) {
+        json t = readJson(S(dir / "transformer" / "config.json"));
+        if (t.is_object() && t.value("_class_name", std::string()) == "Flux3Transformer2DModel") fam = "Flux3ModularPipeline";
+    }
+    return fam;
+}
+
+// A Hugging Face transformers model folder (config.json naming its architectures), such as FLUX 3's prompt
+// upsampler: not a checkpoint, and its weight shards aren't checkpoints either.
+bool isTransformersFolder(const fs::path& dir) {
+    std::error_code ec;
+    if (!fs::exists(dir / "config.json", ec)) return false;
+    json c = readJson(S(dir / "config.json"));
+    return c.is_object() && c.contains("architectures");
+}
+
 // Diffusers folders (not descended into) and single files, at most `depth` levels below each root.
 void scanDir(const std::string& root, bool wantFolders, int depth, std::vector<ModelFile>& out) {
     std::error_code ec;
@@ -861,17 +891,17 @@ void scanDir(const std::string& root, bool wantFolders, int depth, std::vector<M
     while (!stack.empty()) {
         auto [dir, d] = stack.back();
         stack.pop_back();
-        if (wantFolders && dir != base && fs::exists(dir / "model_index.json", ec)) {
+        if (const fs::path idx = wantFolders && dir != base ? diffusersIndex(dir) : fs::path(); !idx.empty()) {
             ModelFile m;
             m.name = relName(base, dir);
             m.path = S(dir);
             m.folder = true;
-            json idx = readJson(S(dir / "model_index.json"));
-            m.family = idx.is_object() ? idx.value("_class_name", std::string()) : std::string();
-            m.mtime = mtimeSeconds(dir / "model_index.json");
+            m.family = diffusersFamily(dir, idx);
+            m.mtime = mtimeSeconds(idx);
             folders.push_back(std::move(m));
             continue;
         }
+        if (wantFolders && dir != base && isTransformersFolder(dir)) continue;
         fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), endIt;
         for (; !ec && it != endIt; it.increment(ec)) {
             const fs::path& q = it->path();
@@ -985,11 +1015,11 @@ std::optional<ModelFile> findIn(const std::vector<ModelFile>& v, const std::stri
     m.name = nameOrPath;
     m.path = nameOrPath;
     if (fs::is_directory(p, ec)) {
-        if (!folders || !fs::exists(p / "model_index.json", ec)) return std::nullopt;
+        const fs::path idx = diffusersIndex(p);
+        if (!folders || idx.empty()) return std::nullopt;
         m.folder = true;
-        json idx = readJson(S(p / "model_index.json"));
-        m.family = idx.is_object() ? idx.value("_class_name", std::string()) : std::string();
-        m.mtime = mtimeSeconds(p / "model_index.json");
+        m.family = diffusersFamily(p, idx);
+        m.mtime = mtimeSeconds(idx);
     } else {
         m.size = (uint64_t)fs::file_size(p, ec);
         m.mtime = mtimeSeconds(p);

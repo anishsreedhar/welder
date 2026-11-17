@@ -59,6 +59,9 @@ void setLoras(Params& p, const std::vector<LoraEntry>& rows) {
 
 namespace {
 
+// The Diffusers folders ImageGen runs: FLUX.2 [dev] / [klein] ("Flux2...") and FLUX 3 [klein] ("Flux3...").
+bool isImageGenFamily(const std::string& family) { return family.rfind("Flux2", 0) == 0 || family.rfind("Flux3", 0) == 0; }
+
 std::vector<Take> takesFrom(const json& arr) {
     std::vector<Take> v;
     if (!arr.is_array()) return v;
@@ -334,11 +337,11 @@ std::vector<std::string> ImageGenNode::knobChoices(const std::string& knob) cons
     std::vector<std::string> v;
     if (knob == "checkpoint") {
         for (auto& m : ml::checkpoints())
-            if (!m.folder || m.family.rfind("Flux2", 0) == 0) v.push_back(m.name);
+            if (!m.folder || isImageGenFamily(m.family)) v.push_back(m.name);
     } else if (knob == "base") {
         v.push_back("auto");
         for (auto& m : ml::checkpoints())
-            if (m.folder && m.family.rfind("Flux2", 0) == 0) v.push_back(m.name);
+            if (m.folder && isImageGenFamily(m.family)) v.push_back(m.name);
     } else if (knob == "text_encoder" || knob == "vae") {
         v.push_back("auto");
         for (auto& m : ml::imageGenComponents())
@@ -367,11 +370,12 @@ JobSpec ImageGenNode::spec(const std::string&, Engine&) {
     // ---- the model
     const std::string ck = params.str("checkpoint", "");
     auto model = ml::findCheckpoint(ck);
-    if (ck.empty()) fail("pick a checkpoint (Diffusers FLUX.2 folders and .safetensors in the checkpoints folder)");
+    if (ck.empty()) fail("pick a checkpoint (Diffusers FLUX.2 / FLUX 3 folders and .safetensors in the checkpoints folder)");
     else if (!model) fail("checkpoint '" + ck + "' isn't in the checkpoints folder any more");
     else {
-        if (model->folder && model->family.rfind("Flux2", 0) != 0)
-            fail(ck + " is a " + (model->family.empty() ? std::string("unknown") : model->family) + " model; ImageGen runs FLUX.2");
+        if (model->folder && !isImageGenFamily(model->family))
+            fail(ck + " is a " + (model->family.empty() ? std::string("unknown") : model->family) +
+                 " model; ImageGen runs FLUX.2 and FLUX 3");
         p["checkpoint"] = model->path;
         p["checkpoint_stamp"] = model->stamp();
         if (!model->folder) {
@@ -381,7 +385,7 @@ JobSpec ImageGenNode::spec(const std::string&, Engine&) {
             json cands = json::array();
             if (base == "auto") {
                 for (auto& m : ml::checkpoints())
-                    if (m.folder && m.family.rfind("Flux2", 0) == 0) cands.push_back(m.path);
+                    if (m.folder && isImageGenFamily(m.family)) cands.push_back(m.path);
                 p["base"] = "auto";
                 p["base_candidates"] = cands;
             } else if (auto b = ml::findCheckpoint(base); b && b->folder) {
@@ -411,12 +415,13 @@ JobSpec ImageGenNode::spec(const std::string&, Engine&) {
             const bool split = params.str("text_encoder", "auto") != "auto" || params.str("vae", "auto") != "auto";
             if (base == "auto" && cands.empty() && !split && !(haveTe && haveVae))
                 fail(ck + " is a transformer-only file: it needs a text encoder and a VAE (ComfyUI's text_encoders/ and vae/ "
-                          "folders, or the checkpoints folder) or the full Diffusers FLUX.2 model");
+                          "folders, or the checkpoints folder) or the full Diffusers FLUX.2 / FLUX 3 model it was made from");
         }
     }
     p["dtype"] = params.str("dtype", "bf16");
     p["offload"] = params.str("offload", "auto");
     p["vae_tiling"] = params.flag("vae_tiling", false);
+    p["prompt_upsampler"] = params.flag("prompt_upsampler", false);  // FLUX 3 only (the worker ignores it otherwise)
 
     // ---- prompts and sampling
     p["prompt"] = params.str("positive_prompt", "");
