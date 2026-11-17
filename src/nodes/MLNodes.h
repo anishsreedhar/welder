@@ -49,6 +49,16 @@ struct JobSpec {
 
 class MLNode : public Node {
 public:
+    // The editor's frame when the last run was started (set by App::startMLJob just before spec();
+    // not saved). Nodes that work on a single frame of their inputs take it from here.
+    double runFrame = 1;
+
+    // Hooks around a run, called by the editor inside its undoable edit of the comp (write-locked):
+    // a job for `slot` was queued, or an identical one reused (once per press of the slot's button) ...
+    virtual void runSubmitted(const std::string& slot, const std::string& key) { (void)slot; (void)key; }
+    // ... and a finished job became the slot's result.
+    virtual void resultAttached(const std::string& slot, const std::string& key) { (void)slot; (void)key; }
+
     virtual std::vector<std::string> slots() const { return {"main"}; }
     virtual std::string slotLabel(const std::string& slot) const { return slot == "main" ? "Run" : slot; }
     // What running `slot` needs. Called with the comp read-locked.
@@ -62,8 +72,10 @@ public:
 
 protected:
     // Fill `out` (region at the engine's scale) from an output's frame; false when there's none.
+    // `outFrame` picks the output's frame (ImageGen: the take); by default the frame being rendered.
+    // "rgba" and "take" outputs are converted from linear Rec.709 to the comp's working space.
     bool fillFromOutput(RenderArgs& a, Image& out, const std::string& slot, const std::string& output,
-                        const std::vector<std::pair<int, int>>& chanMap);
+                        const std::vector<std::pair<int, int>>& chanMap, std::optional<int> outFrame = std::nullopt);
 };
 
 bool isML(const Node* n);

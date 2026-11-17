@@ -18,3 +18,8 @@ ltx-core @ https://github.com/Lightricks/LTX-2/archive/9ec55f9f22798a3198d9c9238
 ltx-pipelines @ https://github.com/Lightricks/LTX-2/archive/9ec55f9f22798a3198d9c923856824821bc3317e.zip#subdirectory=packages/ltx-pipelines
 # MapAnything (feed-forward cameras + depth), pinned
 mapanything @ https://github.com/facebookresearch/map-anything/archive/3d10cf7a3016fc0f9bb13a071ee66c47b10be0d9.zip
+# ImageGen (FLUX.2 [dev] / [klein] through Diffusers; peft loads the LoRAs, accelerate does the CPU offload)
+diffusers==0.43.0
+transformers
+accelerate
+peft

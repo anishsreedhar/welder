@@ -46,6 +46,8 @@ KnobDef CS(const char* n, const char* l, const char* def, std::vector<std::strin
 }
 KnobDef Ocio(const char* n, const char* l, Knob t) { return {n, l, t, "", 0, 1, {}, ""}; }
 
+constexpr int kImageGenMinSize = 256;
+
 KnobDef When(KnobDef k, const char* cond) {
     k.when = cond;
     return k;
@@ -2014,6 +2016,43 @@ std::vector<NodeDef> build() {
                  frames(ltxMemory({B("premultiply", "premultiply", true), B("invert", "invert", false),
                                    I("seed", "seed", 1234, 0, 99999)})),
                  "LTX Alpha Gen: a matte for the clip without a green screen (white = foreground). Runs on the ML worker."});
+    {
+        // checkpoint, base and sampler list what's on this machine (ImageGenNode::knobChoices)
+        auto Dyn = [](const char* n, const char* l, const char* def, const char* tip) {
+            KnobDef k = C(n, l, def, {});
+            k.tip = tip;
+            return k;
+        };
+        auto Adv = [](KnobDef k) { return OnTab(k, "Advanced"); };
+        d.push_back({"ImageGen", "AI",
+                     {Div("Model"),
+                      Dyn("checkpoint", "checkpoint", "", "Diffusers FLUX.2 folders and .safetensors from the checkpoints folder"),
+                      Dyn("base", "base model", "auto", "what a transformer-only .safetensors runs on (auto: the matching FLUX.2 folder)"),
+                      Txt("positive_prompt", "prompt", "what to make"),
+                      Txt("negative_prompt", "negative", "what to avoid (FLUX.2 [klein] base only: [dev] and distilled models ignore it)"),
+                      C("mode", "mode", "Auto", {"Auto", "Txt2Img", "Img2Img", "Inpaint"}),
+                      F("denoise_strength", "denoise", 0.75, 0, 1, "Img2Img / Inpaint: 0 keeps the source, 1 replaces it"),
+                      Div("LoRAs"),
+                      J("loras", "LoRA stack", json::array(), "[{\"enabled\": true, \"file\": name, \"weight\": -2..2}, ...]"),
+                      Div("Image"),
+                      I("width", "width", 1024, kImageGenMinSize, 2048), I("height", "height", 1024, kImageGenMinSize, 2048),
+                      I("steps", "steps", 28, 1, 100), F("guidance_scale", "guidance", 4.0, 0, 20, "[dev]: embedded guidance; [klein] base: CFG"),
+                      Dyn("sampler", "sampler", "euler", ""),
+                      I("seed", "seed", 0, 0, 2147483647), C("seed_mode", "after a run", "Increment", {"Fixed", "Increment", "Randomize"}),
+                      I("batch_count", "batch", 1, 1, 16), I("take", "take", 0, 0, 15),
+                      Adv(Div("Source")), Adv(C("fit", "fit source", "crop", {"crop", "pad", "stretch"})),
+                      Adv(B("use_reference", "source as FLUX.2 reference", false)),
+                      Adv(Div("Mask")), Adv(C("mask_channel", "mask from", "alpha", {"alpha", "luminance"})),
+                      Adv(B("invert_mask", "invert mask", false)), Adv(I("mask_grow", "grow", 8, -64, 64)),
+                      Adv(I("mask_feather", "feather", 8, 0, 64)),
+                      Adv(Div("Memory")), Adv(C("dtype", "precision", "bf16", {"bf16", "fp16", "fp32"})),
+                      Adv(C("offload", "offload", "model", {"model", "sequential", "none"})),
+                      Adv(B("vae_tiling", "VAE tiling", false)),
+                      Adv(Div("Preview")), Adv(I("preview_every", "every n steps", 1, 0, 10)),
+                      Adv(I("preview_size", "size", 512, 64, 1024))},
+                     "All-in-one AI image generation (FLUX.2 [dev] / [klein]): checkpoint, prompts, a LoRA stack, "
+                     "sampler and batch in one node; source / mask inputs for Img2Img and Inpaint. Runs on the ML worker."});
+    }
     d.push_back({"GaussianSplat", "AI",
                  frames({C("init", "cameras from", "camera input", {"camera input", "MapAnything"}),
                          I("iterations", "iterations", 7000, 500, 60000), I("max_size", "max size", 1600, 256, 4096),

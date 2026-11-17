@@ -1,5 +1,5 @@
 """Task table. Modules are imported when a job runs, so a missing optional
-package (ltx_pipelines, gsplat, mapanything) only fails the jobs that need it."""
+package (ltx_pipelines, gsplat, mapanything, diffusers) only fails the jobs that need it."""
 
 import importlib
 
@@ -25,6 +25,7 @@ def registry():
         "segment": _lazy("segment", "run"),
         "nerf_train": _lazy("nerf", "train"),
         "nerf_render": _lazy("nerf", "render"),
+        "imagegen": _lazy("imagegen", "run"),
     }
 
 

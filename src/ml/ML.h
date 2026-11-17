@@ -83,6 +83,7 @@ struct JobStatus {
     std::string state;  // "" (no such job), "queued", "running", "done", "error", "cancelled"
     double progress = 0;
     std::string message;
+    json detail;        // task-specific live facts (ImageGen: step, steps, batch_index, batch_size, takes_done, preview_seq)
 };
 std::string jobsDir();  // <cache folder>/ml-jobs
 std::string jobDir(const std::string& key);
@@ -112,5 +113,36 @@ bool writeNpy2D(const std::string& path, const float* data, int rows, int cols);
 bool writeFile(const std::string& path, const std::string& data);
 // A finished job's output frame (out/<name>.<frame>.npy), from a small shared LRU cache.
 std::shared_ptr<const NpyImage> outputFrame(const std::string& key, const std::string& output, int frame);
+// A file a running job rewrites (out/preview.npy): re-read only when it changed on disk; null if there's none.
+std::shared_ptr<const NpyImage> liveFrame(const std::string& key, const std::string& rel);
+// A JSON file in the job's folder (out/takes.json while it runs); null if missing or unreadable.
+json jobFile(const std::string& key, const std::string& rel);
+
+// ------------------------------------------------------------ ImageGen models
+// The checkpoints and LoRAs the ImageGen node offers, found in folders the user picks
+// (<ml home>/imagegen_dirs.json; by default the Welder folder's models/checkpoints and
+// models/loras, plus WELDER_CHECKPOINTS / WELDER_LORAS, path lists). A ComfyUI models/
+// folder works too: point the lists at its checkpoints (or diffusion_models) and loras.
+struct ModelFile {
+    std::string name;    // what the menus show and the node stores: the path below its folder, '/'-separated
+    std::string path;    // absolute
+    bool folder = false; // a Diffusers model folder (model_index.json); else a single .safetensors file
+    std::string family;  // a folder's pipeline class ("Flux2Pipeline", "Flux2KleinPipeline", ...); "" for files
+    uint64_t size = 0;   // files only
+    int64_t mtime = 0;   // seconds
+    std::string stamp() const { return std::to_string(size) + ":" + std::to_string(mtime); }
+};
+struct ImageGenDirs {
+    std::vector<std::string> checkpoints, loras;
+};
+ImageGenDirs imageGenDirs();                  // the configured folders (defaults when nothing is configured)
+void setImageGenDirs(const ImageGenDirs& d);  // empty lists = back to the defaults
+// What's in the folders: checkpoints (Diffusers folders, then single files), LoRAs (.safetensors).
+// Cached for a few seconds; `rescan` forces a fresh look.
+std::vector<ModelFile> checkpoints(bool rescan = false);
+std::vector<ModelFile> loras(bool rescan = false);
+// A stored name (or an absolute path) -> the file; nullopt when it isn't there any more.
+std::optional<ModelFile> findCheckpoint(const std::string& nameOrPath);
+std::optional<ModelFile> findLora(const std::string& nameOrPath);
 
 }  // namespace strata::ml

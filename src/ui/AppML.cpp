@@ -50,6 +50,10 @@ void App::startMLJob(const std::string& name, const std::string& slot) {
         mlStatus_ = {true, name, slot, 0, 0, "preparing"};
     }
     mlCancel_ = false;
+    {
+        std::shared_lock<std::shared_timed_mutex> cl(compM);
+        if (auto* m = dynamic_cast<mlnodes::MLNode*>(node(name))) m->runFrame = frame;
+    }
     ml_ = std::thread([this, name, slot] { mlLoop(name, slot); });
 }
 
@@ -234,6 +238,10 @@ void App::pollML() {
             if (!x) return;
             setSlot(x, s, "job", k);
             if (d) setSlot(x, s, "result", k);
+            if (auto* m = dynamic_cast<mlnodes::MLNode*>(x)) {
+                m->runSubmitted(s, k);
+                if (d) m->resultAttached(s, k);
+            }
             x->paramsChanged();
         });
         if (d) requestView();
@@ -259,6 +267,7 @@ void App::pollML() {
                     Node* x = c.find(n);
                     if (!x) return;
                     setSlot(x, s, "result", k);
+                    if (auto* m = dynamic_cast<mlnodes::MLNode*>(x)) m->resultAttached(s, k);
                     x->paramsChanged();
                 });
                 message(m->name + ": " + (st.message.empty() ? "done" : st.message));

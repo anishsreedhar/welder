@@ -54,11 +54,11 @@ std::string MLNode::models(const JobSpec& s) const {
 }
 
 bool MLNode::fillFromOutput(RenderArgs& a, Image& out, const std::string& slot, const std::string& output,
-                            const std::vector<std::pair<int, int>>& chanMap) {
+                            const std::vector<std::pair<int, int>>& chanMap, std::optional<int> outFrame) {
     std::string key = result(slot);
     if (key.empty()) return false;
-    int f = (int)std::lround(a.frame);
-    if (std::fabs(a.frame - f) > 1e-6) return false;
+    int f = outFrame ? *outFrame : (int)std::lround(a.frame);
+    if (!outFrame && std::fabs(a.frame - f) > 1e-6) return false;
     auto img = ml::outputFrame(key, output, f);
     if (!img || img->w <= 0 || img->h <= 0) return false;
     Format fmt = format(a.engine, a.frame);
@@ -89,7 +89,7 @@ bool MLNode::fillFromOutput(RenderArgs& a, Image& out, const std::string& slot, 
         }
     }
     // the worker's images are linear Rec.709; nodes compute in the working space
-    if (output == "rgba") {
+    if (output == "rgba" || output == "take") {
         std::string err;
         if (auto t = color::convert(color::configOf(comp), color::kLinearRec709, color::workingOf(comp), &err))
             color::apply(*t, out, false);
@@ -719,7 +719,10 @@ std::string trackMaskSource(Node* n, double f, bool* current) {
 }  // namespace strata::mlnodes
 
 namespace strata {
+void registerImageGenNode();
+
 void registerMLNodes() {
+    registerImageGenNode();
     auto& r = NodeRegistry::instance();
     r.add("LTX", [] { return std::make_unique<mlnodes::LTXNode>(); });
     r.add("AlphaGen", [] { return std::make_unique<mlnodes::AlphaGenNode>(); });

@@ -144,6 +144,7 @@ class JobContext:
         self.cancel_path = os.path.join(jobdir, "cancel")
         self.last_progress = 0.0
         self._last_status = 0.0
+        self.detail = {}
         self._log = open(os.path.join(jobdir, "log.txt"), "a", encoding="utf-8", buffering=1)
         self.outputs = {}
         try:
@@ -168,12 +169,17 @@ class JobContext:
 
     def status(self, state, progress, message):
         self.last_progress = float(progress)
-        atomic_write_json(os.path.join(self.jobdir, "status.json"),
-                          {"state": state, "progress": float(progress), "message": message, "time": time.time()})
+        st = {"state": state, "progress": float(progress), "message": message, "time": time.time()}
+        if self.detail:
+            st["detail"] = self.detail
+        atomic_write_json(os.path.join(self.jobdir, "status.json"), st)
 
-    def progress(self, frac, message="", force=False):
-        """Report progress (0-1); also the cancel point. Writes at most 5 times a second."""
+    def progress(self, frac, message="", force=False, detail=None):
+        """Report progress (0-1); also the cancel point. Writes at most 5 times a second.
+        `detail` (a dict) is kept and written with every status as "detail" (steps, batch index, ...)."""
         self.check()
+        if detail is not None:
+            self.detail = dict(detail)
         now = time.time()
         frac = max(0.0, min(1.0, float(frac)))
         if force or now - self._last_status > 0.2 or frac >= 1.0:
@@ -222,7 +228,18 @@ class JobContext:
             arr = arr[..., None]
         o = self.outputs.setdefault(name, {"pattern": f"out/{name}.%d.npy", "frames": [], "width": int(arr.shape[1]),
                                            "height": int(arr.shape[0]), "channels": list(channels)})
-        np.save(os.path.join(self.out_dir, f"{name}.{int(frame)}.npy"), np.ascontiguousarray(arr.astype(dtype)))
+        path = os.path.join(self.out_dir, f"{name}.{int(frame)}.npy")
+        tmp = f"{path}.{os.getpid()}.tmp"  # Welder may read a frame while the job still runs: never half a file
+        with open(tmp, "wb") as f:
+            np.save(f, np.ascontiguousarray(arr.astype(dtype)))
+        for _ in range(50):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                time.sleep(0.02)
+        else:
+            os.replace(tmp, path)
         if int(frame) not in o["frames"]:
             o["frames"].append(int(frame))
 

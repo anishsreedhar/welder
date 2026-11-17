@@ -1614,8 +1614,9 @@ void knobBody(Ctx& c, const KnobDef& k) {
             size_t idx = (size_t)std::atof(cur.c_str());
             if (idx < k.options.size()) cur = k.options[idx];
         }
+        const std::vector<std::string> opts = k.options.empty() ? c.node->knobChoices(k.name) : k.options;
         if (kit::beginCombo("##c", cur.c_str(), k.width > 0 ? k.width : std::min(avail, 220.0f))) {
-            for (auto& o : k.options)
+            for (auto& o : opts)
                 if (ImGui::Selectable(o.c_str(), o == cur)) {
                     c.app.checkpoint();
                     change(c, k.name, [o](json& j) { j = o; });

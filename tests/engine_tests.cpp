@@ -40,6 +40,8 @@
 #include "nodes/CameraTrackerNode.h"
 #include "nodes/Lens.h"
 #include "nodes/MLNodes.h"
+#include "nodes/ImageGenNode.h"
+#include "core/CacheDir.h"
 #include "nodes/Splat.h"
 #include "gpu/Gpu.h"
 #include "core/Brand.h"
@@ -884,6 +886,199 @@ int main(int argc, char** argv) {
         CHECK(j["dirs"].size() >= 1 && std::filesystem::path(j["dirs"][0].get<std::string>()) == std::filesystem::path(ml::installDir()));
         ml::setHome("");
         ml::setAppDir("");
+    });
+
+    test("ImageGen: checkpoint and LoRA folders are scanned", [&] {
+        namespace fs = std::filesystem;
+        auto root = tmp / "imagegen_scan";
+        fs::remove_all(root);
+        auto ck = root / "checkpoints", lo = root / "loras";
+        fs::create_directories(ck / "flux2-dev" / "transformer");
+        std::ofstream(ck / "flux2-dev" / "model_index.json") << R"({"_class_name": "Flux2Pipeline"})";
+        std::ofstream(ck / "flux2-dev" / "transformer" / "diffusion_pytorch_model.safetensors") << "x";  // inside a model: not listed
+        fs::create_directories(ck / "sdxl");
+        std::ofstream(ck / "sdxl" / "model_index.json") << R"({"_class_name": "StableDiffusionXLPipeline"})";
+        fs::create_directories(ck / "finetunes");
+        std::ofstream(ck / "finetunes" / "my-dev.safetensors") << "xx";
+        std::ofstream(ck / "notes.txt") << "-";
+        fs::create_directories(lo / "styles");
+        std::ofstream(lo / "ink.safetensors") << "x";
+        std::ofstream(lo / "styles" / "film.safetensors") << "x";
+        ml::setHome((root / "home").string());
+        ml::setImageGenDirs({{(ck).string()}, {(lo).string()}});
+        auto cks = ml::checkpoints(true);
+        CHECK(cks.size() == 3);
+        if (cks.size() == 3) {
+            CHECK(cks[0].name == "flux2-dev" && cks[0].folder && cks[0].family == "Flux2Pipeline");
+            CHECK(cks[1].name == "sdxl" && cks[1].family == "StableDiffusionXLPipeline");
+            CHECK(cks[2].name == "finetunes/my-dev.safetensors" && !cks[2].folder && cks[2].size == 2);
+        }
+        auto los = ml::loras();
+        CHECK(los.size() == 2 && los[0].name == "ink.safetensors" && los[1].name == "styles/film.safetensors");
+        CHECK(ml::findLora("styles/film.safetensors").has_value());
+        CHECK(!ml::findLora("gone.safetensors").has_value());
+        CHECK(ml::findCheckpoint((ck / "flux2-dev").string()).has_value());  // an absolute path works too
+        // the node's menus: FLUX.2 folders and single files (not the SDXL folder)
+        imagegen::ImageGenNode n;
+        auto choices = n.knobChoices("checkpoint");
+        CHECK((choices == std::vector<std::string>{"flux2-dev", "finetunes/my-dev.safetensors"}));
+        CHECK((n.knobChoices("base") == std::vector<std::string>{"auto", "flux2-dev"}));
+        CHECK(n.knobChoices("sampler").front() == "euler");
+        ml::setHome("");
+    });
+
+    test("ImageGen: modes, job spec, seeds, takes and output", [&] {
+        namespace fs = std::filesystem;
+        auto root = tmp / "imagegen_node";
+        fs::remove_all(root);
+        auto ck = root / "checkpoints", lo = root / "loras";
+        fs::create_directories(ck / "flux2-klein");
+        std::ofstream(ck / "flux2-klein" / "model_index.json") << R"({"_class_name": "Flux2KleinPipeline"})";
+        std::ofstream(ck / "dev-finetune.safetensors") << "x";
+        fs::create_directories(lo);
+        std::ofstream(lo / "ink.safetensors") << "x";
+        ml::setHome((root / "home").string());
+        setCacheRoot((root / "cache").string());
+        ml::setImageGenDirs({{ck.string()}, {lo.string()}});
+
+        auto c = comp(json::array({
+            {{"name", "Src"}, {"type", "Constant"}, {"params", {{"color", {0.5, 0.5, 0.5, 1}}}}},
+            {{"name", "Matte"}, {"type", "Constant"}, {"params", {{"color", {1, 1, 1, 1}}}}},
+            {{"name", "Gen"}, {"type", "ImageGen"}, {"params", {{"checkpoint", "flux2-klein"}, {"positive_prompt", "a red house"},
+                                                               {"width", 1000}, {"height", 770}, {"batch_count", 3}, {"seed", 40}}}},
+        }));
+        auto* g = dynamic_cast<imagegen::ImageGenNode*>(c->find("Gen"));
+        CHECK(g != nullptr);
+        if (!g) return;
+        Engine e;
+        g->runFrame = 4;
+        // ---- Auto mode follows what is connected
+        CHECK(g->effectiveMode() == imagegen::Mode::Txt2Img);
+        auto s = g->spec("main", e);
+        CHECK(s.error.empty());
+        CHECK(s.task == "imagegen" && s.first == 4 && s.last == 4 && s.inputs.empty());
+        CHECK(s.params["mode"] == "txt2img" && s.params["width"] == 1008 && s.params["height"] == 768);  // snapped to 16
+        CHECK(s.params["checkpoint"] == (ck / "flux2-klein").string() && !s.params.contains("base"));
+        CHECK(s.params["seed"] == 40 && s.params["batch_count"] == 3 && s.params["sampler"] == "euler");
+        c->setInput(g, 0, c->find("Src"));
+        CHECK(g->effectiveMode() == imagegen::Mode::Img2Img);
+        s = g->spec("main", e);
+        CHECK(s.inputs.size() == 1 && s.inputs[0].name == "src" && s.inputs[0].index == 0 && s.params["mode"] == "img2img");
+        c->setInput(g, 1, c->find("Matte"));
+        CHECK(g->effectiveMode() == imagegen::Mode::Inpaint);
+        s = g->spec("main", e);
+        CHECK(s.inputs.size() == 2 && s.inputs[1].name == "mask" && s.params["mask_channel"] == "alpha");
+        g->params.data["mode"] = "Txt2Img";  // an explicit mode wins
+        CHECK(g->spec("main", e).inputs.empty());
+        g->params.data["mode"] = "Inpaint";
+        c->setInput(g, 1, nullptr);
+        CHECK(g->spec("main", e).error.find("mask") != std::string::npos);
+        g->params.data["mode"] = "Auto";
+
+        // ---- errors that stop a run before it is queued
+        g->params.data["checkpoint"] = "";
+        CHECK(g->spec("main", e).error.find("pick a checkpoint") != std::string::npos);
+        g->params.data["checkpoint"] = "gone";
+        CHECK(g->spec("main", e).error.find("isn't in the checkpoints folder") != std::string::npos);
+        g->params.data["checkpoint"] = "dev-finetune.safetensors";  // single file: the FLUX.2 folders are its base candidates
+        s = g->spec("main", e);
+        CHECK(s.error.empty() && s.params["base"] == "auto" && s.params["base_candidates"].size() == 1);
+        g->params.data["checkpoint"] = "flux2-klein";
+
+        // ---- the LoRA stack: enabled rows only, as files with a stamp
+        g->addLora("ink.safetensors");
+        g->addLora("ink.safetensors");
+        auto rows = imagegen::lorasOf(g->params);
+        rows[1].enabled = false;
+        rows[0].weight = 5;  // clamped
+        imagegen::setLoras(g->params, rows);
+        s = g->spec("main", e);
+        CHECK(s.params["loras"].size() == 1 && s.params["loras"][0]["weight"] == 2.0);
+        CHECK(s.params["loras"][0]["file"] == (lo / "ink.safetensors").string() && s.params["loras"][0].contains("stamp"));
+        g->addLora("missing.safetensors");
+        CHECK(g->spec("main", e).error.find("LoRA 'missing.safetensors'") != std::string::npos);
+        g->removeLora(2);
+        CHECK(imagegen::lorasOf(g->params).size() == 2);
+
+        // ---- seed_mode after each run
+        g->runSubmitted("main", "k");
+        CHECK(g->params.num("seed", 0) == 43);  // Increment: past the whole batch
+        g->params.data["seed_mode"] = "Fixed";
+        g->runSubmitted("main", "k");
+        CHECK(g->params.num("seed", 0) == 43);
+        g->params.data["seed_mode"] = "Randomize";
+        g->runSubmitted("main", "k");
+        double r1 = g->params.num("seed", 0);
+        g->runSubmitted("main", "k");
+        CHECK(r1 >= 0 && r1 <= 2147483647 && g->params.num("seed", 0) != r1);
+
+        // ---- a finished job, as the worker leaves it: the node outputs the selected take
+        const std::string key = "imagegen-test";
+        fs::path jd = ml::jobDir(key);
+        fs::create_directories(jd / "out");
+        json takes = json::array();
+        for (int i = 0; i < 2; ++i) {
+            std::vector<float> px(32 * 16 * 4);
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 32; ++x) {
+                    float* p = &px[((size_t)y * 32 + x) * 4];
+                    p[0] = (float)i;            // take i: red = i
+                    p[1] = y < 8 ? 1.0f : 0.0f;  // the top half (npy rows are top first) is green
+                    p[2] = 0.25f;
+                    p[3] = 1.0f;
+                }
+            CHECK(ml::writeNpy((jd / "out" / ("take." + std::to_string(i) + ".npy")).string(), px.data(), 32, 16, 4, true));
+            takes.push_back({{"index", i}, {"seed", 100 + i}, {"width", 32}, {"height", 16}, {"prompt", "a red house"}});
+        }
+        std::ofstream(jd / "result.json") << json{{"takes", takes}, {"warnings", json::array({"distilled klein ignores guidance"})}}.dump();
+        std::ofstream(jd / "status.json") << R"({"state": "done", "progress": 1})";
+        g->params.data["ml"] = {{"main", {{"job", key}, {"result", key}}}};
+        g->resultAttached("main", key);
+        CHECK((g->history() == std::vector<std::string>{key}));
+        CHECK(g->takes().size() == 2 && g->takes()[1].seed == 101);
+        Format f = g->format(e, 1);
+        CHECK(f.width == 32 && f.height == 16);
+        g->selectTake(1);
+        ImagePtr img = render(*c, "Gen");
+        CHECK(img->bounds == Box(0, 0, 32, 16));
+        CHECK(std::fabs(px(img, 5, 12, "R") - 1.0f) < 1e-3);  // take 1
+        CHECK(std::fabs(px(img, 5, 12, "G") - 1.0f) < 1e-3);  // y = 12 is the top half (Welder: y up)
+        CHECK(std::fabs(px(img, 5, 2, "G")) < 1e-3);
+        CHECK(std::fabs(px(img, 5, 2, "A") - 1.0f) < 1e-3);
+        json inf = g->info(e, 1);
+        CHECK(inf["take"] == "2 of 2" && inf["seed"] == 101 && inf["warnings"].size() == 1);
+        g->params.data["take"] = 9;  // out of range: clamped
+        CHECK(g->takeIndex() == 1);
+
+        // ---- a promoted take is the source: Auto turns to Img2Img without a source input
+        c->setInput(g, 0, nullptr);
+        g->promoteTake(key, 0);
+        CHECK(g->effectiveMode() == imagegen::Mode::Img2Img);
+        s = g->spec("main", e);
+        CHECK(s.error.empty() && s.inputs.empty() && s.params["source_file"].get<std::string>().find("take.0.npy") != std::string::npos);
+        CHECK(g->matchInput(e) && g->params.num("width", 0) == 256 && g->params.num("height", 0) == 256);  // 32 x 16, snapped
+        g->clearPromoted();
+        CHECK(g->effectiveMode() == imagegen::Mode::Txt2Img);
+
+        // ---- a run in progress: its status detail and the takes finished so far
+        const std::string run = "imagegen-running";
+        fs::path rd = ml::jobDir(run);
+        fs::create_directories(rd / "out");
+        std::ofstream(rd / "status.json") << R"({"state": "running", "progress": 0.4, "message": "image 2/3, step 6/28",
+            "detail": {"step": 6, "steps": 28, "batch_index": 1, "batch_size": 3, "takes_done": 1, "preview_seq": 9}})";
+        std::ofstream(rd / "out" / "takes.json") << R"([{"index": 0, "seed": 43, "width": 32, "height": 16}])";
+        std::vector<float> pv(8 * 8 * 3, 0.5f);
+        CHECK(ml::writeNpy((rd / "out" / "preview.npy").string(), pv.data(), 8, 8, 3, true));
+        g->params.data["ml"]["main"]["job"] = run;
+        imagegen::Live l = g->live();
+        CHECK(g->running() && l.step == 6 && l.steps == 28 && l.batchIndex == 1 && l.batchSize == 3 && l.takesDone == 1 && l.previewSeq == 9);
+        CHECK(g->liveTakes().size() == 1 && g->liveTakes()[0].seed == 43);
+        auto pvImg = g->livePreview();
+        CHECK(pvImg && pvImg->w == 8 && pvImg->c == 3);
+        CHECK(g->takes().size() == 2);  // the output stays the finished result meanwhile
+
+        setCacheRoot("");
+        ml::setHome("");
     });
 
     test("Merge: channel boxes off, Video colorspace, inject, fringe, range from; their .nk knobs", [] {
