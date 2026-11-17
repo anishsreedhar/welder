@@ -366,18 +366,39 @@ def load_pipeline(ctx, p):
         raise RuntimeError(f"checkpoint not found: {ckpt or '(none)'}")
     single = os.path.isfile(ckpt)
     base = p.get("base") or ""
-    if single and (not base or base == "auto"):
-        base = pick_base(ckpt, p.get("base_candidates", []))
+    parts = None  # (text encoder, VAE) files: ComfyUI's split files, no Diffusers folder
+    if single:
+        te, vae = p.get("text_encoder") or "auto", p.get("vae") or "auto"
+        if te != "auto" or vae != "auto":
+            parts = True
+        elif not base or base == "auto":
+            try:
+                base = pick_base(ckpt, p.get("base_candidates", []))
+            except RuntimeError:
+                if not p.get("component_candidates"):
+                    raise
+                parts = True
+        if parts:
+            from . import imagegen_parts
+            parts = imagegen_parts.pick_parts(ckpt, te, vae, p.get("component_candidates", []))
+            base = ""
     folder = base if single else ckpt
     dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}.get(p.get("dtype", "bf16"), torch.bfloat16)
     offload = p.get("offload", "auto")
     if not torch.cuda.is_available():
         offload = "none"
-    key = (ckpt, _stamp(ckpt), folder, str(dtype), offload)
+    key = (ckpt, _stamp(ckpt), folder, str(dtype), offload,
+           tuple((f, _stamp(f)) for f in parts) if parts else None)
     if _STATE["key"] == key:
         return _STATE["pipe"], _STATE["info"]
 
     unload()
+    if parts:
+        from . import imagegen_parts
+        ctx.progress(0.0, f"loading {os.path.basename(ckpt)} + {os.path.basename(parts[0])} + {os.path.basename(parts[1])}", force=True)
+        ctx.log(f"split files: transformer {ckpt}, text encoder {parts[0]}, VAE {parts[1]}")
+        pipe = imagegen_parts.build_pipeline(ckpt, parts[0], parts[1], dtype, p.get("tokenizer", ""))
+        return _finish_load(ctx, p, pipe, "Flux2KleinPipeline", ckpt, os.path.dirname(parts[0]), offload, key)
     from . import imagegen_flux3 as flux3
     is_flux3 = flux3.is_flux3_folder(folder)
     if is_flux3:
@@ -399,6 +420,11 @@ def load_pipeline(ctx, p):
         pipe = flux3.load(folder, kw.get("transformer"), dtype)
     else:
         pipe = getattr(diffusers, cls_name).from_pretrained(folder, **kw)
+    return _finish_load(ctx, p, pipe, cls_name, ckpt, folder, offload, key)
+
+
+def _finish_load(ctx, p, pipe, cls_name, ckpt, folder, offload, key):
+    import torch
     used = "none"
     if torch.cuda.is_available():
         sizes = component_bytes(pipe)
@@ -411,7 +437,7 @@ def load_pipeline(ctx, p):
         pipe.vae.enable_tiling()
     info = {
         "class": cls_name,
-        "family": "flux3" if is_flux3 else "flux2",
+        "family": "flux3" if cls_name == FLUX3 else "flux2",
         "distilled": bool(getattr(pipe.config, "is_distilled", False)) if cls_name in ("Flux2KleinPipeline", FLUX3) else True,
         "negative": cls_name in ("Flux2KleinPipeline", FLUX3),
         "folder": folder,

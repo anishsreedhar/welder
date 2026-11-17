@@ -930,13 +930,14 @@ void scanDir(const std::string& root, bool wantFolders, int depth, std::vector<M
 struct ScanCache {
     std::mutex m;
     double time = -1e9;
-    std::vector<ModelFile> ckpts, loras;
+    std::vector<ModelFile> ckpts, loras, parts;
 };
 ScanCache& scanCache() {
     static ScanCache c;
     return c;
 }
 
+std::string kindCached(const ModelFile& m);
 void rescanIfOld(bool force) {
     auto& c = scanCache();
     {
@@ -951,14 +952,55 @@ void rescanIfOld(bool force) {
             if (std::none_of(out.begin(), out.end(), [&](const ModelFile& o) { return o.name == m.name; })) out.push_back(m);
         v.swap(out);
     };
-    for (auto& r : d.checkpoints) scanDir(r, true, 3, ck);
+    std::vector<ModelFile> parts;
+    for (auto& r : d.checkpoints) {
+        scanDir(r, true, 3, ck);
+        // ComfyUI's layout: models/{diffusion_models,checkpoints} beside models/{text_encoders,clip,vae}
+        std::error_code ec;
+        const fs::path root = P(r), up = root.parent_path();
+        for (const fs::path& dir : {root / "text_encoders", root / "clip", root / "vae", up / "text_encoders", up / "clip", up / "vae"}) {
+            if (!fs::is_directory(dir, ec) || fs::equivalent(dir, root, ec)) continue;
+            std::vector<ModelFile> found;
+            scanDir(S(dir), false, 2, found);
+            for (auto& m : found) {
+                m.name = S(dir.filename()) + "/" + m.name;
+                m.kind = kindCached(m);
+                if (m.kind == "text_encoder" || m.kind == "vae") parts.push_back(m);
+            }
+        }
+    }
     for (auto& r : d.loras) scanDir(r, false, 4, lo);
+    // files in the checkpoints folders: text encoders and VAEs are parts, not checkpoints
+    std::vector<ModelFile> keep;
+    for (auto& m : ck) {
+        if (!m.folder) m.kind = kindCached(m);
+        if (m.kind == "text_encoder" || m.kind == "vae") parts.push_back(m);
+        else keep.push_back(m);
+    }
+    ck.swap(keep);
     keepFirst(ck);
     keepFirst(lo);
+    keepFirst(parts);
     std::lock_guard<std::mutex> l(c.m);
     c.ckpts.swap(ck);
     c.loras.swap(lo);
+    c.parts.swap(parts);
     c.time = nowSeconds();
+}
+
+// The kind of each file seen, by path + size + time (headers of big files are read once).
+std::string kindCached(const ModelFile& m) {
+    static std::mutex km;
+    static std::map<std::string, std::pair<std::string, std::string>> cache;  // path -> (stamp, kind)
+    {
+        std::lock_guard<std::mutex> l(km);
+        auto it = cache.find(m.path);
+        if (it != cache.end() && it->second.first == m.stamp()) return it->second.second;
+    }
+    std::string k = safetensorsKind(m.path);
+    std::lock_guard<std::mutex> l(km);
+    cache[m.path] = {m.stamp(), k};
+    return k;
 }
 
 std::optional<ModelFile> findIn(const std::vector<ModelFile>& v, const std::string& nameOrPath, bool folders) {
@@ -1018,7 +1060,40 @@ std::vector<ModelFile> loras(bool rescan) {
     return scanCache().loras;
 }
 
+std::vector<ModelFile> imageGenComponents(bool rescan) {
+    rescanIfOld(rescan);
+    std::lock_guard<std::mutex> l(scanCache().m);
+    return scanCache().parts;
+}
+
+std::string safetensorsKind(const std::string& path) {
+    std::ifstream f(P(path), std::ios::binary);
+    unsigned char b[8];
+    if (!f.read((char*)b, 8)) return "";
+    uint64_t n = 0;
+    for (int i = 7; i >= 0; --i) n = (n << 8) | b[i];
+    if (n < 2 || n > (uint64_t(256) << 20)) return "";
+    std::string s((size_t)n, '\0');
+    if (!f.read(s.data(), (std::streamsize)n)) return "";
+    json h = json::parse(s, nullptr, false);
+    if (!h.is_object()) return "";
+    bool blocks = false, attn = false, decoder = false;
+    for (auto& [k, v] : h.items()) {
+        (void)v;
+        if (k.find("double_blocks.") != std::string::npos || k.find("single_blocks.") != std::string::npos ||
+            k.find("transformer_blocks.") != std::string::npos || k.find("joint_blocks.") != std::string::npos)
+            blocks = true;
+        else if (k.find("layers.") != std::string::npos && k.find("self_attn.") != std::string::npos)
+            attn = true;
+        else if (k.find("decoder.conv_in.") != std::string::npos || k.find("decoder.up") != std::string::npos)
+            decoder = true;
+        if (blocks) break;
+    }
+    return blocks ? "transformer" : attn ? "text_encoder" : decoder ? "vae" : "";
+}
+
 std::optional<ModelFile> findCheckpoint(const std::string& nameOrPath) { return findIn(checkpoints(), nameOrPath, true); }
+std::optional<ModelFile> findComponent(const std::string& nameOrPath) { return findIn(imageGenComponents(), nameOrPath, false); }
 std::optional<ModelFile> findLora(const std::string& nameOrPath) { return findIn(loras(), nameOrPath, false); }
 
 }  // namespace strata::ml
