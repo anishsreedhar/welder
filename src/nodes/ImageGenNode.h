@@ -1,12 +1,12 @@
-// ImageGen: all-in-one AI image generation in a single node (FLUX.2 [dev] / [klein] through
-// Diffusers on the ML worker: ml/strata_ml/tasks/imagegen.py). Checkpoint, prompts, a LoRA
+// ImageGen: all-in-one AI image generation in a single node (FLUX.2 [dev] / [klein] and FLUX 3
+// [klein] through Diffusers on the ML worker: ml/strata_ml/tasks/imagegen.py, imagegen_flux3.py). Checkpoint, prompts, a LoRA
 // stack, sampler and batch settings are all knobs of this one node; its output is an ordinary
 // RGBA image (linear, converted to the comp's working space) that composites like a Read.
 //
 // Inputs: source    (optional RGBA: the base image for Img2Img / Inpaint; with use_reference also a
-//                    FLUX.2 reference image),
+//                    reference image),
 //         mask      (optional matte: Inpaint; its alpha, or luminance),
-//         reference (optional RGBA: a separate FLUX.2 reference image, e.g. a style or character to
+//         reference (optional RGBA: a separate reference image, e.g. a style or character to
 //                    follow; it never becomes the base and doesn't change the mode).
 //
 // One press of Generate is one job: `batch_count` takes with seeds seed, seed+1, ... The node
@@ -26,7 +26,8 @@
 //   take              which take of the result the node outputs (0-based)
 //   fit               "crop" | "pad" | "stretch": how the source meets width x height
 //   mask_channel ("alpha" | "luminance"), invert_mask, mask_grow (px), mask_feather (px)
-//   use_reference     also hand the source to FLUX.2 as a reference image
+//   use_reference     also hand the source to the model as a reference image
+//   prompt_upsampler  FLUX 3: rewrite the prompt with BFL's prompt upsampler (flux-3-image-klein-pup) first
 //   dtype ("bf16" | "fp16" | "fp32"), offload ("auto" | "model" | "group" | "sequential" | "none"), vae_tiling
 //   preview_every     steps between live previews (0 = none), preview_size (px)
 //   promoted          {"job": key, "take": i} or null: a take used as the source
