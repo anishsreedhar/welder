@@ -8,7 +8,7 @@ working, and the node shows the result when it's ready.
 | Node | What it does | Model |
 |---|---|---|
 | **AlphaGen** | Makes a matte for a clip with no green screen: white is foreground, grey is partial. Outputs the plate with the matte as alpha. | LTX-2.5 + the Alpha Gen IC-LoRA (beta) |
-| **LTX** | LTX-2.5 video-to-video with an IC-LoRA. The src clip guides the result. Presets: Pixel Upscaler x2, Water Simulation, Colorization, Decompression, Deblur, Day to Night, Union Control (depth / edges / as is), Motion Control, Inpaint, Relight, Alpha Gen. | LTX-2.5 + the preset's IC-LoRA |
+| **LTX** | LTX-2.5 video-to-video with an IC-LoRA. The src clip guides the result. Presets: Pixel Upscaler x2, Water Simulation, Colorization, Decompression, Deblur, Day to Night, Union Control (depth / edges / as is), Motion Control, Inpaint, Relight, Layout to Render, Alpha Gen. A style input sets the first frame, and a LoRA stack adds your own LoRAs. | LTX-2.5 + the preset's IC-LoRA |
 | **GaussianSplat** | Trains Gaussian splats from a plate and its camera, refining the camera as it trains. Outputs splats for **SplatRender** and the 3D view, plus the refined camera. | none (trained per shot) |
 | **Reconstruct** | One pass of MapAnything gives every frame's camera (pose and focal), a depth.Z pass and a coloured point cloud. No training: it's a generalizable model. | MapAnything (Apache 2.0 weights) |
 | **Depth** | Video Depth Anything: depth for the whole shot that stays steady from frame to frame (no flicker), as depth.Z. Relative (the scene's shape) or metric (metres). Splits a cut sequence at its cuts. | Video Depth Anything Small (Apache 2.0); Base / Large (non-commercial) |
@@ -166,7 +166,12 @@ the model folders Welder uses from `<ml home>\model_dirs.json`.
 * Frames outside the range it ran on pass through unchanged.
 
 ### LTX
-* **Inputs:** src (the reference clip) and mask (Inpaint only).
+* **Inputs:** src (the reference clip; called **layout** on Layout to Render),
+  mask (Inpaint only) and style (optional, any preset).
+* **style** is an image that becomes the first frame: the look the shot starts
+  from. Welder uses the style input's frame at the start of the range, so a
+  Read of a single still works. **style strength** sets how closely frame 1
+  follows it. Make the frame with ImageGen, or paint it.
 * **IC-LoRA** picks the preset. The panel shows the preset's notes, and
   **use the prompt template** fills the prompt with the wording the LoRA was
   trained on. Replace the `<...>` parts.
@@ -179,8 +184,30 @@ the model folders Welder uses from `<ml home>\model_dirs.json`.
   * `inpaint`: the mask is painted #66FF00 into the reference.
   * `relight`: a shaded ball showing **light azimuth / elevation** is drawn
     top right.
-* **two stage** adds LTX's 2x latent upscale pass. Lightricks recommend
-  single-stage for IC-LoRAs because it holds identity better.
+* **stages:**
+  * `preset` (the default): the preset's recipe. Layout to Render runs
+    `two + IC-LoRA`. The others run `one`.
+  * `one`: a single pass at native size. Lightricks recommend this for most
+    IC-LoRAs because it holds identity better.
+  * `two`: adds LTX's 2x latent upscale pass. Sizes snap to multiples of 64.
+  * `two + IC-LoRA`: also keeps the reference and your LoRAs on the second
+    pass.
+* **chain windows** (on by default): on long shots, each window after the
+  first starts from the frame the previous window made there, so the look
+  carries through. The upscaler and Alpha Gen don't chain.
+* **LoRA stack:** your own LTX-2.x LoRAs, picked from the same LoRAs folder
+  that ImageGen uses. Each row has on/off, a file and a weight from -2 to 2.
+  They run together with the preset's IC-LoRA, on the same passes. A style
+  LoRA trained for LTX-2.x changes the look; an image-model LoRA (FLUX, SDXL)
+  won't load.
+* **Layout to Render** (LTX-2.5) turns a layout into a finished shot.
+  * layout: a grey clay render, a playblast or a blocky previs from Blender
+    or Unreal. It gives the camera path, motion and placement. A detailed
+    clay render isn't needed.
+  * style: a finished-looking first frame. Don't use the grey clay frame.
+  * prompt: one or two sentences describing the finished shot, matching the
+    style frame. Don't write "clay", "3D" or "Unreal".
+  * 24 fps; 1920x1088 is a known good size (set **max size** to 1920).
 * **Union Control, Motion Control, Inpaint and Relight** are LTX-2.3
   adapters. Lightricks' own LTX-2.5 workflows load them onto LTX-2.5.
 * **Pixel Upscaler x2** outputs twice the input size. It invents plausible

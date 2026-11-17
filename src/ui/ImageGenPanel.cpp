@@ -599,7 +599,21 @@ void referenceRow(ImageGenNode& g) {
 }
 
 // ------------------------------------------------------------------ LoRA stack
-void loraStack(App& app, ImageGenNode& g) {
+// One undoable edit of any node's LoRA rows (ImageGen, LTX).
+void editLoras(App& app, const std::string& name, std::function<void(std::vector<imagegen::LoraEntry>&)> fn,
+               bool undoStep = true) {
+    if (undoStep) app.checkpoint();
+    app.edit([name, fn](Comp& c) {
+        if (Node* n = c.find(name)) {
+            auto rows = imagegen::lorasOf(n->params);
+            fn(rows);
+            imagegen::setLoras(n->params, rows);
+            n->paramsChanged();
+        }
+    });
+}
+
+void loraStack(App& app, Node& g) {
     auto rows = imagegen::lorasOf(g.params);
     const auto choices = g.knobChoices("lora");
     const float rowH = ImGui::GetFrameHeightWithSpacing();
@@ -670,16 +684,23 @@ void loraStack(App& app, ImageGenNode& g) {
     }
     if (pill("+ Add LoRA", false, "Add a row to the stack (each row: on/off, file, weight -2..2)")) {
         std::string first = choices.empty() ? std::string() : choices.front();
-        editGen(app, g.name, [first](ImageGenNode& n, Comp&) { n.addLora(first); });
+        editLoras(app, g.name, [first](std::vector<imagegen::LoraEntry>& r) {
+            imagegen::LoraEntry e;
+            e.file = first;
+            r.push_back(e);
+        });
     }
     if (!rows.empty()) {
         int on = (int)std::count_if(rows.begin(), rows.end(), [](const imagegen::LoraEntry& e) { return e.enabled && !e.file.empty(); });
         ImGui::SameLine();
         ImGui::TextDisabled("%d of %d on", on, (int)rows.size());
     }
-    if (remove >= 0) editGen(app, g.name, [remove](ImageGenNode& n, Comp&) { n.removeLora(remove); });
+    if (remove >= 0)
+        editLoras(app, g.name, [remove](std::vector<imagegen::LoraEntry>& r) {
+            if (remove < (int)r.size()) r.erase(r.begin() + remove);
+        });
     else if (changed)
-        editGen(app, g.name, [rows](ImageGenNode& n, Comp&) { imagegen::setLoras(n.params, rows); }, gesture);
+        editLoras(app, g.name, [rows](std::vector<imagegen::LoraEntry>& r) { r = rows; }, gesture);
 }
 
 // ------------------------------------------------------------------ size
@@ -721,6 +742,10 @@ void sizeRow(App& app, ImageGenNode& g, Engine& e) {
 }
 
 }  // namespace
+
+void drawLoraStack(App& app, Node* n) {
+    if (n) loraStack(app, *n);
+}
 
 void drawImageGenPanel(App& app, UiState& ui, Node* n, const std::function<void(const char*)>& knob) {
     auto* g = dynamic_cast<ImageGenNode*>(n);

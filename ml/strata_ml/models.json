@@ -137,6 +137,17 @@
    "license": "LTX-2 Community License",
    "license_url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Relight"
   },
+  "ltx-ic-layout": {
+   "label": "LTX-2.5 IC-LoRA: Layout to Render",
+   "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Layout-To-Render",
+   "files": [
+    "ltx-2.5-22b-ic-lora-layout-to-render-1.0.safetensors"
+   ],
+   "size_gb": 1.31,
+   "gated": true,
+   "license": "LTX-2 Community License",
+   "license_url": "https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Layout-To-Render"
+  },
   "mapanything": {
    "label": "MapAnything (Apache 2.0 weights): cameras + depth from frames",
    "repo": "facebook/map-anything-apache",
@@ -267,7 +278,22 @@
   }
  },
  "ic_loras": {
-  "_comment": "Presets for the LTX node. model: the models entry; control: what the reference video is made of (input = the src input as is). prompt: the template the panel's 'template' button puts in the prompt; replace the <...> parts.",
+  "_comment": "Presets for the LTX node. model: the models entry; control: what the reference video is made of (input = the src input as is). prompt: the template the panel's 'template' button puts in the prompt; replace the <...> parts. stages: the default recipe ('one', 'two', 'two + IC-LoRA'). style: 'wanted' warns when the style input is empty. src_label: what the src input is called on this preset.",
+  "Layout to Render": {
+   "model": "ltx-ic-layout",
+   "strength": 1.0,
+   "control": "input",
+   "prompt": "<one or two sentences describing the finished shot, matching the style frame>",
+   "trained": [
+    1920,
+    1088,
+    81
+   ],
+   "stages": "two + IC-LoRA",
+   "style": "wanted",
+   "src_label": "layout",
+   "note": "layout: a clay render, playblast or blocky previs (camera, motion, placement). style: a finished-looking first frame (make one with ImageGen), not a grey clay frame. Don't write 'clay', '3D' or 'Unreal' in the prompt. 24 fps; 1920x1088 is a known good size."
+  },
   "Alpha Gen": {
    "model": "ltx-ic-alpha-gen",
    "strength": 1.0,

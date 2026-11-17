@@ -33,6 +33,7 @@ struct InputSpec {
     std::string name;  // name the worker sees ("src", "mask")
     int index = 0;     // node input
     bool required = false;
+    std::optional<int> frame;  // only this frame (a still: LTX's style); by default every frame of the job
 };
 
 struct JobSpec {

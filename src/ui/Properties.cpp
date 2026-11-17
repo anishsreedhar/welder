@@ -1744,6 +1744,8 @@ void knobBody(Ctx& c, const KnobDef& k) {
         ocioKnob(c, k, avail);
     } else if (k.type == Knob::Channels) {
         channelsKnob(c, k, avail);
+    } else if (k.type == Knob::Json && k.name == "loras" && c.node->type == "LTX") {
+        drawLoraStack(c.app, c.node);
     } else if (k.type == Knob::Json) {
         static std::map<std::string, std::string> buffers;
         static std::map<std::string, bool> bad;

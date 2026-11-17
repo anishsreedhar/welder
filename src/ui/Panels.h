@@ -585,6 +585,9 @@ void drawMLWorker(App& app, const std::string& needPkg);
 // ImageGen's panel (ImageGenPanel.cpp): Generate bar, contact sheet, source chip, mode, LoRA stack,
 // size presets. `knob` draws one of the node's schema knobs by name with the panel's own widgets.
 void drawImageGenPanel(App& app, UiState& ui, Node* n, const std::function<void(const char*)>& knob);
+// The LoRA stack (rows of on/off, file, weight) over the node's "loras" param; the files are the
+// node's knobChoices("lora"). ImageGen's panel and LTX's properties draw it.
+void drawLoraStack(App& app, Node* n);
 void drawTrackerViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec2 p1, const ViewXf& xf, bool hovered);
 // The Tracker's row of tools over the viewer (add track, grab, track, keyframes, clear, centre).
 void drawTrackerToolbar(App& app, UiState& ui);

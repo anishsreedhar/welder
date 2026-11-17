@@ -302,7 +302,7 @@ class WorkerTests(unittest.TestCase):
             os.makedirs(os.path.join(self.home, "models", m), exist_ok=True)
             open(os.path.join(self.home, "models", m, ".complete"), "w").close()
 
-        def fake_generate(ctx, pipe, ref_path, prompt, seed, out_w, out_h, n, fps, ref_strength, two_stage):
+        def fake_generate(ctx, pipe, ref_path, prompt, seed, out_w, out_h, n, fps, ref_strength, two_stage, images=()):
             import av
             calls.append((out_w, out_h, n, prompt))
             c = av.open(ref_path)
@@ -356,6 +356,95 @@ class WorkerTests(unittest.TestCase):
         finally:
             ltx.generate, ltx.get_pipeline = old_g, old_p
 
+    def test_ltx_layout_style_and_loras(self):
+        """Layout to Render: the style frame starts window 1, later windows start from the last one's frame,
+        the user's LoRAs join the IC-LoRA, and the preset's recipe is two stages with the IC-LoRA on both."""
+        import cv2
+        from strata_ml.tasks import ltx
+        for m in ("ltx-2.5", "ltx-ic-layout"):
+            os.makedirs(os.path.join(self.home, "models", m), exist_ok=True)
+            open(os.path.join(self.home, "models", m, ".complete"), "w").close()
+        lora_dir = os.path.join(self.home, "loras")
+        os.makedirs(lora_dir, exist_ok=True)
+        style_lora = os.path.join(lora_dir, "style.safetensors")
+        open(style_lora, "w").close()
+        calls, pipes = [], []
+
+        def fake_generate(ctx, pipe, ref_path, prompt, seed, out_w, out_h, n, fps, ref_strength, two_stage, images=()):
+            # the result: frame 0 is the start image when there is one, the rest stay grey
+            conds = []
+            for path, idx, strength in images:
+                img = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB).astype(np.float32) / 255
+                assert img.shape[:2] == (out_h, out_w), (img.shape, out_w, out_h)
+                conds.append((idx, strength, img))
+            calls.append((out_w, out_h, n, two_stage, [(i, s, float(im.mean())) for i, s, im in conds]))
+            out = [np.full((out_h, out_w, 3), 0.5, np.float32) for _ in range(n)]
+            for i, _, img in conds:
+                out[i] = img
+            # tag each frame with the window's number so chaining can be told apart
+            for k in range(1, n):
+                out[k] = np.full((out_h, out_w, 3), 0.1 * len(calls), np.float32)
+            return out
+
+        def fake_pipeline(ctx, loras, quant, offload, stage_2_ic_lora=False):
+            pipes.append((loras, stage_2_ic_lora))
+            return object()
+
+        old_g, old_p = ltx.generate, ltx.get_pipeline
+        ltx.generate, ltx.get_pipeline = fake_generate, fake_pipeline
+        try:
+            frames = list(range(1, 26))
+            layout = [np.full((64, 128, 4), 0.2, np.float32) for _ in frames]
+            style = np.zeros((128, 128, 4), np.float32)  # square: cropped to the layout's aspect
+            style[..., 0] = 1.0
+            jd = write_job(self.home, "layout", "ltx",
+                           {"preset": "Layout to Render", "max_size": 128, "chunk_frames": 17, "overlap": 4,
+                            "two_stage": True, "stage_2_ic_lora": True, "style_strength": 0.8, "style_frame": 1,
+                            "colorspace": "linear",
+                            "loras": [{"file": style_lora, "weight": 0.6}, {"file": style_lora, "weight": 0.2},
+                                      {"file": "/nope.safetensors", "weight": 1, "enabled": False}]},
+                           {"src": (frames, layout), "style": ([1], [style])})
+            self.run_queue()
+            self.assertEqual(status(jd)["state"], "done", status(jd))
+            (loras, stage2), = pipes
+            self.assertTrue(stage2)
+            self.assertTrue(loras[0][0].endswith("ltx-2.5-22b-ic-lora-layout-to-render-1.0.safetensors"), loras)
+            self.assertEqual(loras[0][1], 1.0)
+            self.assertEqual(len(loras), 2)
+            self.assertEqual(loras[1][0], style_lora)
+            self.assertAlmostEqual(loras[1][1], 0.8)
+            self.assertEqual(len(calls), 2)
+            w0, w1 = calls
+            self.assertTrue(w0[3])  # two-stage: sizes in multiples of 64
+            self.assertEqual((w0[0] % 64, w0[1] % 64), (0, 0))
+            (idx, strength, mean), = w0[4]  # the style frame (red) at 0.8
+            self.assertEqual((idx, strength), (0, 0.8))
+            self.assertAlmostEqual(mean, 1 / 3, places=2)
+            (idx, strength, mean), = w1[4]  # window 2 starts from window 1's frame there (0.1 grey)
+            self.assertEqual((idx, strength), (0, 1.0))
+            self.assertAlmostEqual(mean, 0.1, places=2)
+            out = np.load(os.path.join(jd, "out", "rgba.1.npy")).astype(np.float32)
+            self.assertGreater(out[..., 0].mean(), 0.9)
+            self.assertLess(out[..., 1].mean(), 0.05)
+            # no style input: still runs (with a note), and a missing LoRA file fails the job
+            calls.clear()
+            jd = write_job(self.home, "layout2", "ltx", {"preset": "Layout to Render", "max_size": 128,
+                                                         "chunk_frames": 9, "chain_windows": False},
+                           {"src": (frames[:9], layout[:9])})
+            self.run_queue()
+            self.assertEqual(status(jd)["state"], "done", status(jd))
+            self.assertEqual(calls[0][4], [])
+            with open(os.path.join(jd, "log.txt")) as f:
+                self.assertIn("no style frame", f.read())
+            jd = write_job(self.home, "layout3", "ltx", {"preset": "Layout to Render", "max_size": 128,
+                                                         "loras": [{"file": "/nope.safetensors", "weight": 1}]},
+                           {"src": (frames[:9], layout[:9])})
+            self.run_queue()
+            self.assertEqual(status(jd)["state"], "error", status(jd))
+            self.assertIn("LoRA not found", status(jd).get("error", "") + status(jd).get("message", ""))
+        finally:
+            ltx.generate, ltx.get_pipeline = old_g, old_p
+
     def test_splat_in_child_process(self):
         """Splat training handed to another Python (the splat environment), progress and result coming back."""
         means, cols, cams, imgs = synthetic_scene(n_frames=4, w=32, h=24)
@@ -383,7 +472,7 @@ class WorkerTests(unittest.TestCase):
         """The LTX node's preset menu (Schema.cpp) lists exactly the registry's IC-LoRA presets."""
         import re
         from strata_ml.models import registry
-        src = open(os.path.join(HERE, "..", "src", "ui", "Schema.cpp"), encoding="utf-8").read()
+        src = open(os.path.join(HERE, "..", "src", "core", "Schema.cpp"), encoding="utf-8").read()
         m = re.search(r'C\("preset", "IC-LoRA", "[^"]*",\s*\{([^}]*)\}', src)
         self.assertIsNotNone(m)
         menu = re.findall(r'"([^"]+)"', m.group(1))
