@@ -1,0 +1,7 @@
+DWPose whole-body pose estimation (ONNX), for the LTX node's Union Control (pose).
+
+Taken from easy_dwpose 1.0.2 (https://pypi.org/project/easy-dwpose/, Apache-2.0), itself based on
+DWPose by IDEA-Research (https://github.com/IDEA-Research/DWPose, Apache-2.0) and the ControlNet
+annotator code. Changes for Welder: the Hugging Face download and the torch / PIL wrapper were
+removed (Welder downloads the ONNX models itself, see dwpose.py), imports made relative, the
+draw module renamed to draw_openpose.py, and its one matplotlib call (hsv_to_rgb) replaced by colorsys. The models (yzd-v/DWPose) are not included.

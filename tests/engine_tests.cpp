@@ -985,6 +985,34 @@ int main(int argc, char** argv) {
         CHECK((n->knobChoices("lora") == std::vector<std::string>{"anime.safetensors"}));
         imagegen::setLoras(n->params, {{true, "gone.safetensors", 1.0}});
         CHECK(n->spec("main", e).error.find("isn't in the LoRAs folder") != std::string::npos);
+        n->params.data.erase("loras");
+        // the docs' adapters: each preset's models, recipe and knob defaults
+        auto has = [](const mlnodes::JobSpec& j, const char* m) {
+            return std::find(j.models.begin(), j.models.end(), m) != j.models.end();
+        };
+        n->params.data["preset"] = "Union Control (pose)";
+        s = n->spec("main", e);
+        CHECK(s.params["control"] == "pose" && has(s, "dwpose") && has(s, "ltx-ic-union") && s.params["two_stage"] == true);
+        n->params.data["preset"] = "Union Control (depth)";
+        CHECK(has(n->spec("main", e), "video-depth-anything-small"));
+        n->params.data["preset"] = "Union Control (edges)";
+        s = n->spec("main", e);
+        CHECK(s.params["canny_low"] == 92 && s.params["canny_high"] == 200);
+        n->params.data["preset"] = "SDR to HDR";
+        s = n->spec("main", e);
+        CHECK(has(s, "ltx-ic-sdr-to-hdr") && has(s, "ltx-2.5-video-vae"));
+        n->params.data["preset"] = "Ingredients";
+        s = n->spec("main", e);
+        CHECK(s.params["max_size"] == 768 && s.params["chunk_frames"] == 121 && has(s, "ltx-ic-ingredients"));
+        n->params.data["max_size"] = 1024;  // the knob wins over the preset's default
+        CHECK(n->spec("main", e).params["max_size"] == 1024);
+        n->params.data["preset"] = "Outpaint";
+        s = n->spec("main", e);
+        CHECK(s.params["control"] == "outpaint" && s.params["stage_2_ic_lora"] == true);
+        for (const char* pr : {"Clean Plate", "Pixel Upscaler x4", "Instant Shave"}) {
+            n->params.data["preset"] = pr;
+            CHECK(n->spec("main", e).error.empty());
+        }
         ml::setHome("");
     });
 

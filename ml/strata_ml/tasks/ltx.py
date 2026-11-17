@@ -1,4 +1,5 @@
-"""LTX-2.5 IC-LoRA video-to-video (Layout to Render, Alpha Gen, upscaler, water, relight, union control, ...).
+"""LTX-2.5 IC-LoRA video-to-video (Layout to Render, Clean Plate, Alpha Gen, upscalers, union control, ...),
+and Lightricks' SDR-to-HDR pipeline.
 
 Runs Lightricks' ltx-pipelines ICLoraPipeline the way the LTX-2.5 model cards
 recommend for these adapters: the distilled model, one stage at native size
@@ -106,26 +107,42 @@ def canny(frames, lo, hi):
 
 
 def depth_frames(ctx, frames):
-    """Relative depth (near = white) with Depth Anything V2 Small, normalised over the clip."""
-    import torch
-    from transformers import pipeline as hf_pipeline
-    from PIL import Image
-    d = ctx.require_model("depth-anything-v2-small")
-    dev = 0 if torch.cuda.is_available() else -1
-    pipe = hf_pipeline("depth-estimation", model=d, device=dev)
-    raw = []
-    for i, f in enumerate(frames):
-        ctx.progress(0.02 + 0.08 * i / len(frames), f"depth {i + 1}/{len(frames)}")
-        im = Image.fromarray((np.clip(f, 0, 1) * 255).astype(np.uint8))
-        r = pipe(im)["predicted_depth"]
-        r = r.squeeze().float().cpu().numpy()
-        raw.append(resize(r, f.shape[1], f.shape[0]))
+    """Relative depth (near = white) with Video Depth Anything Small (steady over time, as Lightricks'
+    Union Control workflow uses), normalised over the window."""
+    from . import depth as vda
+    net, dev = vda.load_model(ctx, "relative", "small")
+    u8 = np.stack([(np.clip(f, 0, 1) * 255 + 0.5).astype(np.uint8) for f in frames])
+    raw = vda.infer(net, dev, u8, report=lambda f: ctx.progress(0.02 + 0.08 * f, "depth"))
+    raw = [resize(r, f.shape[1], f.shape[0]) for r, f in zip(raw, frames)]
     lo = np.percentile(np.stack(raw), 1)
     hi = np.percentile(np.stack(raw), 99)
     out = []
-    for r in raw:  # Depth Anything outputs relative inverse depth: larger = nearer
+    for r in raw:  # disparity: larger = nearer
         v = np.clip((r - lo) / max(hi - lo, 1e-6), 0, 1)
         out.append(np.repeat(v[..., None], 3, axis=2).astype(np.float32))
+    return out
+
+
+_POSE = {"det": None}
+
+
+def pose_frames(ctx, frames):
+    """OpenPose-style skeletons (body, hands, face) on black, with DWPose (vendored; ONNX models)."""
+    if _POSE["det"] is None:
+        import importlib.util
+        if importlib.util.find_spec("onnxruntime") is None:
+            raise RuntimeError("the ML worker's Python has no 'onnxruntime': run setup-ml again (pose control needs it)")
+        import onnxruntime
+        from ..vendor.dwpose.dwpose import DWposeDetector
+        dev = "cuda" if "CUDAExecutionProvider" in onnxruntime.get_available_providers() else "cpu"
+        _POSE["det"] = DWposeDetector(ctx.model_file("dwpose", "yolox_l.onnx"),
+                                      ctx.model_file("dwpose", "dw-ll_ucoco_384.onnx"), device=dev)
+    det = _POSE["det"]
+    out = []
+    for i, f in enumerate(frames):
+        ctx.progress(0.02 + 0.08 * i / len(frames), f"pose {i + 1}/{len(frames)}")
+        u8 = (np.clip(f, 0, 1) * 255 + 0.5).astype(np.uint8)
+        out.append(det(u8).astype(np.float32) / 255.0)
     return out
 
 
@@ -276,6 +293,8 @@ def run(ctx, p):
     src = ctx.input("src")
     if src is None:
         raise RuntimeError("connect the src input")
+    if preset.get("pipeline") == "hdr":
+        return run_hdr(ctx, p, preset_name, preset, src)
     lora_file = ctx.model_file(preset["model"], reg["models"][preset["model"]]["files"][0])
     alpha_gen = preset_name == "Alpha Gen"
     scale = int(preset.get("scale", 1))
@@ -292,7 +311,8 @@ def run(ctx, p):
     frames_all = list(src.frames)
     if not frames_all:
         raise RuntimeError("no input frames")
-    chunk = snap_frames(int(p.get("chunk_frames", 97)))
+    min_frames = int(preset.get("min_frames", 9))
+    chunk = snap_frames(max(int(p.get("chunk_frames", 97)), min_frames))
     overlap = min(int(p.get("overlap", 8)), chunk // 2)
     fps = float(p.get("fps", 24))
     srgb = p.get("colorspace", "sRGB") == "sRGB"
@@ -346,15 +366,21 @@ def run(ctx, p):
             if control == "inpaint":
                 m = mask_in.alpha(f) if (mask_in and f in mask_in.frames) else src.alpha(f)
                 masks.append(pad_to(resize(m.astype(np.float32), pw, ph), PW, PH))
+            elif control == "outpaint":  # the new area: the mask's alpha, or where src has none
+                m = mask_in.alpha(f) if (mask_in and f in mask_in.frames) else 1.0 - src.alpha(f)
+                masks.append(pad_to(resize(m.astype(np.float32), pw, ph), PW, PH))
         if control == "canny":
             ref = canny(ref, int(p.get("canny_low", 100)), int(p.get("canny_high", 200)))
         elif control == "depth":
             ref = depth_frames(ctx, ref)
-        elif control == "inpaint":
+        elif control == "pose":
+            ref = pose_frames(ctx, ref)
+        elif control in ("inpaint", "outpaint"):
             ref = inpaint_frames(ref, masks, int(p.get("mask_grow", 8)))
         elif control == "relight":
             ref = relight_frames(ref, float(p.get("light_azimuth", 45)), float(p.get("light_elevation", 30)))
         n = snap_frames(len(ref)) if len(ref) >= 9 else 9
+        n = max(n, snap_frames(min_frames))
         if n < len(ref):  # round up to the next 8k+1 so no frame is lost
             n += 8
         while len(ref) < n:
@@ -407,3 +433,93 @@ def run(ctx, p):
                 rgb = srgb_decode(np.clip(img, 0, 1)) if srgb else img
                 ctx.write_frame("rgba", f, np.concatenate([rgb, np.ones_like(rgb[..., :1])], axis=2))
     return ctx.result(message=f"{preset_name}: {len(frames_all)} frames", preset=preset_name)
+
+
+# ---------------------------------------------------------------- SDR to HDR
+# ACEScg (AP1) -> linear Rec.709 (the ACES reference matrix, Bradford D60 -> D65)
+AP1_TO_REC709 = np.array([[1.70505099, -0.62179212, -0.08325887],
+                          [-0.13025642, 1.14080474, -0.01054832],
+                          [-0.02400336, -0.12896898, 1.15297234]], np.float32)
+
+
+def acescct_to_linear709(ct):
+    """ACEScct [0, 1] (what the HDR pipeline returns) -> scene-linear Rec.709, >= 0."""
+    ct = np.clip(np.asarray(ct, np.float32), 0, 1)
+    lin = np.where(ct > 0.155251141552511, np.power(2.0, ct * 17.52 - 9.72),
+                   (ct - 0.0729055341958355) / 10.5402377416545).astype(np.float32)
+    return np.clip(lin @ AP1_TO_REC709.T, 0, None)
+
+
+_HDR = {"key": None, "pipe": None}
+
+
+def get_hdr_pipeline(ctx, quant, offload):
+    key = (quant, offload)
+    if _HDR["key"] == key:
+        return _HDR["pipe"]
+    _HDR["pipe"] = None
+    _PIPE.update(key=None, pipe=None)  # one 22B model in memory at a time
+    from ltx_pipelines.hdr_ic_lora import HDRICLoraPipeline
+    from ltx_pipelines.utils.model_paths import ModelPaths
+    from ltx_pipelines.utils.types import OffloadMode
+    f = {k: ctx.model_file("ltx-2.5", v) for k, v in LTX_FILES.items()}
+    reg = registry()["models"]["ltx-ic-sdr-to-hdr"]["files"]
+    paths = ModelPaths.from_split(transformer_path=f["transformer"], text_encoder_path=f["text_encoder"],
+                                  video_vae_path=ctx.model_file("ltx-2.5-video-vae", "vae/ltx-2.5-video-vae-bf16.safetensors"),
+                                  audio_vae_path=f["audio_vae"])
+    kw = {"offload_mode": {"none": OffloadMode.NONE, "cpu": OffloadMode.CPU, "disk": OffloadMode.DISK}[offload]}
+    if quant != "fp8":
+        kw["quantization"] = None
+    pipe = HDRICLoraPipeline(model_paths=paths, hdr_lora=ctx.model_file("ltx-ic-sdr-to-hdr", reg[0]),
+                             text_embeddings_path=ctx.model_file("ltx-ic-sdr-to-hdr", reg[1]), **kw)
+    _HDR.update(key=key, pipe=pipe)
+    return pipe
+
+
+def hdr_generate(ctx, pipe, video_path, seed):
+    """Returns the clip as ACEScct [0, 1] frames (F x H x W x 3 float32)."""
+    import torch
+    from pathlib import Path
+    from ltx_pipelines.utils.media_io import VideoInput
+    with torch.inference_mode():
+        out, _ = pipe(video=VideoInput(path=Path(video_path), gamma_encoded=True), seed=int(seed))
+    return out.float().cpu().numpy()
+
+
+def run_hdr(ctx, p, preset_name, preset, src):
+    """The whole range in one pass (the pipeline handles long clips); 8k+1 frames, padded with the last."""
+    frames_all = list(src.frames)
+    if not frames_all:
+        raise RuntimeError("no input frames")
+    W, H = src.width, src.height
+    pw, ph = process_size(W, H, float(p.get("max_size", 1280)))
+    srgb = p.get("colorspace", "sRGB") == "sRGB"
+    fps = float(p.get("fps", 24))
+    ref = []
+    for f in frames_all:
+        rgb = src.rgb(f)
+        if srgb:
+            rgb = srgb_encode(rgb)
+        ref.append(resize(np.clip(rgb, 0, 1).astype(np.float32), pw, ph))
+    n = max(9, snap_frames(len(ref)))
+    if n < len(ref):
+        n += 8
+    while len(ref) < n:
+        ref.append(ref[-1])
+    ctx.log(f"{preset_name}: {len(frames_all)} frames at {pw}x{ph} in one pass")
+    pipe = get_hdr_pipeline(ctx, p.get("quantization", "fp8"), p.get("offload", "cpu"))
+    ctx.progress(0.1, "generating HDR", force=True)
+    with tempfile.TemporaryDirectory(dir=ctx.jobdir) as td:
+        path = os.path.join(td, "sdr.mp4")
+        write_video(path, ref, fps)
+        out = hdr_generate(ctx, pipe, path, p.get("seed", 1234))
+    peak = 0.0
+    for k, f in enumerate(frames_all):
+        if k >= len(out):
+            break
+        lin = acescct_to_linear709(out[k][:ph, :pw])
+        lin = resize(lin, W, H)
+        peak = max(peak, float(lin.max()))
+        ctx.write_frame("rgba", f, np.concatenate([lin, np.ones_like(lin[..., :1])], axis=2))
+    ctx.log(f"peak value {peak:.2f}")
+    return ctx.result(message=f"{preset_name}: {len(frames_all)} frames, peak {peak:.1f}", preset=preset_name)
