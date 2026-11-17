@@ -1,13 +1,20 @@
-"""LTX-2.5 IC-LoRA video-to-video (Alpha Gen, upscaler, water, relight, union control, ...).
+"""LTX-2.5 IC-LoRA video-to-video (Layout to Render, Alpha Gen, upscaler, water, relight, union control, ...).
 
 Runs Lightricks' ltx-pipelines ICLoraPipeline the way the LTX-2.5 model cards
 recommend for these adapters: the distilled model, one stage at native size
 (a 2x canvas with skip_stage_2), the reference video attached throughout.
+Layout to Render uses the two-stage recipe with the IC-LoRA on both stages.
 On a 24 GB card the transformer is cast to fp8 on the fly and its weights
 stream from system RAM (offload "cpu"; needs ~64 GB RAM) or from disk.
 
+Inputs: src (the reference video: the plate, or the layout for Layout to Render),
+mask (Inpaint), style (an image that becomes the first frame: the look).
+`loras` adds the user's LoRAs to the preset's IC-LoRA; they are applied together,
+on the stages the IC-LoRA runs on.
+
 Long shots are processed in windows of `chunk_frames` (8k+1) frames that
-overlap by `overlap` frames and are cross-faded.
+overlap by `overlap` frames and are cross-faded. With `chain_windows`, each
+window after the first starts from the frame the previous window made there.
 """
 
 import os
@@ -169,18 +176,51 @@ def relight_frames(frames, azimuth, elevation):
     return out
 
 
+# ---------------------------------------------------------------- style / keyframe images
+def fit_cover(img, w, h):
+    """Scale to cover w x h, then centre-crop (the style frame keeps its aspect)."""
+    ih, iw = img.shape[:2]
+    s = max(w / float(iw), h / float(ih))
+    sw, sh = max(w, int(round(iw * s))), max(h, int(round(ih * s)))
+    img = resize(img, sw, sh)
+    x0, y0 = (sw - w) // 2, (sh - h) // 2
+    return img[y0:y0 + h, x0:x0 + w]
+
+
+def write_image(path, img):
+    """H x W x 3 float [0,1] (display-referred) -> 8-bit PNG."""
+    import cv2
+    u8 = (np.clip(img, 0, 1) * 255.0 + 0.5).astype(np.uint8)
+    if not cv2.imwrite(path, cv2.cvtColor(np.ascontiguousarray(u8), cv2.COLOR_RGB2BGR)):
+        raise RuntimeError(f"can't write {path}")
+
+
+def user_loras(items):
+    """The node's LoRA stack ([{file, weight}], enabled rows only) as (path, weight); the same file twice adds up."""
+    out = {}
+    for l in items or []:
+        path = l.get("file", "")
+        if not path or not l.get("enabled", True):
+            continue
+        if not os.path.isfile(path):
+            raise RuntimeError(f"LoRA not found: {path}")
+        out[path] = out.get(path, 0.0) + float(l.get("weight", 1.0))
+    return [(p, w) for p, w in out.items() if w != 0.0]
+
+
 # ---------------------------------------------------------------- pipeline
 _PIPE = {"key": None, "pipe": None}
 
 
-def get_pipeline(ctx, lora_path, strength, quant, offload):
-    key = (lora_path, strength, quant, offload)
+def get_pipeline(ctx, loras, quant, offload, stage_2_ic_lora=False):
+    """loras: [(path, strength), ...], the preset's IC-LoRA first."""
+    key = (tuple(loras), quant, offload, bool(stage_2_ic_lora))
     if _PIPE["key"] == key:
         return _PIPE["pipe"]
     _PIPE["pipe"] = None
     import torch  # noqa: F401
     from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
-    from ltx_pipelines.ic_lora import ICLoraPipeline
+    from ltx_pipelines.ic_lora import ICLoraPipeline, resolve_ic_lora_stages
     from ltx_pipelines.utils.model_paths import ModelPaths
     from ltx_pipelines.utils.quantization_factory import QuantizationKind
     from ltx_pipelines.utils.types import OffloadMode
@@ -192,22 +232,29 @@ def get_pipeline(ctx, lora_path, strength, quant, offload):
     if quant == "fp8":
         kw["quantization"] = QuantizationKind.FP8_CAST.to_policy(checkpoint_path=f["transformer"])
     kw["offload_mode"] = {"none": OffloadMode.NONE, "cpu": OffloadMode.CPU, "disk": OffloadMode.DISK}[offload]
-    lora = LoraPathStrengthAndSDOps(lora_path, float(strength), LTXV_LORA_COMFY_RENAMING_MAP)
-    pipe = ICLoraPipeline(model_paths=paths, spatial_upsampler_path=f["upsampler"], loras=[lora], **kw)
+    if stage_2_ic_lora:  # the IC-LoRA (and the user's LoRAs) on stage 2 as well
+        kw["stages"] = resolve_ic_lora_stages(height=0, width=0, stage_2_ic_lora=True)
+    lo = [LoraPathStrengthAndSDOps(p, float(s), LTXV_LORA_COMFY_RENAMING_MAP) for p, s in loras]
+    for p, s in loras[1:]:
+        ctx.log(f"LoRA {os.path.basename(p)} at {s:g}")
+    pipe = ICLoraPipeline(model_paths=paths, spatial_upsampler_path=f["upsampler"], loras=lo, **kw)
     _PIPE.update(key=key, pipe=pipe)
     return pipe
 
 
-def generate(ctx, pipe, ref_path, prompt, seed, out_w, out_h, n, fps, ref_strength, two_stage):
-    """Run one window; returns a list of H x W x 3 float32 frames in [0,1] (display-referred)."""
+def generate(ctx, pipe, ref_path, prompt, seed, out_w, out_h, n, fps, ref_strength, two_stage, images=()):
+    """Run one window; returns a list of H x W x 3 float32 frames in [0,1] (display-referred).
+    images: [(png path, frame index, strength)]: frames the result starts from / passes through."""
     import torch
+    from ltx_pipelines.utils.types import ImageConditioningInput
+    cond = [ImageConditioningInput(p, int(i), float(s)) for p, i, s in images]
     with torch.inference_mode():
         if two_stage:
             out = pipe(prompt=prompt, seed=int(seed), height=out_h, width=out_w, num_frames=n, frame_rate=float(fps),
-                       images=[], video_conditioning=[(ref_path, float(ref_strength))])
+                       images=cond, video_conditioning=[(ref_path, float(ref_strength))])
         else:
             out = pipe(prompt=prompt, seed=int(seed), height=out_h * 2, width=out_w * 2, num_frames=n,
-                       frame_rate=float(fps), images=[], video_conditioning=[(ref_path, float(ref_strength))],
+                       frame_rate=float(fps), images=cond, video_conditioning=[(ref_path, float(ref_strength))],
                        skip_stage_2=True)
         frames = []
         for chunk in out.video:
@@ -238,7 +285,9 @@ def run(ctx, p):
     pw, ph = process_size(W, H, float(p.get("max_size", 1280)))
     if scale > 1:  # the upscaler's reference is half the output
         pw, ph = process_size(W, H, float(p.get("max_size", 1280)) / scale)
-    mult = 64 if p.get("two_stage") else 32  # two-stage runs need sizes divisible by 64
+    two_stage = bool(p.get("two_stage", False))
+    stage_2_ic = two_stage and bool(p.get("stage_2_ic_lora", False))
+    mult = 64 if two_stage else 32  # two-stage runs need sizes divisible by 64
     PW, PH = padded(pw, mult), padded(ph, mult)
     frames_all = list(src.frames)
     if not frames_all:
@@ -250,8 +299,26 @@ def run(ctx, p):
     prompt = p.get("prompt", preset.get("prompt", ""))
     if "<" in prompt and ">" in prompt:
         ctx.log("note: the prompt still has <...> placeholders from the template")
-    pipe = get_pipeline(ctx, lora_file, p.get("lora_strength", preset.get("strength", 1.0)),
-                        p.get("quantization", "fp8"), p.get("offload", "cpu"))
+    loras = [(lora_file, float(p.get("lora_strength", preset.get("strength", 1.0))))] + user_loras(p.get("loras"))
+    pipe = get_pipeline(ctx, loras, p.get("quantization", "fp8"), p.get("offload", "cpu"), stage_2_ic)
+
+    # the style frame: the look the result starts from (Layout to Render's "look still")
+    style = None
+    style_in = ctx.input("style")
+    style_strength = float(p.get("style_strength", 1.0))
+    if style_in is not None and style_in.frames and style_strength > 0 and not alpha_gen and scale == 1:
+        sf = int(p.get("style_frame", style_in.frames[0]))
+        if sf not in style_in.frames:
+            sf = style_in.frames[0]
+        rgb = style_in.rgb(sf)
+        if srgb:
+            rgb = srgb_encode(rgb)
+        style = pad_to(fit_cover(np.clip(rgb, 0, 1).astype(np.float32), pw, ph), PW, PH)
+        ctx.log(f"style: frame {sf} of the style input at {style_strength:g}")
+    elif preset.get("style") == "wanted":
+        ctx.log("note: no style frame: Layout to Render works best with one (connect the style input)")
+    chain = bool(p.get("chain_windows", True)) and not alpha_gen and scale == 1
+    made = {}  # frame -> the padded output frame, kept for the next window's start
 
     # windows over the frame range
     windows = []
@@ -295,8 +362,23 @@ def run(ctx, p):
         with tempfile.TemporaryDirectory(dir=ctx.jobdir) as td:
             ref_path = os.path.join(td, "reference.mp4")
             write_video(ref_path, ref, fps)
+            images = []
+            start = None
+            if wi == 0:
+                start, strength = style, style_strength
+            elif chain and fr[0] in made:  # continue from what the last window made here
+                start, strength = made[fr[0]], 1.0
+            if start is not None:
+                ip = os.path.join(td, "start.png")
+                write_image(ip, start)
+                images.append((ip, 0, strength))
             out = generate(ctx, pipe, ref_path, prompt, p.get("seed", 1234), PW * scale, PH * scale, n, fps,
-                           p.get("ref_strength", 1.0), bool(p.get("two_stage", False)))
+                           p.get("ref_strength", 1.0), two_stage, images)
+        made = {}
+        if chain and wi < len(windows) - 1:
+            nxt = windows[wi + 1][0]
+            if a <= nxt < b and nxt - a < len(out):
+                made[frames_all[nxt]] = np.clip(out[nxt - a][:PH, :PW], 0, 1).astype(np.float32)
         for k, f in enumerate(fr):
             if k >= len(out):
                 break

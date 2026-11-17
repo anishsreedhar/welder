@@ -48,6 +48,10 @@ KnobDef Ocio(const char* n, const char* l, Knob t) { return {n, l, t, "", 0, 1, 
 
 constexpr int kImageGenMinSize = 256;
 
+KnobDef Tip(KnobDef k, const char* tip) {
+    k.tip = tip;
+    return k;
+}
 KnobDef When(KnobDef k, const char* cond) {
     k.when = cond;
     return k;
@@ -2001,17 +2005,30 @@ std::vector<NodeDef> build() {
                  frames(ltxMemory({C("preset", "IC-LoRA", "Pixel Upscaler x2",
                                      {"Pixel Upscaler x2", "Water Simulation", "Colorization", "Decompression", "Deblur",
                                       "Day to Night", "Union Control (depth)", "Union Control (edges)",
-                                      "Union Control (as is)", "Motion Control", "Inpaint", "Relight", "Alpha Gen"}),
+                                      "Union Control (as is)", "Motion Control", "Inpaint", "Relight", "Layout to Render",
+                                      "Alpha Gen"}),
                                    S("prompt", "prompt", ""), F("lora_strength", "LoRA strength", 1, 0, 1.5),
                                    F("ref_strength", "reference strength", 1, 0, 1), I("seed", "seed", 1234, 0, 99999),
-                                   B("two_stage", "two stage", false), Div("Control"),
+                                   Tip(C("stages", "stages", "preset", {"preset", "one", "two", "two + IC-LoRA"}),
+                                     "preset: the preset's recipe (Layout to Render: two + IC-LoRA). two: LTX's 2x latent "
+                                     "upscale pass; + IC-LoRA keeps the reference (and your LoRAs) on it too"),
+                                   Div("Style"),
+                                   F("style_strength", "style strength", 1, 0, 1,
+                                     "how closely the first frame follows the style input (its frame at the start of the range)"),
+                                   Tip(B("chain_windows", "chain windows", true),
+                                     "long shots: each window starts from the frame the last one made, so the look holds"),
+                                   Div("LoRAs"),
+                                   J("loras", "LoRA stack", json::array(),
+                                     "your LoRAs, applied with the preset's IC-LoRA: [{\"enabled\": true, \"file\": name, \"weight\": -2..2}, ...]"),
+                                   Div("Control"),
                                    C("control", "reference", "preset", {"preset", "input", "depth", "canny", "inpaint", "relight"}),
                                    When(I("canny_low", "canny low", 100, 0, 255), "control=canny"),
                                    When(I("canny_high", "canny high", 200, 0, 255), "control=canny"),
                                    F("light_azimuth", "light azimuth", 45, -180, 180, "relight: 0 = from the right, 90 = from the camera"),
                                    F("light_elevation", "light elevation", 30, -90, 90, "relight"),
                                    I("mask_grow", "mask grow", 8, 0, 64)})),
-                 "LTX-2.5 video-to-video with an IC-LoRA: the src clip guides the generation (runs on the ML worker)."});
+                 "LTX-2.5 video-to-video with an IC-LoRA: the src clip guides the generation, the style input (an image) sets "
+                 "the first frame's look, and a LoRA stack adds your LoRAs (runs on the ML worker)."});
     d.push_back({"AlphaGen", "AI",
                  frames(ltxMemory({B("premultiply", "premultiply", true), B("invert", "invert", false),
                                    I("seed", "seed", 1234, 0, 99999)})),

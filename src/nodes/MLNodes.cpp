@@ -12,6 +12,7 @@
 #include "../ml/ML.h"
 #include "CamSolve.h"
 #include "CameraTrackerNode.h"
+#include "ImageGenNode.h"
 #include "NodeUtils.h"
 #include "Splat.h"
 
@@ -238,12 +239,33 @@ void copyInput(RenderArgs& a, Image& out, Node* in) {
 // ================================================================= LTX
 class LTXNode : public MLNode {
 public:
-    int maxInputs() const override { return 2; }
-    std::string inputLabel(int i) const override { return i == 0 ? "src" : "mask"; }
+    // src: the reference video (the plate; the layout for Layout to Render). style: an image that
+    // becomes the first frame (the look). Saved comps keep their src / mask wiring.
+    int maxInputs() const override { return 3; }
+    std::string inputLabel(int i) const override {
+        if (i == 0) return ml::icLora(preset()).value("src_label", std::string("src"));
+        return i == 1 ? "mask" : "style";
+    }
     bool timeDependent() const override { return true; }
     std::string slotLabel(const std::string&) const override { return "Generate"; }
+    std::vector<std::string> knobChoices(const std::string& knob) const override {
+        std::vector<std::string> v;
+        if (knob == "lora")
+            for (auto& m : ml::loras()) v.push_back(m.name);
+        return v;
+    }
 
     std::string preset() const { return params.str("preset", "Pixel Upscaler x2"); }
+
+    // The stages recipe: "one", "two" or "two + IC-LoRA". "preset" (the default) takes the preset's;
+    // comps saved before the stages knob have the old two_stage checkbox.
+    std::string stages(const json& lora) const {
+        std::string st = params.str("stages", "");
+        if (st.empty() && params.has("two_stage") && params.data["two_stage"].is_boolean())
+            st = params.data["two_stage"].get<bool>() ? "two" : "one";
+        if (st.empty() || st == "preset") st = lora.value("stages", std::string("one"));
+        return st;
+    }
 
     // The upscaler's output is bigger than its input.
     Format format(Engine& e, double f) override {
@@ -268,21 +290,39 @@ public:
     JobSpec spec(const std::string&, Engine& e) override {
         JobSpec s;
         s.task = "ltx";
-        s.inputs = {{"src", 0, true}, {"mask", 1, false}};
         auto [a, b] = range(e);
         s.first = a;
         s.last = b;
+        // the style input: one frame, the first of the range
+        s.inputs = {{"src", 0, true}, {"mask", 1, false}, {"style", 2, false, a}};
         json lora = ml::icLora(preset());
         if (lora.empty()) s.error = "unknown preset '" + preset() + "'";
         s.params = pick(params, {{"preset", preset()}, {"prompt", lora.value("prompt", "")},
                                  {"lora_strength", lora.value("strength", 1.0)}, {"ref_strength", 1.0},
+                                 {"style_strength", 1.0}, {"chain_windows", true},
                                  {"seed", 1234}, {"max_size", 1280}, {"chunk_frames", 97}, {"overlap", 8},
-                                 {"two_stage", false}, {"quantization", "fp8"}, {"offload", "cpu"},
+                                 {"quantization", "fp8"}, {"offload", "cpu"},
                                  {"canny_low", 100}, {"canny_high", 200}, {"light_azimuth", 45},
                                  {"light_elevation", 30}, {"mask_grow", 8}, {"colorspace", "sRGB"}});
         std::string control = params.str("control", "preset");
         s.params["control"] = control == "preset" ? lora.value("control", "input") : control;
         s.params["fps"] = comp ? comp->fps : 24.0;
+        std::string st = stages(lora);
+        s.params["two_stage"] = st != "one";
+        s.params["stage_2_ic_lora"] = st == "two + IC-LoRA";
+        s.params["style_frame"] = a;
+        // the LoRA stack: enabled rows, resolved to files (the stamp re-runs the job when a file changes)
+        json loras = json::array();
+        for (auto& r : imagegen::lorasOf(params)) {
+            if (!r.enabled || r.file.empty()) continue;
+            auto f = ml::findLora(r.file);
+            if (!f) {
+                s.error = "LoRA '" + r.file + "' isn't in the LoRAs folder any more";
+                continue;
+            }
+            loras.push_back({{"file", f->path}, {"weight", r.weight}, {"stamp", f->stamp()}});
+        }
+        s.params["loras"] = loras;
         s.models = {"ltx-2.5"};
         if (lora.contains("model")) s.models.push_back(lora["model"]);
         if (s.params["control"] == "depth") s.models.push_back("depth-anything-v2-small");
