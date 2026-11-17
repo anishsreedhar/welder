@@ -3,8 +3,11 @@
 // stack, sampler and batch settings are all knobs of this one node; its output is an ordinary
 // RGBA image (linear, converted to the comp's working space) that composites like a Read.
 //
-// Inputs: source (optional RGBA: Img2Img, Inpaint, or a FLUX.2 reference image),
-//         mask   (optional matte: Inpaint; its alpha, or luminance).
+// Inputs: source    (optional RGBA: the base image for Img2Img / Inpaint; with use_reference also a
+//                    FLUX.2 reference image),
+//         mask      (optional matte: Inpaint; its alpha, or luminance),
+//         reference (optional RGBA: a separate FLUX.2 reference image, e.g. a style or character to
+//                    follow; it never becomes the base and doesn't change the mode).
 //
 // One press of Generate is one job: `batch_count` takes with seeds seed, seed+1, ... The node
 // outputs the selected take; every take of every run stays on disk in the ML cache with its
@@ -103,8 +106,8 @@ struct Live {
 class ImageGenNode : public mlnodes::MLNode {
 public:
     // ---------------------------------------------------------------- graph and pixels
-    int maxInputs() const override { return 2; }
-    std::string inputLabel(int i) const override { return i == 0 ? "source" : "mask"; }
+    int maxInputs() const override { return 3; }
+    std::string inputLabel(int i) const override { return i == 0 ? "source" : i == 1 ? "mask" : "reference"; }
     bool timeDependent() const override { return false; }
     std::string slotLabel(const std::string&) const override { return "Generate"; }
     Format format(Engine& e, double f) override;   // the selected take's size; before any, width x height
@@ -157,7 +160,7 @@ private:
 
 // Editor action: a new ImageGen node below `from` in the graph whose source is take `index` of run
 // `key` (promoted, so Auto runs Img2Img on it), with the same prompts, model, LoRA stack and
-// settings, and denoise_strength 0.55. Call inside App::edit; returns the new node (null if `from`
+// settings, the same reference input, and denoise_strength 0.55. Call inside App::edit; returns the new node (null if `from`
 // has no such take).
 ImageGenNode* branchTakeToNewNode(Comp& c, ImageGenNode& from, const std::string& key, int index);
 

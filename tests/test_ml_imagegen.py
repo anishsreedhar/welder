@@ -412,6 +412,19 @@ class ImageGenTests(unittest.TestCase):
                               "source_file": os.path.join(a, "out", "take.0.npy")})
         self.assertLess(np.abs(self.take(jd) - self.take(a)).mean(), 0.2)
 
+    def test_reference_input(self):
+        ref = self.source()
+        ref[..., 0] = 1.5  # a different image (and HDR: clipped for the model)
+        base, _ = self.run_job({"seed": 6})
+        jd, r = self.run_job({"seed": 6}, {"ref": ref})
+        self.assertEqual(r["takes"][0]["mode"], "txt2img", "a reference doesn't make it img2img")
+        self.assertTrue(r["takes"][0]["reference"])
+        self.assertEqual(r["takes"][0]["references"], 1)
+        self.assertGreater(np.abs(self.take(jd) - self.take(base)).mean(), 1e-5, "the reference conditions the image")
+        # with use_reference the source is a second reference, next to the base
+        _, r2 = self.run_job({"mode": "img2img", "denoise": 0.6, "use_reference": True}, {"src": self.source(), "ref": ref})
+        self.assertEqual(r2["takes"][0]["references"], 2)
+
     def test_reference_image(self):
         jd, r = self.run_job({"use_reference": True}, {"src": self.source()})
         self.assertTrue(r["takes"][0]["reference"])

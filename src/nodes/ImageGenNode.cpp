@@ -289,7 +289,8 @@ ImageGenNode* branchTakeToNewNode(Comp& c, ImageGenNode& from, const std::string
     }
     Node* n = c.addNode("ImageGen", from.name + "_take" + std::to_string(index + 1), from.branchParams(key, index),
                         {{"x", std::round(x)}, {"y", std::round(y)}});
-    n->group = from.group;  // no inputs: the take is the source, so Auto runs Img2Img on it
+    n->group = from.group;  // no source: the take is the source, so Auto runs Img2Img on it
+    if (from.input(2)) c.setInput(n, 2, from.input(2));  // the same reference image
     return dynamic_cast<ImageGenNode*>(n);
 }
 
@@ -431,6 +432,7 @@ JobSpec ImageGenNode::spec(const std::string&, Engine&) {
         s.inputs.push_back({"src", 0, mode != Mode::Txt2Img});
         if (!input(0)) fail(std::string(modeName(mode)) + " needs a source: connect the source input or promote a take");
     }
+    if (input(2)) s.inputs.push_back({"ref", 2, true});  // a separate reference image (any mode)
     if (mode == Mode::Inpaint) {
         s.inputs.push_back({"mask", 1, true});
         p["mask_channel"] = params.str("mask_channel", "alpha");
