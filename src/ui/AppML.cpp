@@ -250,7 +250,7 @@ void App::pollML() {
         if (d) requestView();
         if (!d) {
             std::string err;
-            if (!ml::workerInfo().online && !ml::launchWorker(&err)) message("ML worker: " + err);
+            if (!ml::ensureWorkerFor(k, &err)) message("ML worker: " + err);
         }
     }
     // finished jobs (checked a few times a second)
@@ -264,6 +264,15 @@ void App::pollML() {
             std::string k = m->job(slot);
             if (k.empty() || k == m->result(slot)) continue;
             ml::JobStatus st = ml::jobStatus(k);
+            if (st.state == "queued") {
+                // waiting: a worker that can run it (the one from before an update may have exited or be outdated)
+                std::string err;
+                static double lastErr = -1e9;
+                if (!ml::ensureWorkerFor(k, &err) && t - lastErr > 30) {
+                    lastErr = t;
+                    message("ML worker: " + err);
+                }
+            }
             if (st.state == "done") {
                 std::string n = m->name, s = slot;
                 edit([n, s, k](Comp& c) {

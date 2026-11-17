@@ -14,6 +14,7 @@
 #include <map>
 #include <mutex>
 #include <sstream>
+#include <thread>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -503,6 +504,29 @@ void stopWorker() {
     std::ofstream f(P(home()) / "stop");
 }
 
+
+bool setupOutdated() {
+    static std::mutex m;
+    static double when = -1e9;
+    static bool last = false;
+    std::lock_guard<std::mutex> l(m);
+    const double now = nowSeconds();
+    if (now - when < 5) return last;
+    when = now;
+    auto text = [](const std::string& path) {
+        std::ifstream f(P(path), std::ios::binary);
+        std::stringstream ss;
+        ss << f.rdbuf();
+        std::string s = ss.str();
+        s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
+        return s;
+    };
+    const std::string pkg = packageDir();
+    if (pkg.empty() || pythonPath().empty() || std::getenv("STRATA_ML_PYTHON")) return last = false;
+    const std::string want = text(S(P(pkg) / "requirements.txt"));
+    return last = !want.empty() && want != text(S(P(home()) / "requirements-installed.txt"));
+}
+
 bool runSetup(std::string* err) {
     std::string pkg = packageDir();
     if (pkg.empty()) {
@@ -568,7 +592,39 @@ std::shared_ptr<const json> jobResult(const std::string& key) {
     return r;
 }
 
+// An idle worker that can't run job `key` (one left running from an older Welder, whose task list predates it).
+static bool outdatedFor(const WorkerInfo& w, const std::string& key) {
+    if (!w.online || !w.job.empty() || w.tasks.empty()) return false;
+    json j = readJson(S(P(jobDir(key)) / "job.json"));
+    std::string task = j.is_object() ? j.value("task", std::string()) : "";
+    return !task.empty() && std::find(w.tasks.begin(), w.tasks.end(), task) == w.tasks.end();
+}
+
+bool ensureWorkerFor(const std::string& key, std::string* err) {
+    static std::mutex m;
+    static double lastLaunch = -1e9, lastStop = -1e9;
+    std::lock_guard<std::mutex> l(m);
+    const double now = nowSeconds();
+    WorkerInfo w = workerInfo();
+    if (w.online) {
+        if (outdatedFor(w, key) && now - lastStop > 10) {
+            stopWorker();
+            lastStop = now;
+            lastLaunch = -1e9;  // relaunch as soon as it has gone
+        }
+        return true;
+    }
+    if (now - lastLaunch < 60) return true;  // a starting worker can take a while to write its first heartbeat
+    lastLaunch = now;
+    return launchWorker(err);
+}
+
 void queueJob(const std::string& key) {
+    // stop an outdated worker before queueing, or it takes the job and fails it as an unknown task
+    if (outdatedFor(workerInfo(), key)) {
+        stopWorker();
+        for (int i = 0; i < 40 && workerInfo().online; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     writeModelDirs();
     std::error_code ec;
     fs::create_directories(P(home()) / "queue", ec);

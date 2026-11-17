@@ -927,6 +927,29 @@ int main(int argc, char** argv) {
         ml::setHome("");
     });
 
+    test("ML: a worker left running from an older Welder is stopped when it can't run a new task", [&] {
+        namespace fs = std::filesystem;
+        auto root = tmp / "ml_outdated_worker";
+        fs::remove_all(root);
+        ml::setHome((root / "home").string());
+        setCacheRoot((root / "cache").string());
+        fs::create_directories(root / "home");
+        auto heartbeat = [&](json tasks) {
+            const double now = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+            std::ofstream(root / "home" / "worker.json") << json{{"time", now}, {"job", nullptr}, {"tasks", tasks}}.dump();
+        };
+        fs::create_directories(fs::path(ml::jobDir("ig1")));
+        std::ofstream(fs::path(ml::jobDir("ig1")) / "job.json") << R"({"task": "imagegen", "params": {}})";
+        heartbeat({"ltx", "imagegen"});
+        CHECK(ml::workerInfo().online);
+        CHECK(ml::ensureWorkerFor("ig1", nullptr));
+        CHECK(!fs::exists(root / "home" / "stop"));  // it knows the task: left alone
+        heartbeat({"ltx", "depth"});
+        CHECK(ml::ensureWorkerFor("ig1", nullptr));
+        CHECK(fs::exists(root / "home" / "stop"));  // 0.1.0's worker: asked to stop so the new one starts
+        ml::setHome("");
+    });
+
     test("ImageGen: ComfyUI split files (transformer, text encoder, VAE) are told apart by their headers", [&] {
         namespace fs = std::filesystem;
         auto root = tmp / "imagegen_split";

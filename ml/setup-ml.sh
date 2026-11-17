@@ -27,6 +27,7 @@ echo "[2/5] PyTorch 2.8 (CUDA 12.8)"
 uv pip install --python "$PY" torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 echo "[3/5] LTX-2.5 pipelines, MapAnything and the rest"
 uv pip install --python "$PY" --no-sources -r "$HERE/requirements.txt"
+cp "$HERE/requirements.txt" "$MLHOME/requirements-installed.txt"   # Welder offers "Update ML" when a newer one differs
 echo "[4/5] Gaussian splat environment (Python 3.10, PyTorch 2.4, CUDA 12.4)"
 if uv venv --python 3.10 --allow-existing "$MLHOME/venv-splat" &&
    uv pip install --python "$MLHOME/venv-splat/bin/python" torch==2.4.0 --index-url https://download.pytorch.org/whl/cu124 &&
