@@ -420,6 +420,21 @@ class ImageGenTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, r"\[dev\]"):
             self.parts.pick_parts(self.single, "auto", "auto", cands)
 
+    def test_split_files_with_a_diffusers_named_vae(self):
+        """Comfy-Org's flux2-vae.safetensors keeps Diffusers' tensor names: it loads as it is."""
+        from safetensors.torch import save_file
+        folder, paths, cands = self.split_files()
+        vae = os.path.join(os.path.dirname(paths["vae"]), "flux2-vae-diffusers.safetensors")
+        pipe_vae = __import__("diffusers").AutoencoderKLFlux2.from_pretrained(folder, subfolder="vae")
+        save_file({k: v.detach().float().contiguous() for k, v in pipe_vae.state_dict().items()}, vae)
+        self.assertEqual(self.parts.vae_config(self.parts.file_shapes(vae)),
+                         self.parts.vae_config({k: tuple(v.shape) for k, v in vae_to_ldm(pipe_vae.state_dict()).items()}))
+        p = {"guidance": 3.0, "seed": 5, "checkpoint": paths["diffusion_models"], "base_candidates": [],
+             "component_candidates": [{"path": vae, "kind": "vae"}] + cands[:2]}
+        jd, _ = self.run_job(p)
+        ref, _ = self.run_job(dict(p, checkpoint=folder))
+        self.assertLess(np.abs(self.take(jd) - self.take(ref)).max(), 1e-4)
+
     def test_vae_conversion_round_trip(self):
         vae = tiny_vae(groups=8, quant=True)
         sd = {k: v.detach().float() for k, v in vae.state_dict().items()}

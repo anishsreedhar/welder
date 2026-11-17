@@ -62,6 +62,8 @@ echo.
 echo [3/5] LTX-2.5 pipelines, MapAnything and the rest
 call uv pip install --python "%PY%" --no-sources -r "%HERE%requirements.txt"
 if errorlevel 1 goto :fail
+rem what was installed: Welder compares it with a newer requirements.txt and offers "Update ML"
+copy /y "%HERE%requirements.txt" "%MLHOME%\requirements-installed.txt" >nul
 
 echo.
 echo [4/5] Gaussian splat environment: Python 3.10 + PyTorch 2.4 (CUDA 12.4)

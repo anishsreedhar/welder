@@ -75,6 +75,14 @@ WorkerInfo workerInfo();
 // Start the worker in the background (no console window). False + reason if it can't.
 bool launchWorker(std::string* err);
 void stopWorker();
+// Make sure a worker that can run job `key` is (or will soon be) running: launches one when none is
+// online, and stops an idle one that doesn't know the job's task (a worker left running from an older
+// Welder, whose ml folder has since been replaced) so the next call launches the new code. Launches are
+// at most one a minute. False + reason when a launch fails.
+bool ensureWorkerFor(const std::string& key, std::string* err);
+// The ML environment was set up from an older requirements.txt than this Welder's (or before setup
+// recorded it): "Update ML" (runSetup) installs what's new. Cached for a few seconds.
+bool setupOutdated();
 // Open a console window running setup-ml (Windows) / run setup-ml.sh in the background (log: <home>/setup.log).
 bool runSetup(std::string* err);
 

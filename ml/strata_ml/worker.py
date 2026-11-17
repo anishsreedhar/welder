@@ -196,6 +196,25 @@ class Worker:
             except Exception:  # noqa: BLE001
                 pass
 
+    CODE_CHECK = 5.0  # seconds between looks at the code on disk
+
+    @staticmethod
+    def code_stamp():
+        """What the worker's code on disk looks like (names, sizes, times of strata_ml's .py and .json files):
+        a new Welder copied over the old one changes it, and the worker exits to be relaunched on the new code."""
+        root = os.path.dirname(os.path.abspath(__file__))
+        files = [os.path.join(os.path.dirname(root), "strata_ml_worker.py")]
+        for d, _, names in os.walk(root):
+            files += [os.path.join(d, n) for n in names if n.endswith((".py", ".json"))]
+        out = []
+        for f in sorted(files):
+            try:
+                st = os.stat(f)
+            except OSError:
+                continue
+            out.append((os.path.relpath(f, root), st.st_size, int(st.st_mtime)))
+        return tuple(out)
+
     def loop(self, once=False):
         hb = threading.Thread(target=self.heartbeat, daemon=True)
         hb.start()
@@ -206,11 +225,18 @@ class Worker:
             pass
         print(f"Welder ML worker {__version__} in {self.home}; tasks: {', '.join(sorted(TASKS))}", flush=True)
         print(f"packages: {json.dumps(self.packages)}", flush=True)
+        code, checked = self.code_stamp(), time.time()
         try:
             while True:
                 if os.path.exists(stop):
                     os.remove(stop)
                     break
+                if not once and time.time() - checked > self.CODE_CHECK:
+                    checked = time.time()
+                    if self.code_stamp() != code:  # (between jobs only: queued jobs wait for the new worker)
+                        print("the worker's code changed on disk (Welder was updated): exiting so Welder starts the new one",
+                              flush=True)
+                        break
                 key = self.next_job()
                 if key:
                     self.run_job(key)

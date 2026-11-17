@@ -63,8 +63,29 @@ void ensureWorker(App& app) {
     if (!ml::launchWorker(&err)) app.message("ML worker: " + err);
 }
 
+// Run setup again (it keeps what's installed and adds what this Welder's requirements.txt has that's new).
+void updateButton(App& app, const char* id) {
+    ImGui::SameLine();
+    if (ImGui::SmallButton(id)) {
+        std::string err;
+        if (worker().online) ml::stopWorker();  // its python.exe and DLLs must be free to update
+        if (ml::runSetup(&err)) app.message("ML update started in its own window (finished steps are kept)");
+        else app.message("ML setup: " + err);
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Runs ML setup again in its own window: it keeps PyTorch and the models and installs\n"
+                          "the Python packages this Welder needs. Press Generate / Run again once it's done.");
+}
+
 void workerSection(App& app, const std::string& needPkg) {
     const auto& w = worker();
+    if (!ml::pythonPath().empty() && (ml::setupOutdated() ||
+                                      (w.online && !needPkg.empty() && needPkg != "gsplat" && w.packages.is_object() &&
+                                       !w.packages.value(needPkg, false)))) {
+        label("ML packages");
+        ImGui::TextColored(kBad, "older than this Welder needs");
+        updateButton(app, "Update ML");
+    }
     label("worker");
     if (w.online) {
         std::string gpu = w.packages.is_object() ? w.packages.value("gpu", std::string()) : "";
@@ -76,7 +97,7 @@ void workerSection(App& app, const std::string& needPkg) {
         if (ImGui::SmallButton("stop")) ml::stopWorker();
         if (!needPkg.empty() && needPkg != "gsplat" && w.packages.is_object() && !w.packages.value(needPkg, false)) {
             label("");
-            ImGui::TextColored(kBad, "the worker's Python has no '%s': run Set up ML again", needPkg.c_str());
+            ImGui::TextColored(kBad, "the worker's Python has no '%s': click Update ML", needPkg.c_str());
         }
     } else if (ml::pythonPath().empty()) {
         ImGui::TextColored(kWarn, "not set up");

@@ -6,8 +6,15 @@ import importlib
 
 def _lazy(module, fn):
     def run(ctx, params):
-        m = importlib.import_module(f"{__name__}.{module}")
-        return getattr(m, fn)(ctx, params)
+        try:
+            m = importlib.import_module(f"{__name__}.{module}")
+            return getattr(m, fn)(ctx, params)
+        except ModuleNotFoundError as e:
+            if not e.name or e.name.split(".")[0] == __name__.split(".")[0]:
+                raise
+            # an environment set up by an older Welder: its requirements.txt didn't have this package yet
+            raise ModuleNotFoundError(f"the ML environment has no '{e.name}' (it was set up by an older Welder): "
+                                      "click 'Update ML' in the ML worker row, then try again", name=e.name) from e
     run.__name__ = f"{module}.{fn}"
     return run
 

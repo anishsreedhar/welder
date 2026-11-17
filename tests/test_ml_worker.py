@@ -191,6 +191,19 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(th.is_alive())
         self.assertFalse(os.path.exists(hb))
 
+    def test_exits_when_its_code_changes_on_disk(self):
+        """A newer Welder copied over the old one: the idle worker exits so Welder starts the new code."""
+        stamps = iter([("a",), ("a",), ("b",)])
+        self.w.code_stamp = lambda: next(stamps, ("b",))
+        self.w.CODE_CHECK = 0.05
+        self.w.poll = 0.02
+        th = threading.Thread(target=self.w.loop)
+        th.start()
+        th.join(10)
+        self.assertFalse(th.is_alive())
+        self.assertFalse(os.path.exists(os.path.join(self.home, "worker.json")))
+        self.assertTrue(type(self.w).code_stamp(), "the real stamp lists the package's files")
+
     def test_missing_model_message(self):
         jd = write_job(self.home, "ltx", "ltx", {"preset": "Alpha Gen"},
                        {"src": ([1], [np.zeros((8, 8, 4), np.float32)])})

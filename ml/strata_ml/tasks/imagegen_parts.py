@@ -163,12 +163,15 @@ def _vae_sd(sd):
 
 
 def vae_config(shapes):
-    """AutoencoderKLFlux2's config from an LDM / BFL-named VAE file's shapes."""
-    levels = sorted({int(k.split(".")[2]) for k in shapes if k.startswith("encoder.down.") and k.split(".")[2].isdigit()})
+    """AutoencoderKLFlux2's config from a VAE file's shapes, in LDM / BFL naming or Diffusers naming
+    (Comfy-Org's flux2-vae.safetensors is the latter)."""
+    diffusers_names = is_diffusers_vae(shapes)
+    down, res = ("encoder.down_blocks.", "resnets") if diffusers_names else ("encoder.down.", "block")
+    levels = sorted({int(k.split(".")[2]) for k in shapes if k.startswith(down) and k.split(".")[2].isdigit()})
     if not levels:
-        raise RuntimeError("not an LDM-style VAE")
-    blocks = [shapes[f"encoder.down.{i}.block.0.conv1.weight"][0] for i in levels]
-    per = len({k.split(".")[4] for k in shapes if k.startswith("encoder.down.0.block.")})
+        raise RuntimeError("not a VAE (no encoder down blocks)")
+    blocks = [shapes[f"{down}{i}.{res}.0.conv1.weight"][0] for i in levels]
+    per = len({k.split(".")[4] for k in shapes if k.startswith(f"{down}0.{res}.")})
     latent = shapes["decoder.conv_in.weight"][1]
     patch = 2
     bn = shapes.get("bn.running_mean")
@@ -180,8 +183,12 @@ def vae_config(shapes):
             "block_out_channels": blocks, "layers_per_block": per, "latent_channels": latent, "norm_num_groups": groups,
             "use_quant_conv": "quant_conv.weight" in shapes or "encoder.quant_conv.weight" in shapes,
             "use_post_quant_conv": "post_quant_conv.weight" in shapes or "decoder.post_quant_conv.weight" in shapes,
-            "mid_block_add_attention": any(k.startswith("encoder.mid.attn_1.") for k in shapes),
+            "mid_block_add_attention": any(k.startswith(("encoder.mid.attn_1.", "encoder.mid_block.attentions.0.")) for k in shapes),
             "patch_size": [patch, patch]}
+
+
+def is_diffusers_vae(keys):
+    return any(k.startswith(("decoder.up_blocks.", "encoder.down_blocks.")) for k in keys)
 
 
 def convert_vae(sd, cfg):
@@ -202,10 +209,9 @@ def load_vae(path, dtype):
     import diffusers
     from accelerate import init_empty_weights
     sd = _vae_sd(read_transformer_file(path, dtype))
-    if any(k.startswith("decoder.up_blocks.") for k in sd):      # already Diffusers naming
-        raise RuntimeError(f"{_base(path)} is in Diffusers naming: put it in a Diffusers folder instead")
     cfg = vae_config({k: tuple(v.shape) for k, v in sd.items()})
-    sd = convert_vae(sd, cfg)
+    if not is_diffusers_vae(sd):
+        sd = convert_vae(sd, cfg)
     with init_empty_weights():
         m = diffusers.AutoencoderKLFlux2.from_config(cfg)
     want = set(m.state_dict())
