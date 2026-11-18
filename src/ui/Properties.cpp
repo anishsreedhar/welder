@@ -633,6 +633,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
         if (kit::valueField("##v", &fv, k.noSlider ? fw : fw, nullptr, isInt, dragSpeed)) commit(comp, fv);
         const char* tk = std::getenv("STRATA_TEST_ALTKEY");
         if (!tk) tk = std::getenv("STRATA_TEST_EXPOSE");
+        if (!tk) tk = std::getenv("STRATA_TEST_VIEWERCLICK");
         if (tk && k.name == tk) {  // tests: where the box is
             ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
             gTestKnobPos = ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
@@ -2998,7 +2999,7 @@ void nodeTab(Ctx& c) {
     gDef = saved;
 }
 
-void nodePanel(App& app, UiState& ui, Node* n, bool* keepOpen) {
+static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
     ImGui::PushID(n->name.c_str());
     // the header: a card with the category colour as a strip down its left side, the name in
     // the medium weight, the type muted after it
@@ -3349,6 +3350,24 @@ void nodePanel(App& app, UiState& ui, Node* n, bool* keepOpen) {
     ImGui::PopID();
 }
 
+// A node's panel. A click anywhere in it (its header, a knob, a button) makes it the panel being
+// worked in: its node's viewer tools and handles are the ones shown (activeToolNode).
+void nodePanel(App& app, UiState& ui, Node* n, bool* keepOpen) {
+    const std::string name = n->name;
+    const float y0 = ImGui::GetCursorScreenPos().y;
+    const bool clicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+    // (hover read before drawing: a click on a knob makes it the active item, which hides the window's hover after)
+    const bool overWindow = clicked && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    nodePanelBody(app, ui, n, keepOpen);
+    const float y1 = ImGui::GetCursorScreenPos().y, my = ImGui::GetIO().MousePos.y;
+    if (overWindow && my >= y0 && my < y1) {
+        app.panelFocus = name;
+        // a colour / point picker armed in another panel is put down: it took the viewer's clicks
+        // (a Keyer's pick left on, then a Roto's points that wouldn't select)
+        if (ui.picker.active && ui.picker.node != name) ui.picker.active = false;
+    }
+}
+
 }  // namespace
 
 std::vector<double> knobDefaults(const KnobDef& k, int n, const Format& f) { return defaults(k, n, f); }
@@ -3417,6 +3436,8 @@ void openFloatPanel(App& app, UiState& ui, const std::string& name) {
     for (auto& f : ui.floatPanels)
         if (f.node == name) { f.focus = true; return; }
     ui.floatPanels.push_back({name, n->params.data, true});
+    app.panelsFloating.insert(name);  // (its viewer tools show from now, not from when it is first drawn)
+    app.panelFocus = name;
 }
 
 void drawFloatPanels(App& app, UiState& ui) {
@@ -3460,6 +3481,8 @@ void drawFloatPanels(App& app, UiState& ui) {
         if (!open) done.push_back(f.node);  // closing it keeps the changes (like OK)
     }
     std::erase_if(ui.floatPanels, [&](const FloatPanel& f) { return std::find(done.begin(), done.end(), f.node) != done.end(); });
+    app.panelsFloating.clear();  // floating panels count as open ones for the viewer tools
+    for (auto& f : ui.floatPanels) app.panelsFloating.insert(f.node);
 }
 
 // A knob button's action, as if clicked (tests).

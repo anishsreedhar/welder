@@ -13,6 +13,8 @@
 
 namespace strata::ui {
 
+ImVec2 gTestXformCentre(-1, -1);
+
 namespace {
 
 const ImU32 kJack = IM_COL32(120, 200, 255, 230);
@@ -224,6 +226,7 @@ void drawTransformViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec
     const double kx = num2(n, "skew", 0, f, 0), ky = num2(n, "skew", 1, f, 0);
     const double ar = rot * M_PI / 180;
     const ImVec2 c = xf.toScreen(cx + tx, cy + ty);
+    gTestXformCentre = c;  // tests (STRATA_TEST_VIEWERCLICK): where the centre handle is
     const float R = (float)std::clamp(70.0 * std::sqrt(std::fabs(sx * sy)), 20.0, 400.0);
     // screen directions of the rotated x / y axes (screen y is down)
     const ImVec2 ux((float)std::cos(ar), -(float)std::sin(ar)), uy(-(float)std::sin(ar), -(float)std::cos(ar));

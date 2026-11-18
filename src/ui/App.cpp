@@ -3561,16 +3561,28 @@ void App::openPanel(const std::string& name) {
     closePanel(name);
     panels.push_front(name);
     while ((int)panels.size() > maxPanels) panels.pop_back();
+    panelFocus = name;
 }
 
 void App::closePanel(const std::string& name) {
     panels.erase(std::remove(panels.begin(), panels.end(), name), panels.end());
+    // (opening it again shows it unfolded: so do its tools, even before the bin is next drawn)
+    panelsCollapsed.erase(name);
+}
+
+bool App::panelShown(const std::string& name) const {
+    if (name.empty()) return false;
+    if (panelsFloating.count(name)) return true;
+    return !panelsCollapsed.count(name) && std::find(panels.begin(), panels.end(), name) != panels.end();
 }
 
 void App::renameRefs(const std::string& from, const std::string& to) {
     if (selection.erase(from)) selection.insert(to);
     for (auto& p : panels)
         if (p == from) p = to;
+    for (auto* set : {&panelsCollapsed, &panelsFloating, &panelsToExpand})
+        if (set->erase(from)) set->insert(to);
+    if (panelFocus == from) panelFocus = to;
     if (viewed == from) viewed = to;
     if (activeViewer == from) activeViewer = to;
 }

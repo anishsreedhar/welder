@@ -131,6 +131,8 @@ public:
     std::deque<std::string> panels;         // properties bin, most recent first
     std::set<std::string> panelsToExpand;   // just opened: shown expanded (even if collapsed before), the bin brought forward
     std::set<std::string> panelsCollapsed;  // panels folded in the bin: their viewer overlays and tools are off (#29)
+    std::set<std::string> panelsFloating;   // panels floating in windows of their own (open, like the bin's)
+    std::string panelFocus;                 // the panel last opened or clicked in: its node's viewer tools win
     int maxPanels = 6;
     std::string status;                     // one-line status message
     std::deque<std::string> log;            // messages panel
@@ -295,6 +297,9 @@ public:
     void message(const std::string& m);
     void openPanel(const std::string& name);
     void closePanel(const std::string& name);
+    // Its panel is showing: open in the bin and not folded, or floating. Only these nodes' viewer
+    // tools and handles are shown.
+    bool panelShown(const std::string& name) const;
     void setViewed(const std::string& name);
     // Channels a node outputs at the current frame, worked out off the UI thread
     // (a Read may have to open its file). Returns the last known list, empty

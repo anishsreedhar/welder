@@ -989,15 +989,24 @@ void pointToolClick(App& app, UiState& ui, Node* n, const std::vector<Disp>& ds,
 
 }  // namespace
 
+static bool hasViewerTools(const Node* n) {
+    const std::string& t = n->type;
+    return t == "Roto" || t == "RotoPaint" || t == "SplineWarp" || t == "SplineFlow" || t == "Tracker" || t == "PlanarTracker" ||
+           t == "CameraTracker" || t == "FlowField" || t == "TrackMask" || t == "Transform" || t == "Position" || t == "CornerPin2D" ||
+           t == "TransformMasked" || t == "GridWarp" || hasKnobHandles(t);
+}
+
 Node* activeToolNode(App& app) {
-    // The most recently opened panel among the nodes with viewer tools. A panel folded in the
-    // properties bin hides its overlays, as closing it would (#29).
+    // Whose viewer tools and handles are live: the panel last opened or clicked in, when it is a
+    // tool node's and is showing; otherwise the most recently opened tool panel that is showing.
+    // A panel folded in the bin (#29) or closed shows none; a floating one counts as open. (Before,
+    // only the most recently opened panel counted: working in an older Roto / Transform panel in
+    // the bin, or in a floating one, showed no handles at all.)
+    if (Node* n = app.node(app.panelFocus); n && hasViewerTools(n) && app.panelShown(n->name)) return n;
     for (auto& p : app.panels)
-        if (Node* n = app.node(p); n && !app.panelsCollapsed.count(p))
-            if (n->type == "Roto" || n->type == "RotoPaint" || n->type == "SplineWarp" || n->type == "SplineFlow" || n->type == "Tracker" || n->type == "PlanarTracker" ||
-                n->type == "CameraTracker" || n->type == "FlowField" || n->type == "TrackMask" || n->type == "Transform" || n->type == "Position" || n->type == "CornerPin2D" ||
-                n->type == "TransformMasked" || n->type == "GridWarp" || hasKnobHandles(n->type))
-                return n;
+        if (Node* n = app.node(p); n && hasViewerTools(n) && app.panelShown(p)) return n;
+    for (auto& p : app.panelsFloating)
+        if (Node* n = app.node(p); n && hasViewerTools(n)) return n;
     return nullptr;
 }
 
