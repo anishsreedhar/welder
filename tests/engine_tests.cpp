@@ -35,6 +35,8 @@
 #include "nodes/Rife.h"
 #include "nodes/CamExport.h"
 #include "nodes/Geo.h"
+#include "nodes/Scene3D.h"
+#include "nodes/SceneImport.h"
 #include "nodes/PointMesh.h"
 #include "nodes/MeshEdit.h"
 #include "nodes/SceneMove.h"
@@ -3694,6 +3696,279 @@ int main(int argc, char** argv) {
         CHECK(worst < 1e-3);
         // camera 0.1 right with the card at distance 1, 0.49152 wide over 64 px: the image moves 13.02 px left
         CHECK_NEAR(px(b, 20, 20, "R"), px(t, 20, 20, "R") + 0.1 / (24.576 / 50) * 64, 1e-3);
+    });
+
+    test("Scene3D: plane fit on noisy coplanar points", [] {
+        using cam3d::V3;
+        std::mt19937 rng(7);
+        std::uniform_real_distribution<double> U(-2, 2);
+        std::normal_distribution<double> N(0, 0.01);
+        const V3 n0 = cam3d::normalize(V3(0.3, 0.8, -0.5));
+        const V3 a = cam3d::normalize(cam3d::cross(n0, V3(1, 0, 0))), b = cam3d::cross(n0, a);
+        const V3 o(1.5, -0.4, 2.0);
+        std::vector<V3> pts;
+        for (int i = 0; i < 500; ++i) pts.push_back(o + a * U(rng) + b * (U(rng) * 0.5) + n0 * N(rng));
+        const V3 eye = o + n0 * 5;
+        scene3d::Plane pl = scene3d::fitPlane(pts, &eye);
+        CHECK(pl.ok);
+        const double ang = std::acos(std::clamp(cam3d::dot(pl.n, n0), -1.0, 1.0)) * 180 / M_PI;
+        CHECK(ang < 1.0);                       // faces the eye, within a degree
+        CHECK_NEAR(pl.rms, 0.01, 0.002);        // the noise, recovered
+        CHECK(cam3d::norm(pl.c - o) < 0.2);
+        CHECK(std::fabs(cam3d::dot(pl.major, a)) > 0.99);  // the long side of the patch
+        // the card axes: x along the given right, in the plane; right-handed with the normal
+        cam3d::M3 R = scene3d::planeAxes(pl, V3(1, 0, 0));
+        CHECK(std::fabs(cam3d::dot(R.col(0), pl.n)) < 1e-9);
+        CHECK(cam3d::norm(cam3d::cross(R.col(0), R.col(1)) - pl.n) < 1e-9);
+        // exact points: zero error; points on a line or too few: no plane
+        std::vector<V3> exact;
+        for (int i = 0; i < 20; ++i) exact.push_back(o + a * U(rng) + b * U(rng));
+        scene3d::Plane pe = scene3d::fitPlane(exact);
+        CHECK(pe.ok && pe.rms < 1e-6 && std::fabs(std::fabs(cam3d::dot(pe.n, n0)) - 1) < 1e-9);
+        std::vector<V3> line;
+        for (int i = 0; i < 10; ++i) line.push_back(o + a * (double)i);
+        CHECK(!scene3d::fitPlane(line).ok);
+        CHECK(!scene3d::fitPlane({o, o + a}).ok);
+    });
+
+    test("Scene3D: Insert / Match Move / Stabilize homographies round-trip on an animated camera", [] {
+        using cam3d::V3;
+        const double W = 1920, H = 1080, Win = 500, Hin = 400, ref = 12;
+        scene3d::Card card;
+        card.O = V3(0.4, 1.0, 0.0);
+        card.R = cam3d::eulerToMatrix(V3(10, 25, 5));
+        card.w = 1.6;
+        card.h = 0.9;
+        auto camAt = [](double t) {
+            cam3d::Camera c;
+            c.C = V3(0.05 * t, 1.5, 6 - 0.03 * t);
+            c.R = cam3d::eulerToMatrix(V3(-5, 10 - 0.3 * t, 0.2 * t));
+            c.focal = 35 + 0.2 * t;
+            return c;
+        };
+        auto G = [&](double t) { return scene3d::cardToImage(camAt(t), card, W, H); };
+        auto close = [](const scene3d::H3& A, const scene3d::H3& B, double tol) {
+            double worst = 0;
+            for (double x : {0.0, 500.0, 1920.0})
+                for (double y : {0.0, 300.0, 1080.0}) {
+                    double ax, ay, bx, by;
+                    scene3d::applyH(A, x, y, ax, ay);
+                    scene3d::applyH(B, x, y, bx, by);
+                    worst = std::max(worst, std::hypot(ax - bx, ay - by));
+                }
+            return worst < tol;
+        };
+        const scene3d::H3 I;
+        const scene3d::H3 Gr = G(ref), Ir = scene3d::insertMatrix(Gr, Win, Hin);
+        CHECK(close(scene3d::matchMoveMatrix(Gr, Gr), I, 1e-6));
+        CHECK(close(scene3d::stabilizeMatrix(Gr, Gr), I, 1e-6));
+        for (double t = 1; t <= 48; t += 1) {
+            const cam3d::Camera c = camAt(t);
+            CHECK(scene3d::cardInFront(c, card));
+            const scene3d::H3 Gt = G(t), Mi = scene3d::insertMatrix(Gt, Win, Hin);
+            // Insert: the input frame's corners land on the card's projected corners
+            const double in[4][2] = {{0, 0}, {Win, 0}, {Win, Hin}, {0, Hin}};
+            auto cs = card.corners();
+            double worst = 0;
+            for (int k = 0; k < 4; ++k) {
+                double u, v, x, y;
+                c.project(cs[k], W, H, u, v);
+                scene3d::applyH(Mi, in[k][0], in[k][1], x, y);
+                worst = std::max(worst, std::hypot(u - x, v - y));
+            }
+            CHECK(worst < 1e-6);
+            // Stabilize undoes Match Move, and an inserted image stabilized stays where it was at the reference
+            const scene3d::H3 Mm = scene3d::matchMoveMatrix(Gt, Gr), Ms = scene3d::stabilizeMatrix(Gt, Gr);
+            CHECK(close(Ms * Mm, I, 1e-6));
+            CHECK(close(Mm * Ms, I, 1e-6));
+            CHECK(close(Ms * Mi, Ir, 1e-6));
+            // a plate point on the card at the reference frame follows the card under Match Move
+            double ur, vr, ut, vt, x, y;
+            camAt(ref).project(card.at(0.2, -0.3), W, H, ur, vr);
+            c.project(card.at(0.2, -0.3), W, H, ut, vt);
+            scene3d::applyH(Mm, ur, vr, x, y);
+            CHECK(std::hypot(x - ut, y - vt) < 1e-6);
+        }
+        // a card behind the camera is reported
+        cam3d::Camera back = camAt(1);
+        back.R = cam3d::eulerToMatrix(V3(0, 180, 0)) * back.R;
+        CHECK(!scene3d::cardInFront(back, card));
+    });
+
+    test("Scene3D: FBX camera + locator import, baked to keys", [] {
+        // a hand-written ASCII FBX: a 35 mm camera at (1, 2, 10) turned to look down -Z, moving to x = 3
+        // over one second (frames 0-24 at 24 fps), and a locator at (3, 0, -2)
+        const char* fbx = R"FBX(; FBX 7.4.0 project file
+FBXHeaderExtension:  {
+	FBXHeaderVersion: 1003
+	FBXVersion: 7400
+}
+GlobalSettings:  {
+	Version: 1000
+	Properties70:  {
+		P: "UpAxis", "int", "Integer", "",1
+		P: "UpAxisSign", "int", "Integer", "",1
+		P: "FrontAxis", "int", "Integer", "",2
+		P: "FrontAxisSign", "int", "Integer", "",1
+		P: "CoordAxis", "int", "Integer", "",0
+		P: "CoordAxisSign", "int", "Integer", "",1
+		P: "UnitScaleFactor", "double", "Number", "",1
+		P: "TimeMode", "enum", "", "",11
+	}
+}
+Objects:  {
+	NodeAttribute: 1001, "NodeAttribute::Cam", "Camera" {
+		Properties70:  {
+			P: "FocalLength", "Number", "", "A",35
+			P: "FilmWidth", "double", "Number", "",1.417
+			P: "FilmHeight", "double", "Number", "",0.945
+			P: "NearPlane", "double", "Number", "",1
+			P: "FarPlane", "double", "Number", "",5000
+		}
+		TypeFlags: "Camera"
+		GeometryVersion: 124
+	}
+	Model: 2001, "Model::TrackCam", "Camera" {
+		Version: 232
+		Properties70:  {
+			P: "Lcl Translation", "Lcl Translation", "", "A",1,2,10
+			P: "Lcl Rotation", "Lcl Rotation", "", "A",0,90,0
+		}
+	}
+	NodeAttribute: 1002, "NodeAttribute::Pt1", "Null" {
+		TypeFlags: "Null"
+	}
+	Model: 2002, "Model::Pt1", "Null" {
+		Version: 232
+		Properties70:  {
+			P: "Lcl Translation", "Lcl Translation", "", "A",3,0,-2
+		}
+	}
+	AnimationStack: 3001, "AnimStack::Take 001", "" {
+		Properties70:  {
+			P: "LocalStop", "KTime", "Time", "",46186158000
+			P: "ReferenceStop", "KTime", "Time", "",46186158000
+		}
+	}
+	AnimationLayer: 3002, "AnimLayer::BaseLayer", "" {
+	}
+	AnimationCurveNode: 3003, "AnimCurveNode::T", "" {
+		Properties70:  {
+			P: "d|X", "Number", "", "A",1
+			P: "d|Y", "Number", "", "A",2
+			P: "d|Z", "Number", "", "A",10
+		}
+	}
+	AnimationCurve: 3004, "AnimCurve::", "" {
+		Default: 1
+		KeyVer: 4009
+		KeyTime: *2 {
+			a: 0,46186158000
+		}
+		KeyValueFloat: *2 {
+			a: 1,3
+		}
+		KeyAttrFlags: *1 {
+			a: 260
+		}
+		KeyAttrDataFloat: *4 {
+			a: 0,0,0,0
+		}
+		KeyAttrRefCount: *1 {
+			a: 2
+		}
+	}
+}
+Connections:  {
+	C: "OO",2001,0
+	C: "OO",1001,2001
+	C: "OO",2002,0
+	C: "OO",1002,2002
+	C: "OO",3002,3001
+	C: "OO",3003,3002
+	C: "OP",3003,2001, "Lcl Translation"
+	C: "OP",3004,3003, "d|X"
+}
+)FBX";
+        const auto path = std::filesystem::temp_directory_path() / "welder_tests" / "cam.fbx";
+        std::ofstream(path) << fbx;
+        scene3d::ImportedScene s;
+        std::string err;
+        CHECK(scene3d::readFbx(path.string(), 25, s, &err));
+        if (!err.empty()) std::printf("  fbx: %s\n", err.c_str());
+        CHECK(s.cameraName == "TrackCam");
+        CHECK_NEAR(s.fps, 24, 1e-9);
+        CHECK(s.samples.size() == 25);
+        if (s.samples.size() == 25) {
+            CHECK_NEAR(s.samples[0].frame, 0, 1e-9);
+            CHECK(cam3d::norm(s.samples[0].C - cam3d::V3(1, 2, 10)) < 1e-4);
+            CHECK_NEAR(s.samples[12].C.x, 2, 1e-3);
+            CHECK_NEAR(s.samples[24].C.x, 3, 1e-4);
+            // looks down -Z with +Y up: Welder's camera with no rotation
+            CHECK(cam3d::norm(s.samples[0].R.col(2) - cam3d::V3(0, 0, 1)) < 1e-4);
+            CHECK(cam3d::norm(s.samples[0].R.col(1) - cam3d::V3(0, 1, 0)) < 1e-4);
+            CHECK_NEAR(s.samples[0].focal, 35, 1e-4);
+            CHECK_NEAR(s.samples[0].haperture, 1.417 * 25.4, 1e-3);
+        }
+        CHECK_NEAR(s.nearClip, 1, 1e-6);
+        CHECK(s.points.size() == 1 && cam3d::norm(s.points[0] - cam3d::V3(3, 0, -2)) < 1e-4);
+        // baked into a Scene3D: the node's camera follows the keys
+        json params = json::object();
+        CHECK(scene3d::importFile(path.string(), 25, 1, params, &err));
+        auto c = comp(json::array({{{"name", "S"}, {"type", "Scene3D"}, {"params", params}}}));
+        auto cam12 = cam3d::cameraAt(c->find("S"), 12);
+        CHECK(cam12 && std::fabs(cam12->C.x - 2) < 1e-3 && std::fabs(cam12->focal - 35) < 1e-4);
+        auto* src = dynamic_cast<scene3d::SceneSource*>(c->find("S"));
+        CHECK(src && src->scene(0).points.size() == 1);
+        // the JSON Blender writes for Alembic files
+        scene3d::ImportedScene b;
+        CHECK(scene3d::readSceneJson(json::parse(R"({"camera": "c", "fps": 25, "near": 0.5, "far": 900,
+            "frames": [{"frame": 1, "t": [0, 1, 5], "R": [1, 0, 0, 0, 1, 0, 0, 0, 1], "focal": 40, "haperture": 36, "vaperture": 24}],
+            "points": [[1, 2, 3]]})"), b, &err));
+        CHECK(b.samples.size() == 1 && b.samples[0].focal == 40 && b.points.size() == 1);
+        CHECK(!scene3d::readSceneJson(json::parse(R"({"error": "no camera in x.abc"})"), b, &err) && err == "no camera in x.abc");
+    });
+
+    test("CardTransform: insert onto a Scene3D card, stabilize holds it still, clip to card", [] {
+        json camx = {{"keys", {{1, 0.0}, {10, 0.3}}}};
+        json params = {{"translate", {camx, 0.1, 3}}, {"focal", 50}, {"haperture", 24.576}};
+        json sc = {{"name", "S"}, {"type", "Scene3D"}, {"params", params}};
+        scene3d::writeCard(sc["params"], "Card_01", cam3d::V3(0, 0, 0), cam3d::V3(0, 0, 8), 1.2, 0.9);
+        scene3d::writeCard(sc["params"], "Card_02", cam3d::V3(0.5, 0, -1), cam3d::V3(0, 30, 0), 1, 1);
+        auto c = comp(json::array({{{"name", "T"}, {"type", "TestPattern"}},
+                                   sc,
+                                   {{"name", "Ins"}, {"type", "CardTransform"}, {"inputs", {"T", "S"}},
+                                    {"params", {{"card", "Card_01"}, {"mode", "insert"}, {"filter", "bilinear"}}}},
+                                   {{"name", "Stab"}, {"type", "CardTransform"}, {"inputs", {"Ins", "S"}},
+                                    {"params", {{"card", "Card_01"}, {"mode", "stabilize"}, {"reference_frame", 1}, {"filter", "bilinear"}}}},
+                                   {{"name", "Clip"}, {"type", "CardTransform"}, {"inputs", {"T", "S"}},
+                                    {"params", {{"card", "Card_01"}, {"mode", "match-move"}, {"reference_frame", 1}, {"clip_to_card", true}}}},
+                                   {{"name", "Free"}, {"type", "CardTransform"}, {"inputs", {"T"}}}}),
+                      64, 48);
+        CHECK((c->find("Ins")->knobChoices("card") == std::vector<std::string>{"Card_01", "Card_02"}));
+        auto i1 = render(*c, "Ins", 1), i10 = render(*c, "Ins", 10), s10 = render(*c, "Stab", 10);
+        double moved = 0, held = 0;
+        for (int y = 0; y < 48; ++y)
+            for (int x = 0; x < 64; ++x) {
+                moved = std::max(moved, (double)std::fabs(px(i10, x, y, "R") - px(i1, x, y, "R")));
+                held = std::max(held, (double)std::fabs(px(s10, x, y, "R") - px(i1, x, y, "R")));
+            }
+        CHECK(moved > 0.2);   // the card moves with the camera...
+        CHECK(held < 1e-4);   // ...and stabilizing puts it back (the two concatenate: one resample)
+        // the inserted image's middle lands on the card's centre, seen through the camera
+        cam3d::Camera cam;
+        cam.C = cam3d::V3(0, 0.1, 3);
+        double u, v;
+        cam.project(cam3d::V3(0, 0, 0), 64, 48, u, v);
+        auto t = render(*c, "T", 1);
+        CHECK_NEAR(px(i1, (int)u, (int)v, "R"), px(t, 32, 24, "R"), 3.0);
+        // clip to card: nothing outside the card's quad (Card_01: about 52 x 39 px, 13 px left of centre at frame 10)
+        auto cl = render(*c, "Clip", 10);
+        CHECK(px(cl, 62, 4, "A") == 0.0f && px(cl, 5, 46, "A") == 0.0f && px(cl, 61, 45, "R") == 0.0f);
+        CHECK(px(cl, (int)u - 13, (int)v, "A") > 0.99f);
+        // without a scene: passes through
+        auto fr = render(*c, "Free", 1);
+        CHECK(px(fr, 10, 10, "R") == px(t, 10, 10, "R"));
     });
 
     test("Mesh edits: merge, extrude, delete, bridge, remesh - UVs kept, faces consistent", [] {
