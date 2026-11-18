@@ -130,6 +130,7 @@ Deflicker
 HeatWave
 Rain
 LensDroplets
+PowerRoto
 FilmBurn
 FilmBurnTransition
 LightLeak
