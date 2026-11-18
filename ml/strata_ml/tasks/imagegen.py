@@ -886,13 +886,17 @@ def run(ctx, p):
                 return {"latents": lat}
 
             ctx.progress(bi / batch, f"image {bi + 1}/{batch}", force=True, detail=dict(detail, step=0, batch_index=bi))
-            call = dict(prompt_embeds=emb, height=H, width=W, num_inference_steps=steps,
+            # the cached embeddings live on the CPU: hand them over on the execution device, since with
+            # model offload only the transformer's first call of a step gets its inputs moved (the
+            # negative pass then failed with "Expected all tensors to be on the same device")
+            dev = pipe._execution_device
+            call = dict(prompt_embeds=emb.to(dev), height=H, width=W, num_inference_steps=steps,
                         guidance_scale=float(p.get("guidance", 4.0)), generator=gen, output_type="latent",
                         callback_on_step_end=on_step, callback_on_step_end_tensor_inputs=["latents"], **kw)
             if ref:
                 call["image"] = ref
             if neg_emb is not None:
-                call["negative_prompt_embeds"] = neg_emb
+                call["negative_prompt_embeds"] = neg_emb.to(dev)
             t0 = time.time()
             try:
                 pipe(**call)  # ("latent" output differs between the pipelines: the callback kept the tokens)
