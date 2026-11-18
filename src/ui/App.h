@@ -259,6 +259,8 @@ public:
     // Nodes the last .nk import couldn't translate exactly (node -> what the importer said), shown
     // in the graph with a coloured outline (issue #11). Cleared when another script is opened.
     std::map<std::string, std::string> importWarnings;
+    // A .nk import that failed: shown in a dialog (the status line alone was easy to miss, #27). Cleared by the dialog.
+    std::string importError;
     bool save(const std::string& path, std::string* err);  // atomic: a crash mid-save leaves the old script
 
     // ---- autosave: every autosaveSecs (0: off) while there are unsaved changes, a copy of the comp

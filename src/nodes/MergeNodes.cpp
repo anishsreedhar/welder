@@ -53,56 +53,57 @@ int mergeOpId(const std::string& op) {
 
 // Merge A into `out` (which holds B) for the (out, A) channel pairs. The
 // operation is a template parameter so the per-pixel maths inlines.
-// a, b = alphas of A and B at the pixel; A, B = channel values.
+// a, b = alphas of A and B at the pixel; A, B = channel values. aNone: A's alpha where A has no
+// alpha channel (1: solid, as in Nuke, so an RGB plate goes over rather than adding onto B).
 template <class F>
 void mergeRows(Image& out, const Image& Aimg, const std::vector<std::pair<int, int>>& pairs, int Aa, int outA,
-               bool alphaMasking, F fn) {
+               bool alphaMasking, float aNone, F fn) {
     const int n = out.nch(), an = Aimg.nch(), W = out.bounds.width();
     for (int y = out.bounds.y1; y < out.bounds.y2; ++y) {
         float* o = out.row(y);
         const float* ap = Aimg.px(out.bounds.x1, y);
         for (int x = 0; x < W; ++x, o += n, ap += an) {
-            const float aa = Aa >= 0 ? ap[Aa] : 0.0f;
+            const float aa = Aa >= 0 ? ap[Aa] : aNone;
             const float bb = outA >= 0 ? o[outA] : 0.0f;
             for (auto [oi, ai] : pairs) {
                 if (alphaMasking && oi == outA) {
                     o[oi] = aa + bb - aa * bb;  // the classic "alpha masking": keep alpha as union
                     continue;
                 }
-                o[oi] = fn(ai >= 0 ? ap[ai] : 0.0f, o[oi], aa, bb);
+                o[oi] = fn(ai >= 0 ? ap[ai] : oi == outA ? aa : 0.0f, o[oi], aa, bb);
             }
         }
     }
 }
 
 void mergeDispatch(int op, Image& out, const Image& A, const std::vector<std::pair<int, int>>& pairs, int Aa, int outA,
-                   bool am) {
+                   bool am, float aNone) {
     switch (op) {
-        case 0: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A + B * (1 - a); });
-        case 1: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A * (1 - b) + B; });
-        case 2: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A + B; });
-        case 3: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A - B; });
-        case 4: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return B - A; });
-        case 5: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return (A < 0 && B < 0) ? A : A * B; });
-        case 6: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return (A <= 1 && B <= 1) ? A + B - A * B : std::max(A, B); });
-        case 7: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return std::max(A, B); });
-        case 8: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return std::min(A, B); });
-        case 9: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return std::fabs(A - B); });
-        case 10: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return (A < 0 && B < 0) || B == 0 ? 0.0f : A / B; });
-        case 11: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A * b; });
-        case 12: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A * (1 - b); });
-        case 13: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A * b + B * (1 - a); });
-        case 14: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A * (1 - b) + B * (1 - a); });
-        case 15: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return B * a; });
-        case 16: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return B * (1 - a); });
-        case 17: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A; });
-        case 18: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return (A + B) * 0.5f; });
-        case 19: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return std::sqrt(A * A + B * B); });
-        case 20: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return B < 0.5f ? 2 * A * B : 1 - 2 * (1 - A) * (1 - B); });
-        case 21: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A < 0.5f ? 2 * A * B : 1 - 2 * (1 - A) * (1 - B); });
-        case 22: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return a > b ? A : (b > 0 ? A + B * (1 - a / b) : A); });
-        case 23: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return a + b < 1 ? A + B : (b > 0 ? A + B * (1 - a) / b : A); });
-        case 24: return mergeRows(out, A, pairs, Aa, outA, am, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return (A + B) == 0 ? 0.0f : 2 * A * B / (A + B); });
+        case 0: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A + B * (1 - a); });
+        case 1: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A * (1 - b) + B; });
+        case 2: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A + B; });
+        case 3: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A - B; });
+        case 4: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return B - A; });
+        case 5: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return (A < 0 && B < 0) ? A : A * B; });
+        case 6: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return (A <= 1 && B <= 1) ? A + B - A * B : std::max(A, B); });
+        case 7: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return std::max(A, B); });
+        case 8: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return std::min(A, B); });
+        case 9: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return std::fabs(A - B); });
+        case 10: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return (A < 0 && B < 0) || B == 0 ? 0.0f : A / B; });
+        case 11: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A * b; });
+        case 12: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A * (1 - b); });
+        case 13: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A * b + B * (1 - a); });
+        case 14: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A * (1 - b) + B * (1 - a); });
+        case 15: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return B * a; });
+        case 16: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return B * (1 - a); });
+        case 17: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A; });
+        case 18: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return (A + B) * 0.5f; });
+        case 19: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return std::sqrt(A * A + B * B); });
+        case 20: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return B < 0.5f ? 2 * A * B : 1 - 2 * (1 - A) * (1 - B); });
+        case 21: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return A < 0.5f ? 2 * A * B : 1 - 2 * (1 - A) * (1 - B); });
+        case 22: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return a > b ? A : (b > 0 ? A + B * (1 - a / b) : A); });
+        case 23: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return a + b < 1 ? A + B : (b > 0 ? A + B * (1 - a) / b : A); });
+        case 24: return mergeRows(out, A, pairs, Aa, outA, am, aNone, [](float A, float B, float a, float b) { (void)A; (void)B; (void)a; (void)b; return (A + B) == 0 ? 0.0f : 2 * A * B / (A + B); });
         default: return;
     }
 }
@@ -251,7 +252,9 @@ public:
             }
             // Alpha last, so colour channels see B's original alpha.
             std::stable_partition(pairs.begin(), pairs.end(), [&](auto& p) { return p.first != outA; });
-            mergeDispatch(op, out, *A, pairs, Aa, outA, alphaMasking);
+            // A without an alpha channel is solid (#30); one switched off in the A channels reads as 0
+            const float aNone = Aa < 0 && !aOff.count("A") ? 1.0f : 0.0f;
+            mergeDispatch(op, out, *A, pairs, Aa, outA, alphaMasking, aNone);
         }
         if (video)
             for (int y = out.bounds.y1; y < out.bounds.y2; ++y)

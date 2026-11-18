@@ -360,6 +360,23 @@ int main(int argc, char** argv) {
         CHECK_NEAR(px(img, 10, 10, "A"), 1.0, 1e-6);
     });
 
+    test("merge over: an A with no alpha channel is solid, as in Nuke (#30)", [] {
+        auto c = comp(json::array({
+            {{"name", "B"}, {"type", "Constant"}, {"params", {{"color", {0, 0, 1, 1}}}}},
+            {{"name", "C"}, {"type", "Constant"}, {"params", {{"color", {0.5, 0.4, 0, 1}}}}},
+            {{"name", "A"}, {"type", "Remove"}, {"inputs", {"C"}}, {"params", {{"channels", "alpha"}}}},  // an RGB plate (a JPEG sky)
+            {{"name", "M"}, {"type", "Merge"}, {"inputs", {"B", "A"}}, {"params", {{"operation", "over"}}}},
+            {{"name", "Off"}, {"type", "Merge"}, {"inputs", {"B", "C"}}, {"params", {{"operation", "over"}, {"Achannels_off", {"A"}}}}},
+        }));
+        CHECK(render(*c, "A")->ch("A") < 0);
+        auto img = render(*c, "M");
+        CHECK_NEAR(px(img, 10, 10, "R"), 0.5, 1e-6);
+        CHECK_NEAR(px(img, 10, 10, "B"), 0.0, 1e-6);  // B is covered, not added to
+        CHECK_NEAR(px(img, 10, 10, "A"), 1.0, 1e-6);
+        auto off = render(*c, "Off");  // alpha switched off in A's channels: reads as 0, so A adds
+        CHECK_NEAR(px(off, 10, 10, "B"), 1.0, 1e-6);
+    });
+
     test("merge operations", [] {
         struct Case { const char* op; float r; };
         // A.r = 0.6 (a = 0.8), B.r = 0.5 (b = 1)
@@ -2812,6 +2829,33 @@ int main(int argc, char** argv) {
         CHECK(kd < 0.1f);                // dark: mostly keyed out
         CHECK_NEAR(km, 0.5, 1e-4);       // mid grey: half (the ramp is symmetric about 0.5)
         CHECK(kd < km);
+    });
+
+    test("IBKColour: plates at two scales and from two engines at once stay right (#45)", [] {
+        json disc = {{"name", "D"}, {"points", roto::ptsJson(roto::ellipse(64, 48, 24, 24))}, {"color", {0.8, 0.5, 0.4, 1}}};
+        auto c = comp(json::array({
+            {{"name", "Screen"}, {"type", "Constant"}, {"params", {{"color", {0.1, 0.6, 0.15, 1}}}}},
+            {{"name", "FG"}, {"type", "Roto"}, {"inputs", {"Screen"}}, {"params", {{"output", "rgba"}, {"shapes", json::array({disc})}}}},
+            {{"name", "IC"}, {"type", "IBKColour"}, {"inputs", {"FG"}}},
+        }), 128, 96);
+        Node* n = c->find("IC");
+        auto at = [&](double scale, int x, int y) {
+            EngineOptions o;
+            o.tileSize = 32;  // many tiles share one plate
+            Engine e(o);
+            e.setScale(scale);
+            auto img = e.renderRegion(n, 1, n->format(e, 1).box());
+            return px(img, x, y, "G");
+        };
+        const float full = at(1, 64, 48), half = at(0.5, 32, 24);
+        CHECK_NEAR(full, 0.6, 0.02);  // the disc filled with screen
+        CHECK_NEAR(half, 0.6, 0.02);
+        CHECK_NEAR(at(1, 64, 48), full, 1e-6);  // the full-size plate again, after the half-size one
+        std::vector<float> got(4);
+        std::vector<std::thread> ts;
+        for (int i = 0; i < 4; ++i) ts.emplace_back([&, i] { got[i] = i % 2 ? at(0.5, 32, 24) : at(1, 64, 48); });
+        for (auto& t : ts) t.join();
+        for (int i = 0; i < 4; ++i) CHECK_NEAR(got[i], i % 2 ? half : full, 1e-6);
     });
 
     test("keyers: screen, IBK, chroma, keyer, difference, despill", [] {

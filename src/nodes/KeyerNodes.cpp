@@ -9,10 +9,13 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <future>
+#include <list>
 #include <mutex>
 
 #include "Keyer.h"
 #include "NodeUtils.h"
+#include "../core/Parallel.h"
 
 namespace strata {
 
@@ -65,18 +68,22 @@ void growShrink(std::vector<float>& buf, int W, int H, int r) {
     const int rad = std::abs(r);
     std::vector<float> tmp(buf.size());
     auto pick = [&](float a, float b) { return grow ? std::max(a, b) : std::min(a, b); };
-    for (int y = 0; y < H; ++y)
-        for (int x = 0; x < W; ++x) {
-            float v = buf[(size_t)y * W + x];
-            for (int k = std::max(0, x - rad); k <= std::min(W - 1, x + rad); ++k) v = pick(v, buf[(size_t)y * W + k]);
-            tmp[(size_t)y * W + x] = v;
-        }
-    for (int y = 0; y < H; ++y)
-        for (int x = 0; x < W; ++x) {
-            float v = tmp[(size_t)y * W + x];
-            for (int k = std::max(0, y - rad); k <= std::min(H - 1, y + rad); ++k) v = pick(v, tmp[(size_t)k * W + x]);
-            buf[(size_t)y * W + x] = v;
-        }
+    parallelFor(H, 16, [&](long y0, long y1) {
+        for (int y = (int)y0; y < (int)y1; ++y)
+            for (int x = 0; x < W; ++x) {
+                float v = buf[(size_t)y * W + x];
+                for (int k = std::max(0, x - rad); k <= std::min(W - 1, x + rad); ++k) v = pick(v, buf[(size_t)y * W + k]);
+                tmp[(size_t)y * W + x] = v;
+            }
+    });
+    parallelFor(H, 16, [&](long y0, long y1) {
+        for (int y = (int)y0; y < (int)y1; ++y)
+            for (int x = 0; x < W; ++x) {
+                float v = tmp[(size_t)y * W + x];
+                for (int k = std::max(0, y - rad); k <= std::min(H - 1, y + rad); ++k) v = pick(v, tmp[(size_t)k * W + x]);
+                buf[(size_t)y * W + x] = v;
+            }
+    });
 }
 
 // Primary channel of a screen colour (0 r, 1 g, 2 b) and the other two.
@@ -478,18 +485,7 @@ public:
             out.fill(z.data());
             return;
         }
-        uint64_t key = a.engine.hash(this, f);
-        std::shared_ptr<std::vector<float>> plate;
-        {
-            std::lock_guard<std::mutex> l(m_);
-            if (key == key_ && box_ == D) plate = plate_;
-            if (!plate) {
-                plate = std::make_shared<std::vector<float>>(build(a, D));
-                plate_ = plate;
-                key_ = key;
-                box_ = D;
-            }
-        }
+        std::shared_ptr<const std::vector<float>> plate = plateFor(a, a.engine.hash(this, f), D);
         out.copyFrom(*a.fetch(input(0), a.region));
         RGBAIdx oi(out);
         const int W = D.width();
@@ -508,10 +504,61 @@ public:
     }
 
 private:
+    // The clean plate is built once per frame and scale for the whole bbox, and shared by every tile.
+    // A few are kept (most recent first), so the viewer's quick preview, its full-resolution pass, other
+    // viewers and playback read-ahead don't throw each other's plates away and rebuild them for every
+    // tile (#45). Only the map is locked: different plates build at the same time, and a tile that needs
+    // a plate being built waits for that build instead of starting its own.
+    using Plate = std::shared_ptr<const std::vector<float>>;
+    struct Slot {
+        uint64_t key;
+        Box box;
+        std::shared_future<Plate> plate;
+    };
+    static constexpr size_t kPlates = 3;
     std::mutex m_;
-    uint64_t key_ = 0;
-    Box box_;
-    std::shared_ptr<std::vector<float>> plate_;
+    std::list<Slot> plates_;
+
+    Plate plateFor(RenderArgs& a, uint64_t key, const Box& D) {
+        for (;;) {
+            std::shared_future<Plate> fut;
+            std::promise<Plate> mine;
+            bool build = false;
+            {
+                std::lock_guard<std::mutex> l(m_);
+                for (auto it = plates_.begin(); it != plates_.end(); ++it)
+                    if (it->key == key && it->box == D) {
+                        plates_.splice(plates_.begin(), plates_, it);
+                        fut = it->plate;
+                        break;
+                    }
+                if (!fut.valid()) {
+                    fut = mine.get_future().share();
+                    plates_.push_front({key, D, fut});
+                    while (plates_.size() > kPlates) plates_.pop_back();
+                    build = true;
+                }
+            }
+            if (build) {
+                try {
+                    mine.set_value(std::make_shared<const std::vector<float>>(this->build(a, D)));
+                } catch (...) {
+                    {  // a cancelled or failed build: forget it, so the next request starts again
+                        std::lock_guard<std::mutex> l(m_);
+                        plates_.remove_if([&](const Slot& s) { return s.key == key && s.box == D; });
+                    }
+                    mine.set_exception(std::current_exception());
+                    throw;
+                }
+            }
+            try {
+                return fut.get();
+            } catch (const RenderCancelled&) {
+                Engine::cancelPoint();  // this render was cancelled too: stop
+                // another render's build was cancelled, not ours: build it here
+            }
+        }
+    }
 
     // Planes r, g, b, mask of the clean plate over D.
     std::vector<float> build(RenderArgs& a, const Box& D) {
@@ -523,7 +570,8 @@ private:
         Screen s = Screen::ofType(params.str("screen_type", "green"));
         const float thr = (float)std::max(1e-4, params.num("threshold", f, 0.05));
         std::vector<float> m(N), c0(N), c1(N), c2(N);
-        for (int y = 0; y < H; ++y)
+        parallelFor(H, 16, [&](long y0, long y1) {
+        for (int y = (int)y0; y < (int)y1; ++y)
             for (int x = 0; x < W; ++x) {
                 float p[4];
                 si.read(src->px(D.x1 + x, D.y1 + y), p);
@@ -534,6 +582,7 @@ private:
                 float dom = p[s.p] - std::max(p[s.q1], p[s.q2]);
                 m[i] = clamp01((dom - thr) / thr);
             }
+        });
         growShrink(m, W, H, -(int)std::lround(params.num("erode", f, 2) * sc));
         // Push: pyramid of weighted colour sums and weights.
         struct Level {
@@ -556,7 +605,8 @@ private:
             nl.h = std::max(1, (fl.h + 1) / 2);
             nl.wt.assign((size_t)nl.w * nl.h, 0.0f);
             for (auto& v : nl.c) v.assign((size_t)nl.w * nl.h, 0.0f);
-            for (int y = 0; y < nl.h; ++y)
+            parallelFor(nl.h, 8, [&](long y0, long y1) {
+            for (int y = (int)y0; y < (int)y1; ++y)
                 for (int x = 0; x < nl.w; ++x) {
                     float wsum = 0, cs[3] = {0, 0, 0};
                     int n = 0;
@@ -572,6 +622,7 @@ private:
                     nl.wt[di] = wsum / n;
                     for (int k = 0; k < 3; ++k) nl.c[k][di] = cs[k] / n;
                 }
+            });
             L.push_back(std::move(nl));
         }
         // Pull: fill each level's holes from the (filled) coarser level.
@@ -585,7 +636,8 @@ private:
             const Level& up = L[li + 1];
             std::vector<float> nc[3];
             for (int k = 0; k < 3; ++k) nc[k].assign((size_t)lv.w * lv.h, 0.0f);
-            for (int y = 0; y < lv.h; ++y)
+            parallelFor(lv.h, 8, [&](long y0, long y1) {
+            for (int y = (int)y0; y < (int)y1; ++y)
                 for (int x = 0; x < lv.w; ++x) {
                     // bilinear sample of the coarser level
                     float fx = std::clamp((x + 0.5f) / 2 - 0.5f, 0.0f, (float)(up.w - 1));
@@ -601,6 +653,7 @@ private:
                         nc[k][i] = own * w + coarse * (1 - w);
                     }
                 }
+            });
             for (int k = 0; k < 3; ++k) col[k] = std::move(nc[k]);
         }
         std::vector<float> res(4 * N);

@@ -1341,6 +1341,19 @@ void drawDialogs(App& app, UiState& ui) {
         }
         ImGui::EndPopup();
     }
+    // a .nk import that failed (from the menu, a drop or the command line)
+    if (!app.importError.empty() && !ImGui::IsPopupOpen("Import failed")) ImGui::OpenPopup("Import failed");
+    if (ImGui::BeginPopupModal("Import failed", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 36);
+        ImGui::TextUnformatted(app.importError.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        if (ImGui::Button("OK") || ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            app.importError.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
     // Save Incremental: the next version is already there
     if (!ui.versionClash.empty() && !ImGui::IsPopupOpen("Version exists")) ImGui::OpenPopup("Version exists");
     if (ImGui::BeginPopupModal("Version exists", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
