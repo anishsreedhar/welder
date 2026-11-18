@@ -6021,6 +6021,27 @@ int main(int argc, char** argv) {
         std::printf("  fast vs sample(): worst %.2g\n", worst);
         CHECK(worst < 1e-5);
     });
+    test("Write: a new Write's file defaults to the comp's name, and stays editable", [] {
+        auto c = comp(json::array(), 64, 64);
+        CHECK(c->defaultWriteFile().empty());  // unsaved: no name to take
+        c->scriptPath = "/shows/tgu/TGU_001_0069/comp/TGU_001_0069_comp_CAD_v006.weld";
+        c->baseDir = "/shows/tgu/TGU_001_0069/comp";
+        const std::string f = c->defaultWriteFile();
+        CHECK(f == "TGU_001_0069_comp_CAD_v006.####.exr");
+        CHECK(std::filesystem::path(c->resolvePath(f)) ==
+              std::filesystem::path("/shows/tgu/TGU_001_0069/comp") / "TGU_001_0069_comp_CAD_v006.####.exr");
+        Node* w = c->addNode("Write", "Write1", {{"file", f}});
+        w->init();
+        // picking another file type keeps the comp's name, swaps the extension
+        w->params.data["file_type"] = "dpx";
+        w->paramsChanged();
+        CHECK(w->params.str("file") == "TGU_001_0069_comp_CAD_v006.####.dpx");
+        // any part of it can be typed over
+        w->params.data["file"] = "renders/TGU_001_0069_comp_CAD_v006_denoise.####.exr";
+        w->paramsChanged();
+        CHECK(w->params.str("file") == "renders/TGU_001_0069_comp_CAD_v006_denoise.####.exr");
+        CHECK(w->params.str("file_type") == "exr");
+    });
     test("Slate: the gizmo's lines from the script, the thumbnail in its hole, fitted to the input", [] {
         const int W = 1152, H = 791;  // a 4608 x 3164 plate's shape, smaller
         json m = json::array({

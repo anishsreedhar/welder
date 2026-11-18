@@ -246,7 +246,7 @@ std::vector<NodeDef> build() {
                   Same(EnableIf(Field(I("first", "", 1, -100000, 100000), 64), "use_limit=true"), true),
                   Same(EnableIf(Field(I("last", "", 100, -100000, 100000), 64), "use_limit=true"), true),
                   Btn("write_render", "Render", "Render this Write over the project range (or its limit)")},
-                 "Writes its input: EXR, DPX, TIFF, PNG, JPEG, TGA, BMP, HDR image sequences (#### or %04d in the name), or a movie (.mov .mp4 .mkv .avi .mxf). Render with Render > Render All Writes."});
+                 "Writes its input: EXR, DPX, TIFF, PNG, JPEG, TGA, BMP, HDR image sequences (#### or %04d in the name), or a movie (.mov .mp4 .mkv .avi .mxf). A new Write's file starts as the saved comp's name. Render with Render > Render All Writes."});
     // ---------------------------------------------------------------- Value (numbers that drive exposed knobs)
     d.push_back({"Value", "Value", {InfoRow("signal", "signal"), F("value", "value", 0.5, 0, 1, "Any number (type past the slider's range); animate it like any knob")},
                  "A number for exposed knobs (right-click a knob > Expose as input)."});
