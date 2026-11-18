@@ -731,6 +731,51 @@ int main(int argc, char** argv) {
                                                        n->params.data[tk].dump().c_str(), app.frame, gTestKnobPos.x, gTestKnobPos.y);
             }
         }
+        // STRATA_TEST_VIEWERCLICK=<knob>: the viewer tools follow the panel being worked in. With panels
+        // open for a Transform and, opened after it, other nodes (one with viewer handles, say a Crop),
+        // and a colour picker left armed on another node (STRATA_TEST_VIEWERCLICK_PICK=<node>.<knob>):
+        // click the Transform's <knob> value box (it turns into a text field), type 15, then, without
+        // pressing Enter, drag the Transform's centre handle in the viewer. The typed value must stick,
+        // the picker must be put down and the drag must move the Transform. (Before: the last opened
+        // panel's node kept the viewer, and the armed picker took the drag.)
+        bool vclickTest = false;
+        if (const char* tk = std::getenv("STRATA_TEST_VIEWERCLICK"); tk && *tk && !opt.screenshot.empty()) {
+            ImGuiIO& tio = ImGui::GetIO();
+            vclickTest = frameCount < 60;
+            static ImVec2 c0(-1, -1);
+            if (const char* tp = std::getenv("STRATA_TEST_VIEWERCLICK_PICK"); tp && frameCount == 15) {
+                const std::string nk = tp;
+                const size_t dot = nk.find('.');
+                ui.picker.active = true;
+                ui.picker.node = nk.substr(0, dot);
+                ui.picker.knob = dot == std::string::npos ? "" : nk.substr(dot + 1);
+                ui.picker.mode = "color";
+                ui.picker.comps = 4;
+                ui.picker.fromInput = false;
+                ui.picker.dragging = false;
+            }
+            if (frameCount == 20 && gTestKnobPos.x >= 0) tio.AddMousePosEvent(gTestKnobPos.x, gTestKnobPos.y);
+            else if (frameCount == 22) tio.AddMouseButtonEvent(0, true);
+            else if (frameCount == 24) tio.AddMouseButtonEvent(0, false);
+            else if (frameCount == 26) {
+                tio.AddInputCharacter('1');
+                tio.AddInputCharacter('5');
+            } else if (frameCount == 30) {
+                Node* tn = activeToolNode(app);
+                std::printf("VIEWERCLICK before the viewer click: typing %d, picker %s, viewer tool %s\n", (int)typingInText(),
+                            ui.picker.active ? ui.picker.node.c_str() : "off", tn ? tn->name.c_str() : "none");
+                c0 = gTestXformCentre;
+                tio.AddMousePosEvent(c0.x, c0.y);
+            } else if (frameCount == 32) tio.AddMouseButtonEvent(0, true);
+            else if (frameCount > 32 && frameCount <= 40) tio.AddMousePosEvent(c0.x + (frameCount - 32) * 5.0f, c0.y);
+            else if (frameCount == 42) tio.AddMouseButtonEvent(0, false);
+            else if (frameCount == 50)
+                for (auto& n : app.comp->nodes)
+                    if (n->type == "Transform")
+                        std::printf("VIEWERCLICK %s %s = %s translate = %s (typing: %d, picker: %s)\n", n->name.c_str(), tk,
+                                    n->params.data[tk].dump().c_str(), n->params.data.value("translate", json()).dump().c_str(),
+                                    (int)typingInText(), ui.picker.active ? ui.picker.node.c_str() : "off");
+        }
         // STRATA_TEST_EXPOSE=<knob>: right-click the knob's value box, pick the menu's first item
         // (Expose as input), then print the knob and the node's exposed inputs
         bool exposeTest = false;
@@ -1545,7 +1590,7 @@ int main(int argc, char** argv) {
                     scanResult = conflicts.empty() ? 0 : 3;
                     break;
                 }
-            } else if (frameCount > 8 && (settled > 4 || forceShot) && !pipeTest && !playTest && !altTest && !stabTest && !flowTest && !matchTest && !dragTest && !camTest && !swapTest && !exposeTest && !shakeTest && !alignTest && !altDragTest && !messTest && !panelDragTest && !actionsTest && !keysTest && !menuTest && !tmTest && !reTest && !pcTest && !trackTest) {
+            } else if (frameCount > 8 && (settled > 4 || forceShot) && !pipeTest && !playTest && !altTest && !vclickTest && !stabTest && !flowTest && !matchTest && !dragTest && !camTest && !swapTest && !exposeTest && !shakeTest && !alignTest && !altDragTest && !messTest && !panelDragTest && !actionsTest && !keysTest && !menuTest && !tmTest && !reTest && !pcTest && !trackTest) {
                 if (std::getenv("STRATA_TEST_OPEN")) std::fprintf(stderr, "OPENTEST viewed '%s'\n", app.viewed.c_str());
                 bool ok = savePng(opt.screenshot, fbw, fbh);
                 std::printf("%s %s (%dx%d)\n", ok ? "wrote" : "failed to write", opt.screenshot.c_str(), fbw, fbh);

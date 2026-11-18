@@ -396,6 +396,7 @@ struct UiState {
         DisplayParams dp;
     } viewerImage;
     PickerState picker;
+    std::string pickerToolSeen;  // the viewer tool's node when the viewer last looked: another one taking over puts the picker down
     TrackerState tracker;
     PlanarState planar;
     CamTrackerState camTracker;
@@ -623,6 +624,7 @@ void testSelectInBrowser(const std::string& name);
 // Files dropped on the window (from Explorer / Finder): Reads, imported scripts, comps, geometry, LUTs.
 void graphDropFiles(App& app, UiState& ui, const std::vector<std::string>& paths, ImVec2 screenPos);
 extern ImVec2 gTestKnobPos;  // STRATA_TEST_ALTKEY (Properties.cpp)
+extern ImVec2 gTestXformCentre;  // STRATA_TEST_VIEWERCLICK: the open Transform's centre handle (TransformTool.cpp)
 bool graphTestPipe(App& app, UiState& ui, int frame);
 
 bool typingInText();

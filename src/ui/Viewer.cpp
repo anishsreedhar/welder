@@ -740,7 +740,18 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
     // Colour picker (a Color knob's "pick" button): click samples a pixel,
     // drag averages a box. Takes the mouse from the roto tools while active.
     PickerState& pk = ui.picker;
-    if (pk.active && !app.node(pk.node)) pk.active = false;
+    // The picker belongs to its node's panel: closing or folding that panel, or going on to work in
+    // another one, puts it down. Left armed, it took every click meant for a Roto or a handle.
+    if (pk.active && (!app.node(pk.node) || !app.panelShown(pk.node))) pk.active = false;
+    // So does another node's viewer tool taking over (its panel opened, or clicked in: see nodePanel).
+    {
+        Node* tn = activeToolNode(app);
+        const std::string tool = tn ? tn->name : "";
+        if (tool != ui.pickerToolSeen) {
+            if (pk.active && !tool.empty() && tool != pk.node) pk.active = false;
+            ui.pickerToolSeen = tool;
+        }
+    }
     if (active && pk.active) {
         ImVec2 mi = toImage(io.MousePos);
         if (v.hovered && ImGui::IsKeyPressed(ImGuiKey_Escape)) pk.active = false;
@@ -822,13 +833,14 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
         dl->AddText(ImVec2(p0.x + 10, p1.y - 22), IM_COL32(255, 210, 120, 255), hint);
     }
 
-    // Q hid the overlays, and with them the Roto's tools: a click in the viewer while a Roto is
-    // open brings them back, and the click goes on to the tool (it was a roto that "wouldn't draw").
-    if (active && !v.overlays && v.hovered && !pk.active && activeRoto(app) && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
-        !ImGui::GetIO().KeyAlt) {
-        v.overlays = true;
-        app.message("viewer overlays back on for the Roto (Q hides them)");
-    }
+    // Q hid the overlays, and with them the viewer tools: a click in the viewer while a tool node's
+    // panel is showing (Roto, Tracker, Transform, any node with handles) brings them back, and the
+    // click goes on to the tool (it was a roto that "wouldn't draw", a handle that wasn't there).
+    if (active && !v.overlays && v.hovered && !pk.active && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::GetIO().KeyAlt)
+        if (Node* tn = activeToolNode(app)) {
+            v.overlays = true;
+            app.message("viewer overlays back on for " + tn->name + " (Q hides them)");
+        }
     // Roto shapes and tools (when a Roto node's properties are open): in the active viewer.
     if (!active) {
     } else if (v.overlays) {
