@@ -2814,6 +2814,33 @@ int main(int argc, char** argv) {
         CHECK(kd < km);
     });
 
+    test("IBKColour: plates at two scales and from two engines at once stay right (#45)", [] {
+        json disc = {{"name", "D"}, {"points", roto::ptsJson(roto::ellipse(64, 48, 24, 24))}, {"color", {0.8, 0.5, 0.4, 1}}};
+        auto c = comp(json::array({
+            {{"name", "Screen"}, {"type", "Constant"}, {"params", {{"color", {0.1, 0.6, 0.15, 1}}}}},
+            {{"name", "FG"}, {"type", "Roto"}, {"inputs", {"Screen"}}, {"params", {{"output", "rgba"}, {"shapes", json::array({disc})}}}},
+            {{"name", "IC"}, {"type", "IBKColour"}, {"inputs", {"FG"}}},
+        }), 128, 96);
+        Node* n = c->find("IC");
+        auto at = [&](double scale, int x, int y) {
+            EngineOptions o;
+            o.tileSize = 32;  // many tiles share one plate
+            Engine e(o);
+            e.setScale(scale);
+            auto img = e.renderRegion(n, 1, n->format(e, 1).box());
+            return px(img, x, y, "G");
+        };
+        const float full = at(1, 64, 48), half = at(0.5, 32, 24);
+        CHECK_NEAR(full, 0.6, 0.02);  // the disc filled with screen
+        CHECK_NEAR(half, 0.6, 0.02);
+        CHECK_NEAR(at(1, 64, 48), full, 1e-6);  // the full-size plate again, after the half-size one
+        std::vector<float> got(4);
+        std::vector<std::thread> ts;
+        for (int i = 0; i < 4; ++i) ts.emplace_back([&, i] { got[i] = i % 2 ? at(0.5, 32, 24) : at(1, 64, 48); });
+        for (auto& t : ts) t.join();
+        for (int i = 0; i < 4; ++i) CHECK_NEAR(got[i], i % 2 ? half : full, 1e-6);
+    });
+
     test("keyers: screen, IBK, chroma, keyer, difference, despill", [] {
         // A green screen with a skin-coloured disc in the middle and a spill-tinted ring.
         json disc = {{"name", "D"}, {"points", roto::ptsJson(roto::ellipse(32, 24, 12, 12))}, {"color", {0.8, 0.5, 0.4, 1}}};
