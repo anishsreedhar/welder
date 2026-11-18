@@ -4557,6 +4557,70 @@ int main(int argc, char** argv) {
         CHECK(s0.models.size() == 1 && s0.models[0] == "video-depth-anything-small");
         ml::setHome("");
     });
+    test("ML CorridorKey node: the keyed result (premultiplied, straight, plate + matte, matte views); the job it asks for", [] {
+        auto home = std::filesystem::temp_directory_path() / "strata_mlhome_ck";
+        std::filesystem::remove_all(home);
+        ml::setHome(home.string());
+        const int W = 64, H = 48;
+        // the worker's rgba at half size: fg (0.8, 0.4, 0.2), matte 0 in the top half, 0.5 in the bottom
+        std::vector<float> k((W / 2) * (H / 2) * 4);
+        for (int y = 0; y < H / 2; ++y)
+            for (int x = 0; x < W / 2; ++x) {
+                float* p = &k[((size_t)y * (W / 2) + x) * 4];
+                p[0] = 0.8f, p[1] = 0.4f, p[2] = 0.2f, p[3] = y < H / 4 ? 0.0f : 0.5f;  // rows top first
+            }
+        auto d = home / "jobs" / "ck-a";
+        std::filesystem::create_directories(d / "out");
+        std::ofstream(d / "job.json") << "{}";
+        std::ofstream(d / "status.json") << json{{"state", "done"}, {"progress", 1}, {"message", "ok"}}.dump();
+        std::ofstream(d / "result.json") << json{{"outputs", {{"rgba", {{"frames", {1}}, {"width", W / 2}, {"height", H / 2}}}}}, {"straight", true}}.dump();
+        CHECK(ml::writeNpy((d / "out" / "rgba.1.npy").string(), k.data(), W / 2, H / 2, 4, true));
+        auto ckNode = [](const char* name, json params) {
+            params["ml"] = {{"main", {{"result", "ck-a"}}}};
+            return json{{"name", name}, {"type", "CorridorKey"}, {"inputs", {"K"}}, {"params", params}};
+        };
+        auto c = comp(json::array({{{"name", "K"}, {"type", "Constant"}, {"params", {{"color", {0.1, 0.6, 0.1, 1}}}}},
+                                   ckNode("CK", json::object()), ckNode("CS", {{"premultiply", false}}),
+                                   ckNode("CP", {{"view", "plate + matte"}}), ckNode("CM", {{"view", "matte"}}),
+                                   {{"name", "C0"}, {"type", "CorridorKey"}, {"inputs", {"K"}}}}),
+                     W, H);
+        // Welder's row 0 is the bottom: the npy's last rows (matte 0.5)
+        auto r = render(*c, "CK");
+        CHECK_NEAR(px(r, 10, 2, "A"), 0.5, 1e-3);
+        CHECK_NEAR(px(r, 10, 2, "R"), 0.4, 1e-3);  // premultiplied
+        CHECK_NEAR(px(r, 10, H - 2, "A"), 0, 1e-3);
+        CHECK_NEAR(px(r, 10, H - 2, "R"), 0, 1e-3);
+        auto st = render(*c, "CS");
+        CHECK_NEAR(px(st, 10, 2, "R"), 0.8, 1e-3);  // straight
+        CHECK_NEAR(px(st, 10, 2, "B"), 0.2, 1e-3);
+        auto pm = render(*c, "CP");
+        CHECK_NEAR(px(pm, 10, 2, "G"), 0.6, 1e-3);  // the plate, only the alpha replaced
+        CHECK_NEAR(px(pm, 10, 2, "A"), 0.5, 1e-3);
+        auto mt = render(*c, "CM");
+        CHECK_NEAR(px(mt, 10, 2, "G"), 0.5, 1e-3);
+        CHECK_NEAR(px(mt, 10, H - 2, "G"), 0, 1e-3);
+        auto n = render(*c, "C0");  // nothing keyed yet: the plate passes through
+        CHECK_NEAR(px(n, 10, 10, "G"), 0.6, 1e-5);
+        CHECK_NEAR(px(n, 10, 10, "A"), 1, 1e-5);
+        Engine e;
+        auto* ck = dynamic_cast<mlnodes::MLNode*>(c->find("C0"));
+        CHECK(ck != nullptr);
+        if (ck) {
+            auto s = ck->spec("main", e);
+            CHECK(s.task == "corridorkey");
+            CHECK(s.models.size() == 1 && s.models[0] == "corridorkey-2");
+            CHECK(s.inputs.size() == 2 && s.inputs[0].name == "src" && s.inputs[0].required && s.inputs[1].name == "hint" &&
+                  !s.inputs[1].required);
+            CHECK(s.params.value("hint_frames", std::string()) == "every frame");
+            CHECK(s.params.value("window", -1) == 0);
+            CHECK_NEAR(s.params.value("despill", 0.0), 0.5, 1e-9);
+            CHECK(s.params.contains("fps"));
+            CHECK(s.error.empty());
+            const json& reg = ml::registry();
+            if (reg.contains("models")) CHECK(reg["models"].contains("corridorkey-2"));
+        }
+        ml::setHome("");
+    });
     test("TrackMask: clicks to the worker's coordinates, the matte in alpha (grow / soften / invert), current vs old results", [] {
         auto home = std::filesystem::temp_directory_path() / "strata_mlhome_tm";
         std::filesystem::remove_all(home);
