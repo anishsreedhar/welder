@@ -355,6 +355,9 @@ if(Python3_FOUND)
   add_test(NAME ml_imagegen
            COMMAND ${Python3_EXECUTABLE} -m unittest tests/test_ml_imagegen.py
            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  add_test(NAME ml_corridorkey
+           COMMAND ${Python3_EXECUTABLE} -m unittest tests/test_ml_corridorkey.py
+           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
   add_test(NAME nk_importer
            COMMAND ${Python3_EXECUTABLE} -m unittest tests/test_nk2strata.py
            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
