@@ -130,3 +130,9 @@ Deflicker
 HeatWave
 Rain
 LensDroplets
+FilmBurn
+FilmBurnTransition
+LightLeak
+LightLeakDissolve
+Dust
+MultiTone
