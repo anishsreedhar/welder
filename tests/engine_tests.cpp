@@ -27,6 +27,7 @@
 #include "nodes/NodeUtils.h"
 #include "nodes/Sample.h"
 #include "nodes/Roto.h"
+#include "nodes/Markup.h"
 #include "nodes/Track.h"
 #include "nodes/Planar.h"
 #include "nodes/Retime.h"
@@ -2197,6 +2198,58 @@ int main(int argc, char** argv) {
         auto ct = curveToolFrame(e, c->find("CT"), 1);
         CHECK(ct.contains("crop") && ct["crop"][0].get<int>() == 30 && ct["crop"][3].get<int>() == 24);
         CHECK(ct["max"][0].get<double>() == 30.5);
+    });
+
+    test("Markup: strokes, boxes, circles and text over the input; moving; half resolution", [] {
+        json items = json::array({
+            {{"name", "Stroke1"}, {"kind", "stroke"}, {"points", {{5, 10}, {30, 10}}}, {"width", 4}, {"color", {1, 0, 0, 1}}},
+            {{"name", "Box1"}, {"kind", "box"}, {"rect", {35, 5, 55, 25}}, {"width", 2}, {"color", {0, 1, 0, 1}}},
+            {{"name", "Circle1"}, {"kind", "circle"}, {"rect", {5, 25, 25, 45}}, {"width", 2}, {"fill", true}, {"color", {0, 0, 1, 1}}},
+            {{"name", "Text1"}, {"kind", "text"}, {"pos", {35, 46}}, {"text", "W"}, {"size", 16}, {"color", {1, 1, 1, 1}}},
+            {{"name", "Hidden"}, {"kind", "box"}, {"rect", {0, 0, 64, 48}}, {"fill", true}, {"visible", false}},
+        });
+        auto c = comp(json::array({
+            {{"name", "Bg"}, {"type", "Constant"}, {"params", {{"color", {0.2, 0.2, 0.2, 1}}}}},
+            {{"name", "M"}, {"type", "Markup"}, {"inputs", {"Bg"}}, {"params", {{"items", items}}}},
+            {{"name", "Half"}, {"type", "Markup"}, {"inputs", {"Bg"}}, {"params", {{"items", items}, {"opacity", 0.5}}}},
+        }));
+        auto m = render(*c, "M");
+        CHECK_NEAR(px(m, 15, 10, "R"), 1, 1e-4);   // on the stroke
+        CHECK_NEAR(px(m, 15, 10, "G"), 0, 1e-4);
+        CHECK_NEAR(px(m, 15, 15, "R"), 0.2, 1e-4); // off it: the background
+        CHECK_NEAR(px(m, 35, 15, "G"), 1, 1e-4);   // the box's left edge
+        CHECK_NEAR(px(m, 45, 15, "G"), 0.2, 1e-4); // not filled
+        CHECK_NEAR(px(m, 15, 35, "B"), 1, 1e-4);   // the filled circle
+        CHECK_NEAR(px(m, 2, 46, "B"), 0.2, 1e-4);  // outside it
+        double ink = 0;
+        for (int y = 26; y < 48; ++y)
+            for (int x = 34; x < 60; ++x) ink += px(m, x, y, "R") - 0.2;
+        CHECK(ink > 5);  // the text drew
+        CHECK_NEAR(px(m, 60, 2, "R"), 0.2, 1e-6);  // the hidden box didn't
+        auto h = render(*c, "Half");
+        CHECK_NEAR(px(h, 15, 10, "R"), 0.6, 1e-4);  // opacity 0.5 over 0.2
+        // bounds and moving
+        auto b = markup::itemBounds(items[1]);
+        CHECK_NEAR(b[0], 33, 1e-9);
+        CHECK_NEAR(b[3], 27, 1e-9);
+        json moved = items[0];
+        markup::moveItem(moved, 3, -2);
+        CHECK_NEAR(moved["points"][1][0].get<double>(), 33, 1e-9);
+        CHECK_NEAR(moved["points"][1][1].get<double>(), 8, 1e-9);
+        json t = items[3];
+        markup::moveItem(t, 1, 1);
+        CHECK_NEAR(t["pos"][0].get<double>(), 36, 1e-9);
+        // at half resolution everything halves
+        auto s = renderScaled(*c, "M", 0.5);
+        CHECK(px(s, 7, 5, "R") > 0.9f);
+        CHECK(px(s, 22, 7, "B") < 0.3f);
+        CHECK(px(s, 7, 17, "B") > 0.9f);
+        // tiles give the same picture as one render
+        auto m8 = render(*c, "M", 1, 16);
+        double d = 0;
+        for (size_t i = 0; i < m->data.size(); ++i) d = std::max(d, (double)std::fabs(m->data[i] - m8->data[i]));
+        CHECK_NEAR(d, 0.0, 1e-6);
+        CHECK(markup::newItemName(items, "box") == "Box2");
     });
 
     test("SplineWarp: the A curve's picture moves onto the B curve", [] {

@@ -344,6 +344,11 @@ std::vector<NodeDef> build() {
                            XY("scale", "scale", json::array({1, 1}), 0.1, 10), PickXY(XY("center", "center", "$center", 0, 4096)),
                            C("operation", "operation", "over", {"over", "plus", "replace"})}),
                  "Text over the background input (any TrueType font, Arial by default)."});
+    d.push_back({"Markup", "Draw",
+                 {F("opacity", "opacity", 1, 0, 1)},
+                 "Review notes over the picture: paint strokes, boxes, circles and text, drawn in the viewer while its panel is "
+                 "open. Every item's colour, size and position can be changed afterwards. Save image writes what the node shows "
+                 "at full, half or quarter resolution."});
     d.push_back({"Rectangle", "Draw",
                  withMask({{"area", "area", Knob::Box, "$inner", 0, 4096, {}, ""}, F("softness", "softness", 0, 0, 200),
                            Col4("color", "color", json::array({1, 1, 1, 1})), B("invert", "invert", false),
