@@ -3447,7 +3447,7 @@ bool App::runImporter(const std::vector<std::string>& args, std::string* err) {
     std::string log = (fs::path(cacheDir("tmp")) / "strata_nk2strata.log").string();
     auto pys = pythonCandidates();
     if (pys.empty()) {
-        if (err) *err = "the .nk importer needs Python 3 (the Windows build ships one in python\\; reinstall, or install Python 3)";
+        if (err) *err = "the .nk importer needs Python 3. On Windows, download welder-" STRATA_VERSION "-win64-python.zip from the same release and unzip it into the Welder folder (it adds python\\), or install Python 3";
         return false;
     }
     std::string lastErr;
@@ -3500,8 +3500,12 @@ bool App::importNk(const std::string& nkPath, std::string* err) {
     std::vector<std::string> args = {nk.string(), "-o", out.string(), "--report", report.string(), "-q"};
     auto ga = gizmoArgs();
     args.insert(args.end(), ga.begin(), ga.end());
-    if (!runImporter(args, err)) return false;
-    if (!open(out.string(), err)) return false;
+    auto failed = [&] {
+        importError = "Couldn't import " + nk.filename().string() + ":\n" + (err && !err->empty() ? *err : std::string("unknown error"));
+        return false;
+    };
+    if (!runImporter(args, err)) return failed();
+    if (!open(out.string(), err)) return failed();
     try {
         std::ifstream rf(report);
         json r = json::parse(rf);
