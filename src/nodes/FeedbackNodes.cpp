@@ -462,12 +462,217 @@ private:
     }
 };
 
+// ------------------------------------------------------------------ PixelMosh
+// Datamosh: from the cut frame on, the picture is not refreshed. Each frame is the last result
+// moved block by block along the new shot's motion (from the flow input's forward vectors, or
+// found by block matching), plus a part of the new frame's change (the "residual"). The old shot
+// smears and melts along the new shot's movement until the mosh ends.
+class PixelMoshNode : public Node {
+public:
+    int maxInputs() const override { return 3; }
+    std::string inputLabel(int i) const override { return i == 0 ? "src" : i == 1 ? "flow" : "mask"; }
+    bool timeDependent() const override { return true; }
+    void paramsChanged() override { frames_.clear(); }
+    Format format(Engine& e, double f) override { return input(0) ? input(0)->format(e, f) : Node::format(e, f); }
+    Box dod(Engine& e, double f) override { return format(e, f).box(); }
+    ChannelSet channels(Engine& e, double f) override { return input(0) ? e.channels(input(0), f) : rgbaChannels(); }
+    Box roi(Engine&, int idx, const Box& req, double) override { return idx == 1 ? Box() : req; }
+    int identityInput(double f) override { return !input(0) || !moshing((int)std::lround(f)) ? 0 : -1; }
+    uint64_t pastHash(Engine& e, double f) override {
+        const int k = (int)std::lround(f);
+        if (!input(0) || !moshing(k)) return 0;
+        return chainKey(e, k - 1);
+    }
+    void render(RenderArgs& a, Image& out) override {
+        std::fill(out.data.begin(), out.data.end(), 0.0f);
+        if (!input(0)) return;
+        auto F = frameAt(a.engine, (int)std::lround(a.frame));
+        out.copyFrom(*F);
+        MaskMix mm = MaskMix::setup(a, this, 2);
+        if (!mm.active()) return;
+        ImagePtr src = a.fetch(input(0), a.region);
+        Image s(a.region, out.channels);
+        s.copyFrom(*src);
+        const int n = out.nch();
+        for (int y = a.region.y1; y < a.region.y2; ++y)
+            for (int x = a.region.x1; x < a.region.x2; ++x) {
+                const float w = mm.weight(x, y);
+                float* o = out.px(x, y);
+                const float* p = s.px(x, y);
+                for (int c = 0; c < n; ++c) o[c] = p[c] + (o[c] - p[c]) * w;
+            }
+    }
+
+private:
+    SharedCache<Image> frames_{3};
+
+    int start() const { return (int)std::lround(params.num("start", 0.0, comp ? comp->firstFrame : 1)); }
+    int length() const { return std::max(0, (int)std::lround(params.num("length", 0.0, 0))); }
+    // the frames that are moshed: the cut (start) and after, for `length` frames (0: to the end)
+    bool moshing(int k) const {
+        const int s = start(), L = length();
+        return k >= s && (L == 0 || k < s + L);
+    }
+    uint64_t stepHash(Engine& e, int k) {
+        uint64_t h = hashCombine(0x3c6ef372fe94f82bull, e.hash(input(0), k));
+        if (input(1)) h = hashCombine(h, e.hash(input(1), k - 1));
+        for (auto& [key, in] : knobInputs)
+            if (in) h = hashCombine(hashString(key, h), e.hash(in, k));
+        return hashCombine(h, (uint64_t)(int64_t)k);
+    }
+    uint64_t baseKey(Engine& e) {
+        uint64_t h = hashCombine(paramsHash(params), (uint64_t)std::llround(e.scale() * 1e6));
+        h = hashCombine(h, (uint64_t)(int64_t)start());
+        if (comp) h = hashCombine(h, ((uint64_t)(uint32_t)comp->format.width << 32) | (uint32_t)comp->format.height);
+        return h;
+    }
+    // the chain starts on the frame before the cut (the last refreshed picture)
+    uint64_t chainKey(Engine& e, int k) {
+        uint64_t h = baseKey(e);
+        for (int j = start() - 1; j <= k; ++j) h = hashCombine(h, stepHash(e, j));
+        return h;
+    }
+    std::shared_ptr<const Image> frameAt(Engine& e, int f) {
+        const int s = start() - 1;
+        f = std::max(f, s);
+        const int steps = std::min(f - s, 20000);
+        std::vector<uint64_t> keys(steps + 1);
+        uint64_t h = baseKey(e);
+        for (int k = 0; k <= steps; ++k) keys[k] = h = hashCombine(h, stepHash(e, s + k));
+        int have = -1;
+        std::shared_ptr<const Image> P;
+        for (int k = steps; k >= 0 && !P; --k)
+            if ((P = frames_.peek(keys[k]))) have = k;
+        for (int k = have + 1; k <= steps; ++k) {
+            if (e.cancelled()) throw RenderCancelled();
+            auto prev = P;
+            P = frames_.get(keys[k], [&] { return step(e, s + k, prev.get()); });
+        }
+        return P;
+    }
+
+    // Frame k from frame k-1's result (null: the last clean frame, just src).
+    std::shared_ptr<const Image> step(Engine& e, int k, const Image* prev) {
+        const double sc = e.scale();
+        const Box D = dod(e, k);
+        const ChannelSet chs = channels(e, k);
+        auto out = std::make_shared<Image>(D, chs);
+        if (D.empty()) return out;
+        ImagePtr cur = e.renderRegion(input(0), k, D);
+        if (!prev) {
+            out->copyFrom(*cur);
+            return out;
+        }
+        ImagePtr last = e.renderRegion(input(0), k - 1, D);
+        Image C(D, chs), L(D, chs);
+        C.copyFrom(*cur);
+        L.copyFrom(*last);
+        const int n = out->nch();
+        const int bs = std::max(2, (int)std::lround(std::max(2.0, params.num("block_size", k, 16)) * sc));
+        const int search = std::max(1, (int)std::lround(std::max(1.0, params.num("search", k, 16)) * sc));
+        const double gain = params.num("motion_gain", k, 1);
+        const float residual = (float)std::clamp(params.num("residual", k, 0.3), 0.0, 1.0);
+        const float freeze = (float)std::clamp(params.num("freeze", k, 0), 0.0, 1.0);
+        const uint32_t seed = (uint32_t)params.num("seed", k, 0);
+        const int bx0 = (int)std::floor((double)D.x1 / bs), by0 = (int)std::floor((double)D.y1 / bs);
+        const int bw = (D.x2 - 1) / bs - bx0 + 1, bh = (D.y2 - 1) / bs - by0 + 1;
+        // per block: where its pixels were a frame ago (an offset)
+        std::vector<float> mvx((size_t)bw * bh, 0), mvy((size_t)bw * bh, 0);
+        if (input(1)) {
+            ImagePtr fi = e.renderRegion(input(1), k - 1, D);
+            int u = fi->ch("forward.u"), v = fi->ch("forward.v");
+            if (u < 0 || v < 0) u = fi->ch("R"), v = fi->ch("G");
+            if (u < 0 || v < 0) throw RenderError("the flow input has no forward.u / .v (or R / G) channels");
+            for (int j = 0; j < bh; ++j)
+                for (int i = 0; i < bw; ++i) {
+                    double su = 0, sv = 0;
+                    int cnt = 0;
+                    for (int y = (by0 + j) * bs; y < (by0 + j + 1) * bs; ++y)
+                        for (int x = (bx0 + i) * bs; x < (bx0 + i + 1) * bs; ++x)
+                            if (fi->bounds.contains(x, y)) su += fi->px(x, y)[u], sv += fi->px(x, y)[v], ++cnt;
+                    if (cnt) mvx[(size_t)j * bw + i] = (float)(-su / cnt), mvy[(size_t)j * bw + i] = (float)(-sv / cnt);
+                }
+        } else {
+            // block matching on luma: the offset into the last frame that matches each block best
+            // (a coarse search in steps of 2, then +-1 around the best)
+            const int R = C.ch("R"), G = C.ch("G"), B = C.ch("B");
+            const int W = D.width(), H = D.height();
+            std::vector<float> lc((size_t)W * H), ll((size_t)W * H);
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x) {
+                    const float* p = C.px(D.x1 + x, D.y1 + y);
+                    const float* q = L.px(D.x1 + x, D.y1 + y);
+                    lc[(size_t)y * W + x] = R >= 0 && G >= 0 && B >= 0 ? 0.2126f * p[R] + 0.7152f * p[G] + 0.0722f * p[B] : p[0];
+                    ll[(size_t)y * W + x] = R >= 0 && G >= 0 && B >= 0 ? 0.2126f * q[R] + 0.7152f * q[G] + 0.0722f * q[B] : q[0];
+                }
+            const int st = std::max(1, bs / 8);  // sample every st-th pixel of a block
+            parallelFor(bh, [&](int b0, int b1) {
+                for (int j = b0; j < b1; ++j)
+                    for (int i = 0; i < bw; ++i) {
+                        const int x0 = (bx0 + i) * bs - D.x1, y0 = (by0 + j) * bs - D.y1;
+                        auto sad = [&](int dx, int dy) {
+                            double s = 0;
+                            for (int y = y0; y < y0 + bs; y += st)
+                                for (int x = x0; x < x0 + bs; x += st) {
+                                    if (x < 0 || y < 0 || x >= W || y >= H) continue;
+                                    const int sx = std::clamp(x + dx, 0, W - 1), sy = std::clamp(y + dy, 0, H - 1);
+                                    s += std::fabs(lc[(size_t)y * W + x] - ll[(size_t)sy * W + sx]);
+                                }
+                            return s;
+                        };
+                        int bestx = 0, besty = 0;
+                        double best = sad(0, 0) * 0.98;  // a slight preference for no motion
+                        for (int dy = -search; dy <= search; dy += 2)
+                            for (int dx = -search; dx <= search; dx += 2) {
+                                const double v = sad(dx, dy);
+                                if (v < best) best = v, bestx = dx, besty = dy;
+                            }
+                        const int cx = bestx, cy = besty;
+                        for (int dy = cy - 1; dy <= cy + 1; ++dy)
+                            for (int dx = cx - 1; dx <= cx + 1; ++dx) {
+                                const double v = sad(dx, dy);
+                                if (v < best) best = v, bestx = dx, besty = dy;
+                            }
+                        mvx[(size_t)j * bw + i] = (float)bestx;
+                        mvy[(size_t)j * bw + i] = (float)besty;
+                    }
+            });
+        }
+        // the new picture: the last result moved block by block, plus some of the new frame's change
+        parallelFor(D.height(), [&](int b0, int b1) {
+            std::vector<float> a(n), b(n);
+            for (int y = D.y1 + b0; y < D.y1 + b1; ++y)
+                for (int x = D.x1; x < D.x2; ++x) {
+                    const int bi = (int)std::floor((double)x / bs) - bx0, bj = (int)std::floor((double)y / bs) - by0;
+                    const size_t id = (size_t)bj * bw + bi;
+                    float* o = out->px(x, y);
+                    if (freeze > 0 && rnd01(seed, (uint32_t)(bi + bx0), (uint32_t)(bj + by0), (uint32_t)k) < freeze) {
+                        std::copy(prev->px(x, y), prev->px(x, y) + n, o);  // this block skipped a frame
+                        continue;
+                    }
+                    const double dx = mvx[id] * gain, dy = mvy[id] * gain;
+                    bilinear(*prev, x + 0.5 + dx, y + 0.5 + dy, 1, a.data());
+                    if (residual > 0) bilinear(L, x + 0.5 + mvx[id], y + 0.5 + mvy[id], 1, b.data());
+                    const float* c = C.px(x, y);
+                    for (int ch = 0; ch < n; ++ch) o[ch] = a[ch] + (residual > 0 ? residual * (c[ch] - b[ch]) : 0.0f);
+                }
+        });
+        return out;
+    }
+    static float rnd01(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+        uint32_t h = a * 0x9E3779B1u ^ b * 0x85EBCA6Bu ^ c * 0xC2B2AE35u ^ d * 0x27D4EB2Du;
+        h ^= h >> 16, h *= 0x7feb352du, h ^= h >> 15, h *= 0x846ca68bu, h ^= h >> 16;
+        return (h >> 8) / 16777216.0f;
+    }
+};
+
 }  // namespace
 
 void registerFeedbackNodes() {
     auto& r = NodeRegistry::instance();
     r.add("Feedback", [] { return std::make_unique<FeedbackNode>(); });
     r.add("DepthMix", [] { return std::make_unique<DepthMixNode>(); });
+    r.add("PixelMosh", [] { return std::make_unique<PixelMoshNode>(); });
 }
 
 }  // namespace strata

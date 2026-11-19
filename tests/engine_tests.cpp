@@ -1686,6 +1686,43 @@ int main(int argc, char** argv) {
         }
     });
 
+    test("PixelMosh: clean before the cut, the old picture dragged after it; VHS with every module off changes nothing", [] {
+        auto c = comp(json::array({
+            {{"name", "Src"}, {"type", "Expression"},
+             {"params", {{"channel0", "R"}, {"expr0", "frame < 6 ? 1 : 0"},
+                         {"channel1", "G"}, {"expr1", "frame < 6 ? 0 : 0.5 + 0.5 * sin((x - 2 * frame) * 0.3)"},
+                         {"channel2", "B"}, {"expr2", "0.2"}, {"channel3", "A"}, {"expr3", "1"}}}},
+            {{"name", "M"}, {"type", "PixelMosh"}, {"inputs", {"Src"}}, {"params", {{"start", 6}, {"residual", 0}, {"block_size", 8}, {"search", 4}}}},
+            {{"name", "Mr"}, {"type", "PixelMosh"}, {"inputs", {"Src"}}, {"params", {{"start", 6}, {"residual", 1}, {"block_size", 8}, {"search", 4}}}},
+            {{"name", "Ml"}, {"type", "PixelMosh"}, {"inputs", {"Src"}}, {"params", {{"start", 6}, {"length", 2}, {"residual", 0}}}},
+            {{"name", "V0"}, {"type", "VHS"}, {"inputs", {"Src"}},
+             {"params", {{"colour_on", false}, {"soft_on", false}, {"noise_on", false}, {"tracking_on", false}, {"head_on", false}, {"wobble_on", false}}}},
+            {{"name", "Vd"}, {"type", "VHS"}, {"inputs", {"Src"}}, {"params", {{"crease", 1}, {"dropouts", 30}, {"colour_under", true}, {"ringing", 1}}}},
+        }), 64, 48);
+        auto s4 = render(*c, "Src", 4), m4 = render(*c, "M", 4), s8 = render(*c, "Src", 8);
+        double d = 0;
+        for (size_t i = 0; i < s4->data.size(); ++i) d = std::max(d, (double)std::fabs(s4->data[i] - m4->data[i]));
+        CHECK_NEAR(d, 0.0, 1e-6);  // before the cut: the source
+        auto m8 = render(*c, "M", 8), m8t = render(*c, "M", 8, 16), r8 = render(*c, "Mr", 8), l9 = render(*c, "Ml", 9);
+        double red = 0, redR = 0, dt = 0, dl = 0;
+        for (int y = 0; y < 48; ++y)
+            for (int x = 0; x < 64; ++x) red += px(m8, x, y, "R"), redR += px(r8, x, y, "R");
+        CHECK(red / (64 * 48) > 0.8);  // no residual: the red picture is never refreshed
+        CHECK(redR < red);              // a residual lets the new shot seep in
+        for (size_t i = 0; i < m8->data.size(); ++i) dt = std::max(dt, (double)std::fabs(m8->data[i] - m8t->data[i]));
+        CHECK_NEAR(dt, 0.0, 1e-6);  // the same in any tiles
+        auto s9 = render(*c, "Src", 9);
+        for (size_t i = 0; i < s9->data.size(); ++i) dl = std::max(dl, (double)std::fabs(s9->data[i] - l9->data[i]));
+        CHECK_NEAR(dl, 0.0, 1e-6);  // after its length: clean again
+        (void)s8;
+        auto v0 = render(*c, "V0", 8), vd = render(*c, "Vd", 8), vdt = render(*c, "Vd", 8, 16);
+        double dv = 0, dvt = 0;
+        for (size_t i = 0; i < s8->data.size(); ++i) dv = std::max(dv, (double)std::fabs(s8->data[i] - v0->data[i]));
+        for (size_t i = 0; i < vd->data.size(); ++i) dvt = std::max(dvt, (double)std::fabs(vd->data[i] - vdt->data[i]));
+        CHECK_NEAR(dv, 0.0, 1e-4);
+        CHECK_NEAR(dvt, 0.0, 1e-5);
+    });
+
     test("Lens and noise extras: Defocus fringe splits colour, rim brightens the edge; bubbles dome up from their seams", [] {
         auto c = comp(json::array({
             {{"name", "Dot"}, {"type", "Expression"}, {"params", {{"channel0", "rgba"}, {"expr0", "(x == 32 && y == 32) ? 1 : 0"}}}},
