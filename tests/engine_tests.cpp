@@ -7622,6 +7622,120 @@ Connections:  {
         std::printf("  FractalFold at half res: %.4f (the plate itself: %.4f)\n", pe, pb);
         CHECK(pe < 2.5 * pb);  // folds squeeze detail together, so a little more aliasing than the plate
     });
+    // ---------------------------------------------------------------- Psychic Rendering: SpectralPhase, TemporalTracer
+    test("Psychic: SpectralPhase keeps lightness, splits R / B only along the field, leaves grey alone, tiles agree", [] {
+        const int W = 96, H = 64;
+        auto c = comp(json::array({
+            {{"name", "P"}, {"type", "Plasma"}, {"params", {{"size", 30}, {"complexity", 8}, {"cycles", 3}, {"speed", 0}}}},
+            {{"name", "Grey"}, {"type", "Constant"}, {"params", {{"color", {0.3, 0.3, 0.3, 1}}}}},
+            {{"name", "Id"}, {"type", "SpectralPhase"}, {"inputs", {"P"}}, {"params", {{"chromatic_split", 0}, {"hue_shift", 0}, {"chroma_boost", 1}}}},
+            {{"name", "Hue"}, {"type", "SpectralPhase"}, {"inputs", {"P"}}, {"params", {{"chromatic_split", 0}, {"hue_shift", 90}, {"chroma_boost", 2}}}},
+            {{"name", "Split"}, {"type", "SpectralPhase"}, {"inputs", {"P"}}, {"params", {{"chromatic_split", 6}, {"hue_shift", 0}, {"chroma_boost", 1}}}},
+            {{"name", "GreyFx"}, {"type", "SpectralPhase"}, {"inputs", {"Grey"}}, {"params", {{"chromatic_split", 6}, {"hue_shift", 90}}}},
+            {{"name", "All"}, {"type", "SpectralPhase"}, {"inputs", {"P"}}},
+        }), W, H);
+        auto p = render(*c, "P"), id = render(*c, "Id"), hue = render(*c, "Hue"), sp = render(*c, "Split");
+        auto grey = render(*c, "Grey"), gfx = render(*c, "GreyFx");
+        double dId = 0, dL = 0, dHue = 0, dG = 0, dRB = 0, dGrey = 0;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                double a[3], b[3], la[3], lb[3];
+                for (int k = 0; k < 3; ++k) {
+                    const char* ch = k == 0 ? "R" : k == 1 ? "G" : "B";
+                    dId = std::max(dId, (double)std::fabs(px(id, x, y, ch) - px(p, x, y, ch)));
+                    a[k] = px(p, x, y, ch), b[k] = px(hue, x, y, ch);
+                    dHue = std::max(dHue, std::fabs(a[k] - b[k]));
+                    dGrey = std::max(dGrey, (double)std::fabs(px(gfx, x, y, ch) - px(grey, x, y, ch)));
+                }
+                color::oklab::fromLinear(a, la);
+                color::oklab::fromLinear(b, lb);
+                dL = std::max(dL, std::fabs(la[0] - lb[0]));
+                dG = std::max(dG, (double)std::fabs(px(sp, x, y, "G") - px(p, x, y, "G")));
+                dRB = std::max(dRB, (double)std::fabs(px(sp, x, y, "R") - px(p, x, y, "R")));
+            }
+        std::printf("  SpectralPhase: identity %.1e, lightness change %.1e (hue change %.3f), split: G %.1e, R %.3f, grey %.1e\n", dId, dL, dHue,
+                    dG, dRB, dGrey);
+        CHECK(dId < 1e-5);
+        CHECK(dL < 1e-5 && dHue > 0.05);
+        CHECK(dG < 1e-6 && dRB > 0.02);
+        CHECK(dGrey < 1e-5);
+        auto big = render(*c, "All", 3, 256), small = render(*c, "All", 3, 16);
+        double dt = 0;
+        for (size_t i = 0; i < big->data.size(); ++i) dt = std::max(dt, (double)std::fabs(big->data[i] - small->data[i]));
+        CHECK(dt < 1e-6);
+    });
+
+    test("Psychic: TemporalTracer trails only behind moving things (static background stays sharp), first frame is the plate, scrubs cleanly", [] {
+        const int W = 128, H = 64;
+        json nodes = json::array({
+            {{"name", "Bg"}, {"type", "Plasma"}, {"params", {{"size", 30}, {"complexity", 8}, {"cycles", 3}, {"speed", 0}}}},
+            {{"name", "Box"}, {"type", "Rectangle"}, {"params", {{"area", {10, 22, 34, 42}}, {"color", {1, 0.2, 0.2, 1}}}}},
+            {{"name", "P2"}, {"type", "Plasma"}, {"params", {{"size", 9}, {"complexity", 8}, {"cycles", 2}, {"speed", 0}}}},
+            {{"name", "TexBox"}, {"type", "Merge"}, {"inputs", {"Box", "P2"}}, {"params", {{"operation", "in"}}}},
+            {{"name", "Mv"}, {"type", "Transform"}, {"inputs", {"TexBox"}}, {"params", {{"translate", {json{{"expr", "frame * 6"}}, 0}}}}},
+            {{"name", "Plate"}, {"type", "Merge"}, {"inputs", {"Bg", "Mv"}}, {"params", {{"operation", "over"}}}},
+            {{"name", "VG"}, {"type", "VectorGenerator"}, {"inputs", {"Plate"}}},
+            {{"name", "Tr"}, {"type", "TemporalTracer"}, {"inputs", {"Plate", "VG"}}, {"params", {{"trail_length", 12}, {"phase_shift", 0}}}},
+            {{"name", "TrShift"}, {"type", "TemporalTracer"}, {"inputs", {"Plate", "VG"}}, {"params", {{"trail_length", 12}, {"phase_shift", 90}}}},
+            {{"name", "Echo"}, {"type", "TemporalTracer"}, {"inputs", {"Plate"}}, {"params", {{"trail_length", 12}}}},
+        });
+        auto c = comp(nodes, W, H);
+        c->firstFrame = 1;
+        c->lastFrame = 20;
+        auto plate = render(*c, "Plate", 8), tr = render(*c, "Tr", 8), ts = render(*c, "TrShift", 8), echo = render(*c, "Echo", 8);
+        double bg = 0, bgEcho = 0;
+        for (int y : {1, 2, 3, 4, 5, 58, 59, 60, 61, 62})
+            for (int x = 0; x < W; ++x)
+                for (const char* ch : {"R", "G", "B"}) {
+                    bg = std::max(bg, (double)std::fabs(px(tr, x, y, ch) - px(plate, x, y, ch)));
+                    bgEcho = std::max(bgEcho, (double)std::fabs(px(echo, x, y, ch) - px(plate, x, y, ch)));
+                }
+        // behind the box: it covered x 28..52 three to five frames ago, now it is at 58..82
+        double gain = 0;
+        for (const char* ch : {"R", "G", "B"}) gain += px(tr, 40, 32, ch) - px(plate, 40, 32, ch);
+        const double hueDiff = std::fabs(px(ts, 40, 32, "G") - px(tr, 40, 32, "G")) + std::fabs(px(ts, 40, 32, "B") - px(tr, 40, 32, "B"));
+        std::printf("  TemporalTracer: still background change %.1e (no vectors: %.3f), trail gain %.3f, phase shift changes the trail by %.3f\n", bg,
+                    bgEcho, gain, hueDiff);
+        CHECK(bg < 1e-4);
+        CHECK(bgEcho > 0.1);
+        CHECK(gain > 0.1);
+        CHECK(hueDiff > 0.02);
+        // the first frame has nothing behind it: the plate as is
+        auto f1 = render(*c, "Tr", 1), p1 = render(*c, "Plate", 1);
+        double d1 = 0;
+        for (size_t i = 0; i < f1->data.size(); ++i) d1 = std::max(d1, (double)std::fabs(f1->data[i] - p1->data[i]));
+        CHECK(d1 == 0);
+        // scrub 15 back to 8 = a fresh render of 8
+        Engine e;
+        Node* nd = c->find("Tr");
+        const Box B = nd->format(e, 1).box();
+        e.renderRegion(nd, 15, B);
+        auto back = e.renderRegion(nd, 8, B);
+        double ds = 0;
+        for (size_t i = 0; i < back->data.size(); ++i) ds = std::max(ds, (double)std::fabs(back->data[i] - tr->data[i]));
+        CHECK(ds == 0);
+        CHECK(nd->pastHash(e, 8) != nd->pastHash(e, 9));
+    });
+    test("Psychic: the example comp (the whole chain) loads and renders at proxy", [] {
+        // next to this source file (where the build ran); a test run on another machine may not see it
+        const auto path = std::filesystem::path(__FILE__).parent_path().parent_path() / "examples" / "psychic.weld";
+        std::ifstream in(path);
+        if (!in.good()) {
+            std::printf("  (examples/psychic.weld not found from %s: not checked here)\n", path.string().c_str());
+            return;
+        }
+        json j = json::parse(in);
+        auto c = Comp::fromJson(j, std::filesystem::temp_directory_path());
+        Engine e;
+        e.setScale(0.125);
+        Node* n = c->find("TemporalTracer1");
+        CHECK(n != nullptr);
+        if (!n) return;
+        auto img = e.renderRegion(n, 4, n->format(e, 4).box());
+        double sum = 0;
+        for (float v : img->data) sum += std::isfinite(v) ? v : 1e9;
+        CHECK(sum > 0 && sum < 1e8);
+    });
     std::printf("\n%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

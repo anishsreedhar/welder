@@ -21,6 +21,8 @@ struct DetailOptions {
     double radius = 4;          // contrast window radius, full-res pixels
     double gain = 12;           // how quickly the mask reaches 1
     double scale = 1;           // render scale (Engine::scale)
+    Box limit;                  // if set: reads stay inside it (the input's dod), so the black beyond a
+                                // padded fetch doesn't read as a hard edge along the frame border
 };
 
 // How far around a region the source must reach (render pixels) for detailMask to see everything.
