@@ -44,13 +44,27 @@ jobs:
           dnf install -y libX11-devel libXrandr-devel libXinerama-devel libXcursor-devel libXi-devel \
                          mesa-libGL-devel git
           dnf install -y nasm || dnf --enablerepo=powertools install -y nasm || true
-          # glslangValidator compiles the GPU shaders; without it the GPU code is left out (#46)
-          dnf install -y glslang || dnf --enablerepo=powertools install -y glslang
-          command -v glslangValidator
           git config --global --add safe.directory '*'
           pipx install cmake || true; pipx install ninja || true
           pipx environment --value PIPX_BIN_DIR >> "$GITHUB_PATH" 2>/dev/null || echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           dnf install -y ninja-build || true
+      # glslangValidator compiles the GPU shaders; without it the GPU code is left out (#46).
+      # AlmaLinux 8 has no package for it, so it's built from Khronos' source (a few minutes, then cached).
+      - uses: actions/cache@v4
+        with:
+          path: ../glslang
+          key: glslang-linux-15.1.0
+      - name: glslangValidator
+        run: |
+          G=$(cd .. && pwd)/glslang
+          if [ ! -x $G/bin/glslangValidator ]; then
+            git clone -q --depth 1 --branch 15.1.0 https://github.com/KhronosGroup/glslang.git $G-src
+            cmake -S $G-src -B $G-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_OPT=OFF -DGLSLANG_TESTS=OFF \
+                  -DGLSLANG_ENABLE_INSTALL=ON -DCMAKE_INSTALL_PREFIX=$G
+            cmake --build $G-build --target install
+          fi
+          $G/bin/glslangValidator --version | head -1
+          echo "$G/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
         with:
           path: ../deps
