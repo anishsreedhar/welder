@@ -9,3 +9,14 @@ __pycache__/
 models/rife/
 build-linux/
 build-macos-*/
+
+# never commit local credentials or per-person settings
+.claude/settings.local.json
+.claude/.credentials.json
+CLAUDE.local.md
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+hf_token
