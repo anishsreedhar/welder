@@ -6,6 +6,12 @@
 //   FractalFold  kaleidoscopic geometry folded out of the plate's own texture: recursive polar
 //                folds (a KIFS) around a centre or on a grid of tiles, mixed back in where the
 //                plate has detail (or brightness), so the patterns emerge from the surfaces
+//   SpectralPhase  organic chromatic dispersion: R and B are sampled either side of each pixel
+//                along a curl-noise field, then hue (and chroma) turn in OKLCH with a phase
+//                that follows the plate's lightness and time - lightness itself is kept
+//   TemporalTracer luminous trails behind moving things only: earlier frames weighted by decay
+//                AND by how fast each pixel was moving (vectors), so a still background stays
+//                razor sharp; each step back can turn in hue (phase-shifted trails)
 //
 // Shared pieces: NoiseLib (simplex / curl), DetailMask, MotionHistory (the chained, scrub-safe
 // position map). Everything is evaluated in full-resolution units, so proxy renders and tiling
@@ -17,6 +23,7 @@
 #include <vector>
 
 #include "../core/Comp.h"
+#include "../color/OkLab.h"
 #include "../core/Engine.h"
 #include "DetailMask.h"
 #include "MotionHistory.h"
@@ -40,6 +47,21 @@ uint64_t boxHash(uint64_t h, const Box& b) {
     h = hashCombine(h, ((uint64_t)(uint32_t)b.x1 << 32) ^ (uint32_t)b.y1);
     return hashCombine(h, ((uint64_t)(uint32_t)b.x2 << 32) ^ (uint32_t)b.y2);
 }
+
+// Keep a lookup inside the input's defined area (the fetched image is padded with black beyond
+// it): a push near the border pulls in border pixels, not black.
+struct EdgeClamp {
+    double x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+    bool on = false;
+    EdgeClamp(const Box& dod, const Box& have) {
+        const Box b = dod.intersect(have);
+        on = !b.empty();
+        if (on) x1 = b.x1 + 0.5, y1 = b.y1 + 0.5, x2 = b.x2 - 0.5, y2 = b.y2 - 0.5;
+    }
+    void apply(double& x, double& y) const {
+        if (on) x = std::clamp(x, x1, x2), y = std::clamp(y, y1, y2);
+    }
+};
 
 std::vector<int> channelMap(const Image& src, const Image& out) {
     std::vector<int> m(out.nch());
@@ -130,6 +152,7 @@ public:
             fx::DetailOptions o;
             o.scale = sc;
             o.radius = params.num("detail_size", f, 4);
+            o.limit = e.dod(input(0), f);
             o.gain = params.num("detail_gain", f, 12);
             detail = fx::detailMask(*src, R, o);
         }
@@ -147,6 +170,7 @@ public:
         SampleOpts so;
         so.blackOutside = false;  // the edges extend: a push near the border pulls in border pixels, not black
         const int RW = R.width();
+        const EdgeClamp edge(e.dod(input(0), f), src->bounds);
         const float norm = 1.0f / kCurlRms;
         const float maxPush = kMaxPush * strength;
         auto push = [&](const PosMap* pm, double X, double Y, float* d) {
@@ -188,7 +212,9 @@ public:
                         for (int c = 0; c < out.nch(); ++c) o[c] = c < 4 ? v[c] : 0.0f;
                         continue;
                     }
-                    sample(*src, X - px, Y - py, fl, o, map, so);
+                    double sx = X - px, sy = Y - py;
+                    edge.apply(sx, sy);
+                    sample(*src, sx, sy, fl, o, map, so);
                 }
             }
         };
@@ -348,6 +374,7 @@ public:
             fx::DetailOptions o;
             o.scale = sc;
             o.radius = params.num("detail_size", f, 4);
+            o.limit = e.dod(input(0), f);
             detail = fx::detailMask(*src, R, o);
         }
         const int iR = src->ch("R"), iG = src->ch("G"), iB = src->ch("B");
@@ -432,12 +459,215 @@ private:
     }
 };
 
+
+// ================================================================== SpectralPhase
+class SpectralPhaseNode : public Node {
+public:
+    int maxInputs() const override { return 2; }
+    std::string inputLabel(int i) const override { return i == 0 ? "src" : "mask"; }
+    bool timeDependent() const override { return true; }
+    Format format(Engine& e, double f) override { return input(0) ? input(0)->format(e, f) : Node::format(e, f); }
+    Box dod(Engine& e, double f) override { return input(0) ? e.dod(input(0), f) : Box(); }
+    ChannelSet channels(Engine& e, double f) override { return input(0) ? e.channels(input(0), f) : rgbaChannels(); }
+    Box roi(Engine& e, int idx, const Box& req, double f) override {
+        if (idx == 1) return req;
+        const int p = (int)std::ceil(kMaxPush * std::fabs(params.num("chromatic_split", f, 4)) * e.scale()) + 3;
+        return req.pad(p, p);
+    }
+    int identityInput(double f) override { return !input(0) || params.num("mix", f, 1) <= 0 ? 0 : -1; }
+
+    void render(RenderArgs& a, Image& out) override {
+        std::fill(out.data.begin(), out.data.end(), 0.0f);
+        if (!input(0)) return;
+        Engine& e = a.engine;
+        const double f = a.frame, sc = e.scale();
+        const Box R = a.region;
+        const float split = (float)(params.num("chromatic_split", f, 4) * sc);
+        const int P = (int)std::ceil(kMaxPush * std::fabs(split)) + 3;
+        ImagePtr src = a.fetch(input(0), R.pad(P, P));
+        const std::vector<int> map = channelMap(*src, out);
+        const int oR = out.ch("R"), oG = out.ch("G"), oB = out.ch("B");
+        const int sR = src->ch("R"), sG = src->ch("G"), sB = src->ch("B");
+        const double fpsv = comp ? std::max(1.0, comp->fps) : 24.0, secs = f / fpsv;
+        const double size = std::max(1.0, params.num("split_scale", f, 240));
+        const float z = (float)(secs * params.num("flow_speed", f, 0.2));
+        const uint32_t seed = (uint32_t)params.num("seed", f, 0);
+        const double freq = params.num("phase_frequency", f, 2), speed = params.num("phase_speed", f, 0.25);
+        const double amp = params.num("hue_shift", f, 60) * kPi / 180;
+        const double boost = std::max(0.0, params.num("chroma_boost", f, 1.3));
+        const double couple = std::clamp(params.num("luma_coupling", f, 0.7), 0.0, 1.0);
+        MaskMix mm = MaskMix::setup(a, this, 1);
+        const Filter fl = parseFilter("bilinear");
+        SampleOpts so;
+        so.blackOutside = false;
+        const int n = out.nch();
+        const EdgeClamp edge(e.dod(input(0), f), src->bounds);
+        std::vector<float> tmp(n);
+        for (int y = R.y1; y < R.y2; ++y) {
+            Engine::cancelPoint();
+            for (int x = R.x1; x < R.x2; ++x) {
+                float* o = out.px(x, y);
+                const double X = x + 0.5, Y = y + 0.5;
+                // the centre sample keeps every channel; R and B come from either side along the field
+                sample(*src, X, Y, fl, o, map, so);
+                if (oR < 0 || oG < 0 || oB < 0 || sR < 0 || sG < 0 || sB < 0) continue;
+                const float keep[3] = {o[oR], o[oG], o[oB]};
+                float rgb[3] = {keep[0], keep[1], keep[2]};
+                if (split != 0) {
+                    float d[2];
+                    noise::curl2((float)(X / sc / size), (float)(Y / sc / size), z, seed, d, 2);
+                    float dx = d[0] / kCurlRms * split, dy = d[1] / kCurlRms * split;
+                    const float len = std::hypot(dx, dy), mx = kMaxPush * std::fabs(split);
+                    if (len > mx) dx *= mx / len, dy *= mx / len;
+                    double ax = X + dx, ay = Y + dy, bx = X - dx, by = Y - dy;
+                    edge.apply(ax, ay);
+                    edge.apply(bx, by);
+                    sample(*src, ax, ay, fl, tmp.data(), map, so);
+                    rgb[0] = tmp[oR];
+                    sample(*src, bx, by, fl, tmp.data(), map, so);
+                    rgb[2] = tmp[oB];
+                }
+                // OKLCH phase: hue turns with a phase set by lightness (coupling) and time; L is kept
+                double in[3] = {rgb[0], rgb[1], rgb[2]}, lab[3], lch[3];
+                color::oklab::fromLinear(in, lab);
+                color::oklab::toLch(lab, lch);
+                const double th = 2 * kPi * (freq * (couple * lch[0] + (1 - couple) * 0.5) + speed * secs);
+                lch[2] += amp * std::sin(th);
+                lch[1] *= 1 + (boost - 1) * (0.5 + 0.5 * std::cos(th));
+                color::oklab::fromLch(lch, lab);
+                double res[3];
+                color::oklab::toLinear(lab, res);
+                const float w = mm.weight(x, y);
+                o[oR] = keep[0] + ((float)res[0] - keep[0]) * w;
+                o[oG] = keep[1] + ((float)res[1] - keep[1]) * w;
+                o[oB] = keep[2] + ((float)res[2] - keep[2]) * w;
+            }
+        }
+    }
+};
+
+// ================================================================== TemporalTracer
+class TemporalTracerNode : public Node {
+public:
+    int maxInputs() const override { return 3; }
+    std::string inputLabel(int i) const override { return i == 0 ? "src" : i == 1 ? "vectors" : "mask"; }
+    bool timeDependent() const override { return true; }
+    Format format(Engine& e, double f) override { return input(0) ? input(0)->format(e, f) : Node::format(e, f); }
+    Box dod(Engine& e, double f) override { return input(0) ? e.dod(input(0), f) : Box(); }
+    ChannelSet channels(Engine& e, double f) override { return input(0) ? e.channels(input(0), f) : rgbaChannels(); }
+    int identityInput(double f) override {
+        return !input(0) || params.num("intensity", f, 1) == 0 || past((int)std::lround(f)).empty() ? 0 : -1;
+    }
+    // frame f shows earlier frames: the engine must know when any of them changes
+    uint64_t pastHash(Engine& e, double f) override {
+        uint64_t h = 0x3c6ef372fe94f82bull;
+        for (int k : past((int)std::lround(f))) {
+            h = hashCombine(h, e.hash(input(0), k));
+            if (input(1)) h = hashCombine(h, e.hash(input(1), k));
+        }
+        return h;
+    }
+
+    void render(RenderArgs& a, Image& out) override {
+        std::fill(out.data.begin(), out.data.end(), 0.0f);
+        if (!input(0)) return;
+        const double f = a.frame;
+        const Box R = a.region;
+        {
+            ImagePtr cur = a.fetch(input(0), R);
+            out.copyFrom(*cur);
+        }
+        const std::vector<int> frames = past((int)std::lround(f));
+        if (frames.empty()) return;  // the first frame: nothing behind it yet
+        const double sc = a.engine.scale();
+        const double decay = std::clamp(params.num("decay", f, 0.75), 0.0, 1.0);
+        const bool linear = params.str("decay_curve", "exponential") == "linear";
+        const double vth = params.num("velocity_threshold", f, 1.5) * sc, vsoft = std::max(0.0, params.num("velocity_softness", f, 1.0) * sc);
+        const auto tint = params.vec<4>("trail_tint", f, {1, 1, 1, 1});
+        const double shift = params.num("phase_shift", f, 20) * kPi / 180;
+        const float inten = (float)params.num("intensity", f, 1);
+        const std::string mode = params.str("blend", "add");
+        const int md = mode == "screen" ? 1 : mode == "max" ? 2 : 0;
+        const int oR = out.ch("R"), oG = out.ch("G"), oB = out.ch("B"), oA = out.ch("A");
+        if (oR < 0 || oG < 0 || oB < 0) return;
+        const int W = R.width(), H = R.height(), N = (int)frames.size();
+        std::vector<float> trail((size_t)W * H * 4, 0.0f);
+        for (int i = 0; i < N; ++i) {
+            Engine::cancelPoint();
+            const int k = i + 1;  // frames back
+            const double wk = linear ? std::max(0.0, 1.0 - (double)k / (N + 1)) : std::pow(decay, k);
+            if (wk <= 1e-4) break;
+            ImagePtr im = a.fetch(input(0), R, frames[i]);
+            history::Motion mv;
+            if (input(1)) {
+                ImagePtr vi = a.fetch(input(1), R, frames[i]);
+                mv = history::readMotion(*vi, R, history::Direction::Forward);
+            }
+            // this step's tint: a hue turn of k x phase shift in OKLCH, times the trail colour
+            const double turn = shift * k;
+            const double ct = std::cos(turn), st = std::sin(turn);
+            const int iR = im->ch("R"), iG = im->ch("G"), iB = im->ch("B"), iA = im->ch("A");
+            if (iR < 0 || iG < 0 || iB < 0) continue;
+            for (int y = R.y1; y < R.y2; ++y)
+                for (int x = R.x1; x < R.x2; ++x) {
+                    float m = 1;
+                    if (input(1)) m = smoothstepf(vth - vsoft / 2, vth + vsoft / 2, mv.speed(x, y));
+                    if (m <= 0) continue;
+                    const float* p = im->bounds.contains(x, y) ? im->px(x, y) : nullptr;
+                    if (!p) continue;
+                    double rgb[3] = {p[iR], p[iG], p[iB]}, lab[3];
+                    if (turn != 0) {
+                        color::oklab::fromLinear(rgb, lab);
+                        const double a2 = lab[1] * ct - lab[2] * st, b2 = lab[1] * st + lab[2] * ct;
+                        lab[1] = a2, lab[2] = b2;
+                        color::oklab::toLinear(lab, rgb);
+                    }
+                    const float w = (float)(wk * m);
+                    float* t = trail.data() + ((size_t)(y - R.y1) * W + (x - R.x1)) * 4;
+                    for (int c = 0; c < 3; ++c) t[c] += (float)(rgb[c] * tint[c]) * w;
+                    t[3] += (iA >= 0 ? p[iA] : 1.0f) * w;
+                }
+        }
+        // normalised by the weight of a full trail, so a pixel moving through every frame of it adds at
+        // most one copy of itself (times intensity), however long the trail
+        double wsum = 0;
+        for (int k = 1; k <= N; ++k) wsum += linear ? std::max(0.0, 1.0 - (double)k / (N + 1)) : std::pow(decay, k);
+        const float inv = wsum > 1e-6 ? (float)(1.0 / wsum) : 0.0f;
+        MaskMix mm = MaskMix::setup(a, this, 2);
+        for (int y = R.y1; y < R.y2; ++y)
+            for (int x = R.x1; x < R.x2; ++x) {
+                const float* t = trail.data() + ((size_t)(y - R.y1) * W + (x - R.x1)) * 4;
+                const float g = inten * inv * mm.weight(x, y);
+                if (g == 0) continue;
+                float* o = out.px(x, y);
+                const int ch[3] = {oR, oG, oB};
+                for (int c = 0; c < 3; ++c) {
+                    const float s = o[ch[c]], v = t[c] * g;
+                    if (md == 1) o[ch[c]] = s > 1 || v > 1 ? std::max(s, v) : 1 - (1 - std::max(0.0f, s)) * (1 - std::clamp(v, 0.0f, 1.0f));
+                    else if (md == 2) o[ch[c]] = std::max(s, v);
+                    else o[ch[c]] = s + v;
+                }
+                if (oA >= 0) o[oA] = std::max(o[oA], std::min(1.0f, t[3] * g));
+            }
+    }
+
+private:
+    std::vector<int> past(int f) const {
+        const int n = std::clamp((int)std::lround(params.num("trail_length", (double)f, 8)), 1, 24);
+        const retime::Range r = retime::inputRange(this);
+        const int first = r.valid ? (int)std::lround(r.first) : (comp ? comp->firstFrame : 1);
+        return history::pastFrames(f, n, first);
+    }
+};
+
 }  // namespace
 
 void registerPsychicNodes() {
     auto& r = NodeRegistry::instance();
     r.add("FlowBreath", [] { return std::make_unique<FlowBreathNode>(); });
     r.add("FractalFold", [] { return std::make_unique<FractalFoldNode>(); });
+    r.add("SpectralPhase", [] { return std::make_unique<SpectralPhaseNode>(); });
+    r.add("TemporalTracer", [] { return std::make_unique<TemporalTracerNode>(); });
 }
 
 }  // namespace strata

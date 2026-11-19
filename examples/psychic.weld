@@ -1,0 +1,193 @@
+{
+ "strata": 1,
+ "format": {
+  "width": 1280,
+  "height": 720
+ },
+ "frame_range": [
+  1,
+  48
+ ],
+ "fps": 24,
+ "nodes": [
+  {
+   "name": "Backdrop",
+   "type": "Plasma",
+   "params": {
+    "size": 220,
+    "complexity": 8,
+    "cycles": 2,
+    "speed": 0
+   },
+   "pos": [
+    0,
+    0
+   ]
+  },
+  {
+   "name": "Card",
+   "type": "Rectangle",
+   "params": {
+    "area": [
+     120,
+     240,
+     520,
+     520
+    ],
+    "color": [
+     1,
+     1,
+     1,
+     1
+    ]
+   },
+   "pos": [
+    220,
+    0
+   ]
+  },
+  {
+   "name": "CardTexture",
+   "type": "Plasma",
+   "params": {
+    "size": 40,
+    "complexity": 8,
+    "cycles": 3,
+    "speed": 0
+   },
+   "pos": [
+    400,
+    0
+   ]
+  },
+  {
+   "name": "TexturedCard",
+   "type": "Merge",
+   "inputs": [
+    "Card",
+    "CardTexture"
+   ],
+   "params": {
+    "operation": "in"
+   },
+   "pos": [
+    300,
+    90
+   ]
+  },
+  {
+   "name": "Drift",
+   "type": "Transform",
+   "inputs": [
+    "TexturedCard"
+   ],
+   "params": {
+    "translate": [
+     {
+      "expr": "frame * 12"
+     },
+     {
+      "expr": "sin(frame * 0.2) * 40"
+     }
+    ]
+   },
+   "pos": [
+    300,
+    180
+   ]
+  },
+  {
+   "name": "Plate",
+   "type": "Merge",
+   "inputs": [
+    "Backdrop",
+    "Drift"
+   ],
+   "params": {
+    "operation": "over"
+   },
+   "pos": [
+    0,
+    270
+   ]
+  },
+  {
+   "name": "Vectors",
+   "type": "VectorGenerator",
+   "inputs": [
+    "Plate"
+   ],
+   "pos": [
+    220,
+    360
+   ]
+  },
+  {
+   "name": "FlowBreath1",
+   "type": "FlowBreath",
+   "inputs": [
+    "Plate",
+    "Vectors"
+   ],
+   "params": {
+    "strength": 8,
+    "flow_scale": 200
+   },
+   "pos": [
+    0,
+    450
+   ]
+  },
+  {
+   "name": "FractalFold1",
+   "type": "FractalFold",
+   "inputs": [
+    "FlowBreath1"
+   ],
+   "params": {
+    "symmetry": 6,
+    "iterations": 3,
+    "detail_threshold": 0.6,
+    "mix": 0.6
+   },
+   "pos": [
+    0,
+    540
+   ]
+  },
+  {
+   "name": "SpectralPhase1",
+   "type": "SpectralPhase",
+   "inputs": [
+    "FractalFold1"
+   ],
+   "params": {
+    "chromatic_split": 3,
+    "hue_shift": 45
+   },
+   "pos": [
+    0,
+    630
+   ]
+  },
+  {
+   "name": "TemporalTracer1",
+   "type": "TemporalTracer",
+   "inputs": [
+    "SpectralPhase1",
+    "Vectors"
+   ],
+   "params": {
+    "trail_length": 12,
+    "decay": 0.8,
+    "phase_shift": 25,
+    "intensity": 0.6,
+    "blend": "screen"
+   },
+   "pos": [
+    0,
+    720
+   ]
+  }
+ ]
+}

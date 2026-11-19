@@ -19,8 +19,11 @@ std::vector<float> detailMask(const Image& src, const Box& region, const DetailO
     const retime::Plane L = retime::luminance(src, wts);
     const Box& sb = src.bounds;
     const int W = L.w, H = L.h;
-    auto lum = [&](int x, int y) {  // x, y in image coordinates, clamped to the source
-        return L.v[(size_t)std::clamp(y - sb.y1, 0, H - 1) * W + std::clamp(x - sb.x1, 0, W - 1)];
+    const Box lim = o.limit.empty() ? sb : o.limit.intersect(sb).empty() ? sb : o.limit.intersect(sb);
+    auto lum = [&](int x, int y) {  // x, y in image coordinates, clamped to the source (and the limit)
+        x = std::clamp(x, lim.x1, lim.x2 - 1);
+        y = std::clamp(y, lim.y1, lim.y2 - 1);
+        return L.v[(size_t)(y - sb.y1) * W + (x - sb.x1)];
     };
     const double sc = std::max(1e-3, o.scale);
     const int r = std::max(1, (int)std::lround(std::max(0.0, o.radius) * sc));

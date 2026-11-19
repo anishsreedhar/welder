@@ -1261,6 +1261,25 @@ std::vector<NodeDef> build() {
                       Width(C("filter", "filter", "cubic", {"impulse", "bilinear", "cubic", "keys", "lanczos4"}), 110)}),
             "Kaleidoscopic geometry folded out of the plate's own texture: recursive polar folds around a centre or on a grid of "
             "tiles, mixed back in where the plate has detail (or brightness), so patterns emerge from the surfaces."});
+        d.push_back({"SpectralPhase", "Stylize",
+            withMask({F("chromatic_split", "chromatic split (px)", 4, 0, 50, "How far red and blue are pulled apart, along swirling noise"),
+                      F("split_scale", "split scale (px)", 240, 4, 4000, "Size of the swirls the split follows"),
+                      F("flow_speed", "split evolve", 0.2, 0, 5), I("seed", "seed", 0, 0, 1000),
+                      Div("phase (OKLCH: lightness is kept)"),
+                      F("hue_shift", "hue swing (deg)", 60, 0, 180), F("phase_frequency", "phase frequency", 2, 0, 20, "Hue bands across the lightness range"),
+                      F("phase_speed", "phase speed", 0.25, -5, 5, "Cycles per second"),
+                      F("chroma_boost", "chroma boost", 1.3, 0, 4), F("luma_coupling", "luma coupling", 0.7, 0, 1, "1: the phase follows lightness; 0: the whole frame turns together")}),
+            "Organic chromatic dispersion: red and blue drift apart along swirling noise, then hue and chroma swing in OKLCH with a "
+            "phase that follows the plate's lightness and time, keeping lightness itself. Assumes a linear Rec.709 working space."});
+        d.push_back({"TemporalTracer", "Time",
+            withMask({I("trail_length", "trail length (frames)", 8, 1, 24), F("decay", "decay", 0.75, 0, 1, "Each frame back is this much weaker (exponential); the trail is normalised so it never adds more than intensity x one copy"),
+                      C("decay_curve", "decay curve", "exponential", {"exponential", "linear"}),
+                      F("velocity_threshold", "velocity threshold (px/frame)", 1.5, 0, 50, "With vectors (VectorGenerator): only pixels moving faster than this leave trails"),
+                      F("velocity_softness", "softness (px/frame)", 1, 0, 50),
+                      Col4("trail_tint", "trail tint", json::array({1, 1, 1, 1})), F("phase_shift", "phase shift (deg / frame)", 20, -180, 180, "Hue turn per frame back"),
+                      F("intensity", "intensity", 1, 0, 4), C("blend", "blend", "add", {"add", "screen", "max"})}),
+            "Luminous trails behind moving things only: earlier frames weighted by decay and by how fast each pixel was moving "
+            "(connect VectorGenerator to the vectors input), so a still background stays sharp. Each step back can turn in hue."});
         d.push_back({"FilmBurnTransition", "MoGraph", trans(burnLook({})),
             "A burns away to reveal B: the cut is hidden in a spreading film burn."});
         auto leak = [](std::vector<KnobDef> k) {
