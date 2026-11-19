@@ -4,9 +4,10 @@
 namespace strata::gpu {
 bool available() { return false; }
 bool hasFloat64() { return false; }
-std::string status() { return "not built with GPU support"; }
+std::string status() { return "not in this build (it was built without the GPU code)"; }
 void setEnabled(bool) {}
 bool enabled() { return false; }
+bool built() { return false; }
 bool run(const char*, const std::vector<In>&, const std::vector<Out>&, const void*, size_t, uint32_t, uint32_t, uint32_t) { return false; }
 Stats stats() { return {}; }
 }  // namespace strata::gpu
