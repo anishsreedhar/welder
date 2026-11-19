@@ -28,6 +28,9 @@
 #include "nodes/Sample.h"
 #include "nodes/Roto.h"
 #include "nodes/TrackMaskScene.h"
+#include "nodes/MaskCombine.h"
+#include "nodes/MatteOps.h"
+#include "nodes/MatteToSpline.h"
 #include "nodes/PowerRoto.h"
 #include "nodes/Markup.h"
 #include "nodes/Track.h"
@@ -5576,6 +5579,7 @@ Connections:  {
         tmscene::Object* o3 = s.add();
         o3->anchorFor(2).box = {0, 0, 4, 4};
         tmscene::store(n->params, s);
+        n->params.data["mask_output"] = "RAW Mask";  // (the default smooths the edges)
         Engine e;
         auto sp = m->spec("main", e);
         CHECK(sp.inputs.size() == 2 && sp.inputs[1].name == "mask" && sp.inputs[1].frames == std::vector<int>{2});
@@ -5615,6 +5619,550 @@ Connections:  {
         n->paramsChanged();
         auto img2 = render(*c, "TM", 2);
         CHECK_NEAR(px(img2, 20, 10, "A"), 1, 1e-3);
+        ml::setHome("");
+    });
+    test("TrackMask mask combiner: Main -> R -> G -> B in that order, each with its operator; GPU = CPU (a)", [] {
+        using namespace maskops;
+        // one pixel, values where every other order of the same four steps gives another answer
+        const float main = 0.5f, r = 0.5f, g = 0.2f, b = 0.6f;
+        const int ops[4] = {kAdd, kMultiply, kSubtract, kAdd};
+        float m = 0.4f;
+        const float* ch[4] = {&main, &r, &g, &b};
+        combineCpu(&m, 1, ch, ops);
+        CHECK_NEAR(m, std::min(1.0f, ((std::min(1.0f, 0.4f + 0.5f)) * 0.5f - 0.2f) + 0.6f), 1e-6);  // 0.85
+        std::vector<int> perm = {0, 1, 2, 3};
+        int same = 0, orders = 0;
+        do {
+            float v = 0.4f;
+            for (int k : perm) v = applyOp(ops[k], v, *ch[k]);
+            ++orders;
+            if (std::fabs(v - m) < 1e-6f) ++same;
+        } while (std::next_permutation(perm.begin(), perm.end()));
+        std::printf("  Main->R->G->B gives %.3f; %d of %d orders give that\n", m, same, orders);
+        CHECK(orders == 24 && same == 1);
+        // each operator, and the mask clamped to 0-1
+        CHECK_NEAR(applyOp(kAdd, 0.7f, 0.6f), 1.0f, 1e-6);
+        CHECK_NEAR(applyOp(kSubtract, 0.3f, 0.6f), 0.0f, 1e-6);
+        CHECK_NEAR(applyOp(kIntersect, 0.3f, 0.6f), 0.3f, 1e-6);
+        CHECK_NEAR(applyOp(kMultiply, 0.5f, 3.0f), 0.5f, 1e-6);
+        CHECK_NEAR(applyOp(kOff, 0.5f, 1.0f), 0.5f, 1e-6);
+        CHECK(opFromName("Intersect") == kIntersect && opFromName("nonsense") == kOff);
+        // the node: no track yet, the mask input a constant (R .6, G .5, B .2, A .5)
+        auto c = comp(json::array({{{"name", "K"}, {"type", "Constant"}, {"params", {{"color", {0.1, 0.1, 0.1, 1}}}}},
+                                   {{"name", "M"}, {"type", "Constant"}, {"params", {{"color", {0.6, 0.5, 0.2, 0.5}}}}},
+                                   {{"name", "TM"}, {"type", "TrackMask"}, {"inputs", {"K", "M"}},
+                                    {"params", {{"mask_main", "Add"}, {"mask_r", "Multiply"}, {"mask_g", "Subtract"}, {"mask_b", "Add"}}}}}),
+                     32, 16);
+        auto img = render(*c, "TM", 1);
+        CHECK_NEAR(px(img, 5, 5, "A"), 0.2, 1e-5);  // ((0 + .5) * .6 - .5 = 0) + .2
+        CHECK_NEAR(px(img, 5, 5, "R"), 0.1, 1e-5);  // the plate untouched
+        Node* n = c->find("TM");
+        n->params.data["mask_b"] = "Off";
+        n->params.data["mask_g"] = "Intersect";
+        n->paramsChanged();
+        CHECK_NEAR(px(render(*c, "TM", 1), 5, 5, "A"), 0.3, 1e-5);  // (0 + .5) * .6, min .5
+        // the GPU (when there is one) gives the same as the CPU on a large region
+        const size_t N = (size_t)1 << 21;
+        std::vector<float> mm(N), c0(N), c1(N), c2(N), c3(N);
+        for (size_t i = 0; i < N; ++i) {
+            mm[i] = (float)((i * 37) % 101) / 100.0f;
+            c0[i] = (float)((i * 13) % 97) / 96.0f;
+            c1[i] = (float)((i * 7) % 89) / 70.0f;  // some over 1: clamped
+            c2[i] = (float)((i * 5) % 83) / 82.0f;
+            c3[i] = (float)((i * 3) % 79) / 78.0f;
+        }
+        const float* chs[4] = {c0.data(), c1.data(), c2.data(), c3.data()};
+        const int ops2[4] = {kIntersect, kAdd, kMultiply, kSubtract};
+        std::vector<float> cpu = mm, gpu = mm;
+        combineCpu(cpu.data(), N, chs, ops2);
+        const bool onGpu = combine(gpu.data(), N, chs, ops2, true);
+        double worst = 0;
+        for (size_t i = 0; i < N; ++i) worst = std::max(worst, (double)std::fabs(cpu[i] - gpu[i]));
+        std::printf("  %s: largest difference from the CPU %.2g\n", onGpu ? "GPU" : "no GPU (CPU both times)", worst);
+        CHECK(worst < 1e-6);
+    });
+    test("TrackMask matte passes: guided filter keeps the plate's edges and smooths flats, trimap bands, temporal smoothing; GPU = CPU", [] {
+        using namespace matteops;
+        // a plate split at x = 32 (dark | bright) and a coarse matte that's blocky and noisy round the edge
+        const int W = 64, H = 32;
+        std::vector<float> guide(W * H * 3), p(W * H);
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                const float v = x < 32 ? 0.1f : 0.9f;
+                for (int c = 0; c < 3; ++c) guide[(y * W + x) * 3 + c] = v;
+                const float base = x < 28 ? 0.1f : x < 36 ? 0.5f : 0.85f;  // the edge 8 px wide, not on the plate's
+                p[y * W + x] = std::clamp(base + (((x * 7 + y * 13) % 5) - 2) * 0.05f, 0.0f, 1.0f);
+            }
+        std::vector<float> q(W * H);
+        guidedFilter(p.data(), guide.data(), q.data(), W, H, 4, 1e-4f, false);
+        // the edge moves to the plate's: steeper across x = 32 than the coarse matte's (0.5 | 0.5 there)
+        CHECK(q[10 * W + 30] < 0.45f && q[10 * W + 33] > 0.55f);
+        // flats: the noise is smoothed away (spread round the mean, well inside the flat part)
+        auto spread = [&](const std::vector<float>& v) {
+            double mu = 0, var = 0;
+            for (int y = 8; y < 24; ++y)
+                for (int x = 44; x < 60; ++x) mu += v[y * W + x];
+            mu /= 256;
+            for (int y = 8; y < 24; ++y)
+                for (int x = 44; x < 60; ++x) var += (v[y * W + x] - mu) * (v[y * W + x] - mu);
+            return std::sqrt(var / 256);
+        };
+        const double vin = spread(p), vout = spread(q);
+        std::printf("  guided filter: edge %.2f | %.2f, flat noise %.3f -> %.3f\n", q[10 * W + 30], q[10 * W + 33], vin, vout);
+        CHECK(vout < vin * 0.5);
+        // trimap: 1 inside the core, 0.5 within the band, 0 outside
+        std::vector<float> m(W * H);
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) m[y * W + x] = x >= 20 && x < 44 ? 1.0f : 0.0f;
+        auto t = trimap(m, W, H, 3, 5);
+        CHECK(t[10 * W + 22] == 0.5f && t[10 * W + 23] == 1.0f && t[10 * W + 40] == 1.0f && t[10 * W + 41] == 0.5f);
+        CHECK(t[10 * W + 15] == 0.5f && t[10 * W + 14] == 0.0f && t[10 * W + 48] == 0.5f && t[10 * W + 49] == 0.0f);
+        // edge offset by half a pixel: between the grow by 0 and by 1
+        std::vector<float> eo = m;
+        edgeOffset(eo, W, H, 0.5, false);
+        CHECK_NEAR(eo[10 * W + 19], 0.5, 1e-6);
+        CHECK_NEAR(eo[10 * W + 25], 1.0, 1e-6);
+        // levels and binarize
+        std::vector<float> lv = {0.1f, 0.5f, 0.9f};
+        levels(lv, 0.1f, 0.9f, 1.0f);
+        CHECK_NEAR(lv[0], 0, 1e-6);
+        CHECK_NEAR(lv[1], 0.5, 1e-6);
+        CHECK_NEAR(lv[2], 1, 1e-6);
+        // temporal smoothing: an edge that flickers settles, a real change is kept
+        std::vector<float> f0 = {0.50f, 0.0f}, f1 = {0.56f, 1.0f}, f2 = {0.50f, 1.0f};
+        std::vector<const float*> fr = {f0.data(), f1.data(), f2.data()};
+        float out[2];
+        temporalSmooth(fr, 1, 2, out, 1.0, 0.15);
+        std::printf("  temporal: flicker 0.56 -> %.3f, a real change 1 -> %.3f\n", out[0], out[1]);
+        CHECK(std::fabs(out[0] - 0.52f) < 0.01f && out[1] > 0.95f);
+        // the GPU (when there is one) gives the CPU's answer on a big buffer
+        const int GW = 640, GH = 480;
+        std::vector<float> gg(GW * GH * 3), gp(GW * GH);
+        for (int i = 0; i < GW * GH; ++i) {
+            gp[i] = (float)((i * 37) % 101) / 100.0f;
+            for (int c = 0; c < 3; ++c) gg[i * 3 + c] = (float)(((i + c * 11) * 13) % 97) / 96.0f;
+        }
+        std::vector<float> qc(GW * GH), qg(GW * GH);
+        guidedFilter(gp.data(), gg.data(), qc.data(), GW, GH, 6, 0.01f, false);
+        const bool onGpu = guidedFilter(gp.data(), gg.data(), qg.data(), GW, GH, 6, 0.01f, true);
+        std::vector<float> mc = gp, mg = gp;
+        growShrink(mc, GW, GH, -3, false);
+        const bool morphGpu = growShrink(mg, GW, GH, -3, true);
+        double worst = 0, worstM = 0;
+        for (int i = 0; i < GW * GH; ++i) {
+            worst = std::max(worst, (double)std::fabs(qc[i] - qg[i]));
+            worstM = std::max(worstM, (double)std::fabs(mc[i] - mg[i]));
+        }
+        std::printf("  guided filter %s: largest difference %.2g; shrink %s: %.2g\n", onGpu ? "GPU" : "no GPU (CPU both times)", worst,
+                    morphGpu ? "GPU" : "CPU", worstM);
+        CHECK(worst < 1e-3 && worstM == 0);
+    });
+    test("TrackMask Mask Output: RAW / Hard / Guided Smooth, refined crops, Refine edges job; missing refiner weights fall back to Guided Smooth (d)", [] {
+        auto home = std::filesystem::temp_directory_path() / "strata_mlhome_tm5";
+        std::filesystem::remove_all(home);
+        ml::setHome(home.string());
+        const int W = 64, H = 32;
+        auto c = comp(json::array({{{"name", "K"}, {"type", "Constant"}, {"params", {{"color", {0.5, 0.5, 0.5, 1}}}}},
+                                   {{"name", "TM"}, {"type", "TrackMask"}, {"inputs", {"K"}}}}),
+                     W, H);
+        c->firstFrame = 1;
+        c->lastFrame = 2;
+        Node* n = c->find("TM");
+        auto* m = dynamic_cast<mlnodes::MLNode*>(n);
+        tmscene::Scene s;
+        s.add()->anchorFor(1).points.push_back({30, 16, 1});
+        tmscene::store(n->params, s);
+        Engine e;
+        auto sp = m->spec("main", e);
+        // a track: a soft ramp across x 24..40 on frames 1 and 2
+        auto d = home / "jobs" / "seg5";
+        std::filesystem::create_directories(d / "out");
+        std::ofstream(d / "job.json") << "{}";
+        std::ofstream(d / "status.json") << json{{"state", "done"}}.dump();
+        std::ofstream(d / "result.json") << json{{"outputs", {{"matte", {{"frames", {1, 2}}, {"width", W}, {"height", H}}}}},
+                                                 {"objects", {1}}, {"object_tags", sp.params["object_tags"]}}.dump();
+        std::vector<float> mt(W * H);
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) mt[y * W + x] = std::clamp((x - 24) / 16.0f, 0.0f, 1.0f);
+        for (int f : {1, 2}) CHECK(ml::writeNpy((d / "out" / ("matte." + std::to_string(f) + ".npy")).string(), mt.data(), W, H, 1, true));
+        n->params.data["ml"] = {{"main", {{"result", "seg5"}}}};
+        auto setMode = [&](const char* mode) {
+            n->params.data["mask_output"] = mode;
+            n->paramsChanged();
+        };
+        CHECK(mlnodes::trackMaskRefinerStatus(n, 1).state == mlnodes::TrackMaskRefinerStatus::Off);
+        setMode("RAW Mask");
+        CHECK_NEAR(px(render(*c, "TM", 1), 28, 10, "A"), 0.25, 1e-3);
+        setMode("Hard Mask");
+        CHECK_NEAR(px(render(*c, "TM", 1), 28, 10, "A"), 0, 1e-6);
+        CHECK_NEAR(px(render(*c, "TM", 1), 33, 10, "A"), 1, 1e-6);
+        setMode("Guided Smooth Mask");
+        auto smooth = render(*c, "TM", 1);
+        // (d) MEMatte with no weights installed: the status says so, and the matte is Guided Smooth's
+        setMode("MEMatte");
+        auto st = mlnodes::trackMaskRefinerStatus(n, 1);
+        std::printf("  %s\n", st.text.c_str());
+        CHECK(st.state == mlnodes::TrackMaskRefinerStatus::Missing && st.text.find("Guided Smooth") != std::string::npos);
+        auto fb = render(*c, "TM", 1);
+        double diff = 0;
+        for (int x = 0; x < W; ++x) diff = std::max(diff, (double)std::fabs(px(fb, x, 10, "A") - px(smooth, x, 10, "A")));
+        CHECK(diff < 1e-6);
+        auto rs = m->spec("refine", e);
+        CHECK(!m->models(rs).empty());  // Refine edges waits for the weights
+        CHECK(m->followUp("main").empty());
+        // ViTMatte small installed by hand: Refine edges takes the frames tracked from the current anchors
+        std::filesystem::create_directories(home / "models" / "vitmatte-small");
+        std::ofstream(home / "models" / "vitmatte-small" / ".complete") << "";
+        setMode("ViTMatte");
+        n->params.data["crop_padding"] = 10;
+        rs = m->spec("refine", e);
+        CHECK(rs.error.empty() && rs.task == "matte_refine" && m->models(rs).empty());
+        CHECK(rs.params["objects"].size() == 1 && rs.params["objects"][0]["coarse"].size() == 2);
+        CHECK(rs.params["objects"][0]["coarse"]["1"][0].get<std::string>() == ml::jobDir("seg5"));
+        CHECK(m->followUp("main") == "refine");
+        CHECK(mlnodes::trackMaskRefinerStatus(n, 1).state == mlnodes::TrackMaskRefinerStatus::NotYet);
+        // its result: frame 1 refined to a hard edge at x 30 inside the crop x 16..48
+        auto rd = home / "jobs" / "ref5";
+        std::filesystem::create_directories(rd / "out");
+        std::ofstream(rd / "job.json") << "{}";
+        std::ofstream(rd / "status.json") << json{{"state", "done"}}.dump();
+        json tags = rs.params["object_tags"];
+        tags["1"].erase("2");
+        std::ofstream(rd / "result.json") << json{{"outputs", {{"refined_1", {{"frames", {1}}, {"width", 32}, {"height", H}}}}},
+                                                  {"crops", {{"1", {{"1", {16, 0, 32, H}}}}}}, {"plate", {W, H}}, {"object_tags", tags}}.dump();
+        std::vector<float> rf(32 * H);
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < 32; ++x) rf[y * 32 + x] = x + 16 >= 30 ? 1.0f : 0.0f;
+        CHECK(ml::writeNpy((rd / "out" / "refined_1.1.npy").string(), rf.data(), 32, H, 1, true));
+        n->params.data["ml"]["refine"] = {{"result", "ref5"}};
+        n->paramsChanged();
+        CHECK(mlnodes::trackMaskRefinerStatus(n, 1).state == mlnodes::TrackMaskRefinerStatus::Refined);
+        CHECK(mlnodes::trackMaskRefinerStatus(n, 2).state == mlnodes::TrackMaskRefinerStatus::NotYet);
+        auto ref = render(*c, "TM", 1);
+        CHECK_NEAR(px(ref, 29, 10, "A"), 0, 1e-3);
+        CHECK_NEAR(px(ref, 30, 10, "A"), 1, 1e-3);
+        CHECK_NEAR(px(ref, 10, 10, "A"), 0, 1e-6);  // outside the crop: nothing
+        // frame 2 isn't refined: Guided Smooth there; and the next Refine edges only asks for frame 2
+        rs = m->spec("refine", e);
+        CHECK(rs.params["objects"][0]["coarse"].size() == 1 && rs.params["objects"][0]["coarse"].contains("2"));
+        // the trimap settings are part of a refined frame's tag: changing them makes frame 1 stale
+        n->params.data["trimap_erode"] = 12;
+        n->paramsChanged();
+        CHECK(mlnodes::trackMaskRefinerStatus(n, 1).state == mlnodes::TrackMaskRefinerStatus::NotYet);
+        ml::setHome("");
+    });
+    test("TrackMask Convert to Splines: matte -> outline -> Bezier -> raster round trip IoU > 0.96, corners kept, keys in step (b)", [] {
+        const int W = 160, H = 120;
+        auto rast = [&](const roto::Pts& p) {
+            std::vector<float> cov((size_t)W * H, 0.0f);
+            roto::rasterizeShape(p, 1.0, {0, 0, W, H}, 0, 1, cov);
+            return cov;
+        };
+        // mattes (rows bottom first, like the plate): a disc, a star (sharp corners), a rectangle, an L with a hole
+        auto make = [&](auto inside) {
+            std::vector<float> m((size_t)W * H);
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x) {
+                    // 4 x 4 supersampled: an anti-aliased matte like a model's
+                    int n = 0;
+                    for (int sy = 0; sy < 4; ++sy)
+                        for (int sx = 0; sx < 4; ++sx) n += inside(x + (sx + 0.5) / 4, y + (sy + 0.5) / 4);
+                    m[(size_t)y * W + x] = n / 16.0f;
+                }
+            return m;
+        };
+        auto disc = [](double cx, double cy, double r) {
+            return [=](double x, double y) { return std::hypot(x - cx, y - cy) < r; };
+        };
+        auto star = [](double x, double y) {
+            const double a = std::atan2(y - 60, x - 80), r = std::hypot(x - 80, y - 60);
+            const double k = std::fmod(a + 10 * M_PI, 2 * M_PI / 5) / (2 * M_PI / 5);  // 0-1 round each arm
+            return r < 22 + 30 * (1 - std::fabs(2 * k - 1));
+        };
+        auto rect = [](double x, double y) { return x > 30 && x < 130 && y > 25 && y < 95; };
+        struct Case {
+            const char* name;
+            std::vector<float> m;
+        };
+        std::vector<Case> cases = {{"disc", make(disc(80, 60, 40))}, {"star", make(star)}, {"rectangle", make(rect)}};
+        for (auto& c : cases) {
+            auto loops = m2s::contours(c.m.data(), W, H, 0.5f);
+            CHECK(loops.size() == 1 && !loops[0].hole && loops[0].area > 0);
+            if (loops.empty()) continue;
+            const int n = m2s::autoCount(loops[0], 0.5);
+            const roto::Pts p = m2s::fit(loops[0], n, 0.5);
+            std::vector<float> bin = c.m;
+            for (auto& v : bin) v = v >= 0.5f ? 1.0f : 0.0f;
+            const double score = m2s::iou(rast(p), c.m);
+            std::printf("  %-9s %3d points, IoU %.4f\n", c.name, (int)p.size(), score);
+            CHECK(score > 0.96);
+        }
+        // the rectangle's corners are points, as cusps
+        {
+            auto loops = m2s::contours(cases[2].m.data(), W, H, 0.5f);
+            const roto::Pts p = m2s::fit(loops[0], 8, 0.5);
+            int nearCorner = 0;
+            for (auto& q : p)
+                for (auto [cx, cy] : {std::pair{30.0, 25.0}, {130.0, 25.0}, {130.0, 95.0}, {30.0, 95.0}})
+                    if (std::hypot(q.x - cx, q.y - cy) < 1.5) ++nearCorner;
+            CHECK(nearCorner == 4);
+        }
+        // a hole: an outline inside the other runs the other way and comes out as a hole
+        {
+            auto ring = make([](double x, double y) {
+                const double r = std::hypot(x - 80, y - 60);
+                return r < 45 && r > 20;
+            });
+            auto loops = m2s::contours(ring.data(), W, H, 0.5f);
+            CHECK(loops.size() == 2 && !loops[0].hole && loops[1].hole && loops[1].area < 0);
+            if (loops.size() == 2) {
+                auto a = rast(m2s::fit(loops[0], m2s::autoCount(loops[0], 0.5), 0.5));
+                auto b = rast(m2s::fit(loops[1], m2s::autoCount(loops[1], 0.5), 0.5));
+                for (size_t i = 0; i < a.size(); ++i) a[i] = std::max(0.0f, a[i] - b[i]);  // (the shape blended "minus")
+                const double score = m2s::iou(a, ring);
+                std::printf("  ring      IoU %.4f\n", score);
+                CHECK(score > 0.96);
+            }
+        }
+        // animation: a disc moving right; every key the same count, the first point following along
+        std::vector<std::pair<double, roto::Pts>> keys;
+        std::optional<roto::V2> start;
+        int count = 0;
+        double worst = 1;
+        for (int f = 1; f <= 5; ++f) {
+            auto m = make(disc(50 + f * 10, 60, 30));
+            auto loops = m2s::contours(m.data(), W, H, 0.5f);
+            if (loops.empty()) break;
+            if (!count) count = m2s::autoCount(loops[0], 0.5);
+            roto::Pts p = m2s::fit(loops[0], count, 0.5, 60, start);
+            start = roto::V2{p[0].x, p[0].y};
+            worst = std::min(worst, m2s::iou(rast(p), m));
+            keys.push_back({(double)f, p});
+        }
+        CHECK(keys.size() == 5);
+        for (size_t k = 1; k < keys.size(); ++k) {
+            CHECK(keys[k].second.size() == keys[0].second.size());
+            // the first point moves with the disc (10 px a frame), it doesn't jump round the outline
+            CHECK(std::fabs(keys[k].second[0].x - keys[k - 1].second[0].x - 10) < 2 && std::fabs(keys[k].second[0].y - keys[k - 1].second[0].y) < 2);
+        }
+        CHECK(worst > 0.96);
+        const json shape = m2s::shapeJson("disc", keys, {1, 0, 0});
+        CHECK(roto::animated(shape) && roto::keyFrames(shape).size() == 5);
+        CHECK(roto::pointsAt(shape, 3).size() == (size_t)count);
+    });
+    test("TrackMask Convert to Splines on a node: shapes keyed every Key Step frames, in the plate's pixels; the roto renders the matte", [] {
+        auto home = std::filesystem::temp_directory_path() / "strata_mlhome_tm6";
+        std::filesystem::remove_all(home);
+        ml::setHome(home.string());
+        const int W = 128, H = 64, MW = 64, MH = 32;  // the model's matte at half the plate's size
+        auto c = comp(json::array({{{"name", "K"}, {"type", "Constant"}, {"params", {{"color", {0.5, 0.5, 0.5, 1}}}}},
+                                   {{"name", "TM"}, {"type", "TrackMask"}, {"inputs", {"K"}}, {"params", {{"mask_output", "Hard Mask"}, {"output", "matte"}}}}}),
+                     W, H);  // (Hard: the edge the shapes follow, without the upscaled matte's softness)
+        c->firstFrame = 1;
+        c->lastFrame = 5;
+        Node* n = c->find("TM");
+        auto* m = dynamic_cast<mlnodes::MLNode*>(n);
+        tmscene::Scene s;
+        s.add("ball")->anchorFor(1).points.push_back({40, 40, 1});
+        tmscene::store(n->params, s);
+        Engine e;
+        auto sp = m->spec("main", e);
+        auto d = home / "jobs" / "seg6";
+        std::filesystem::create_directories(d / "out");
+        std::ofstream(d / "job.json") << "{}";
+        std::ofstream(d / "status.json") << json{{"state", "done"}}.dump();
+        std::ofstream(d / "result.json") << json{{"outputs", {{"matte", {{"frames", {1, 2, 3, 4, 5}}, {"width", MW}, {"height", MH}}}}},
+                                                 {"objects", {1}}, {"object_tags", sp.params["object_tags"]}}.dump();
+        // an ellipse moving right, nearer the top of the frame (npy rows top first)
+        for (int f = 1; f <= 5; ++f) {
+            std::vector<float> mt(MW * MH);
+            for (int y = 0; y < MH; ++y)
+                for (int x = 0; x < MW; ++x) {
+                    int k = 0;
+                    for (int sy = 0; sy < 4; ++sy)
+                        for (int sx = 0; sx < 4; ++sx) {
+                            const double px = x + (sx + 0.5) / 4, py = y + (sy + 0.5) / 4;
+                            k += std::hypot((px - (14 + 4 * f)) / 10, (py - 11) / 7) < 1;
+                        }
+                    mt[y * MW + x] = k / 16.0f;
+                }
+            CHECK(ml::writeNpy((d / "out" / ("matte." + std::to_string(f) + ".npy")).string(), mt.data(), MW, MH, 1, true));
+        }
+        n->params.data["ml"] = {{"main", {{"result", "seg6"}}}};
+        n->paramsChanged();
+        mlnodes::SplineOptions opt;
+        opt.keyStep = 2;
+        opt.tolerance = 0.5;
+        std::string why;
+        json shapes = mlnodes::trackMaskSplines(n, e, {1}, 1, 5, opt, &why);
+        CHECK(shapes.size() == 1);
+        if (shapes.size() != 1) return;
+        CHECK(shapes[0]["name"] == "ball");
+        const auto kf = roto::keyFrames(shapes[0]);
+        CHECK(kf == std::vector<double>({1, 3, 5}));
+        // the shape in the plate (y up): centre near x = 2 * (14 + 4f), y = 64 - 22 = 42 on frame 3
+        const roto::Pts p3 = roto::pointsAt(shapes[0], 3);
+        double cx = 0, cy = 0;
+        for (auto& q : p3) cx += q.x, cy += q.y;
+        cx /= p3.size(), cy /= p3.size();
+        CHECK(std::fabs(cx - 52) < 1.5 && std::fabs(cy - 42) < 1.5);
+        // a PowerRoto of those shapes renders what TrackMask shows (on a key frame)
+        Node* r = c->addNode("PowerRoto", "PowerRoto", {{"shapes", shapes}, {"motionblur", 4}, {"shutter", 0.5}}, json::object());
+        CHECK(r != nullptr);
+        if (!r) return;
+        r->params.data["motionblur"] = 0;  // (no input: the shapes' alpha alone)
+        r->paramsChanged();
+        auto a = render(*c, "TM", 3), b = render(*c, r->name, 3);
+        std::vector<float> va, vb;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) va.push_back(px(a, x, y, "A")), vb.push_back(px(b, x, y, "A"));
+        double sa = 0, sb = 0, ax = 0, ay = 0, bx = 0, by = 0;
+        for (size_t i = 0; i < va.size(); ++i) {
+            sa += va[i], sb += vb[i];
+            ax += va[i] * (i % W + 0.5), ay += va[i] * (i / W + 0.5), bx += vb[i] * (i % W + 0.5), by += vb[i] * (i / W + 0.5);
+        }
+        std::printf("  coverage: matte %.0f px at (%.2f, %.2f), roto %.0f px at (%.2f, %.2f)\n", sa, ax / sa, ay / sa, sb, bx / sb, by / sb);
+        const double score = m2s::iou(va, vb);
+        std::printf("  roto vs matte on frame 3: IoU %.4f\n", score);
+        CHECK(score > 0.96);
+        // an object that hasn't been tracked: nothing, and why
+        s = tmscene::parse(n->params);
+        const int id2 = s.add("empty")->id;
+        tmscene::store(n->params, s);
+        n->paramsChanged();
+        why.clear();
+        CHECK(mlnodes::trackMaskSplines(n, e, {id2}, 1, 5, opt, &why).empty() && !why.empty());
+        ml::setHome("");
+    });
+    test("TrackMask Bake Masks to Disk: half EXR + hash manifest; a correction keyframe re-bakes only its frames (c); damaged files re-made", [] {
+        namespace fs = std::filesystem;
+        auto home = fs::temp_directory_path() / "strata_mlhome_tm7";
+        fs::remove_all(home);
+        ml::setHome(home.string());
+        const auto bake = home / "bake";
+        const int W = 32, H = 24;
+        auto c = comp(json::array({{{"name", "K"}, {"type", "Constant"}, {"params", {{"color", {0.5, 0.5, 0.5, 1}}}}},
+                                   {{"name", "TM"}, {"type", "TrackMask"}, {"inputs", {"K"}},
+                                    {"params", {{"mask_output", "RAW Mask"}, {"bake_path", bake.string()}}}}}),
+                     W, H);
+        c->firstFrame = 1;
+        c->lastFrame = 40;
+        Node* n = c->find("TM");
+        auto* m = dynamic_cast<mlnodes::MLNode*>(n);
+        CHECK(n->isExecutable() && !n->rendersWithWrites());
+        tmscene::Scene s;
+        tmscene::Object* car = s.add("car");
+        car->anchorFor(10).points.push_back({5, 5, 1});
+        car->anchorFor(30).points.push_back({8, 5, 1});
+        tmscene::Object* dog = s.add("dog");
+        dog->anchorFor(5).box = {1, 1, 9, 9};
+        dog->channels = "R";
+        tmscene::store(n->params, s);
+        n->paramsChanged();
+        Engine e;
+        auto s1 = m->spec("main", e);
+        auto d = home / "jobs" / "seg7";
+        fs::create_directories(d / "out");
+        std::ofstream(d / "job.json") << "{}";
+        std::ofstream(d / "status.json") << json{{"state", "done"}}.dump();
+        json fr = json::array();
+        for (int f = 1; f <= 40; ++f) {
+            fr.push_back(f);
+            std::vector<float> mt(W * H * 2);
+            for (int i = 0; i < W * H; ++i) mt[i * 2] = (i % W) < 8 + f % 8, mt[i * 2 + 1] = (i / W) < 6;
+            CHECK(ml::writeNpy((d / "out" / ("matte." + std::to_string(f) + ".npy")).string(), mt.data(), W, H, 2, true));
+        }
+        std::ofstream(d / "result.json") << json{{"outputs", {{"matte", {{"frames", fr}, {"width", W}, {"height", H}}}}},
+                                                 {"objects", {1, 2}}, {"object_tags", s1.params["object_tags"]}}.dump();
+        n->params.data["ml"] = {{"main", {{"result", "seg7"}}}};
+        n->params.data["use_baked"] = false;
+        n->paramsChanged();
+        auto live12 = render(*c, "TM", 12);
+        auto bakeAll = [&] {
+            Engine be;
+            n->beginExecute(be, 1, 40);
+            for (int f = 1; f <= 40; ++f) n->execute(be, f);
+            n->finishExecute(true);
+        };
+        auto stamps = [&] {
+            std::map<int, fs::file_time_type> t;
+            for (int f = 1; f <= 40; ++f) {
+                char b[32];
+                std::snprintf(b, sizeof b, "matte.%05d.exr", f);
+                std::error_code ec;
+                t[f] = fs::last_write_time(bake / b, ec);
+            }
+            return t;
+        };
+        bakeAll();
+        auto t0 = stamps();
+        CHECK(fs::exists(bake / "manifest.json") && fs::exists(bake / "matte.00040.exr"));
+        // the files: half floats, Y (grey) + A, and R for the dog
+        auto ex = readExr((bake / "matte.00012.exr").string());
+        CHECK(ex.image && ex.image->ch("A") >= 0 && ex.image->ch("Y") >= 0 && ex.image->ch("R") >= 0 && ex.image->ch("G") < 0);
+        // shown from the bake: the same as worked out
+        n->params.data["use_baked"] = true;
+        n->paramsChanged();
+        auto baked12 = render(*c, "TM", 12);
+        double diff = 0;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x)
+                for (const char* ch : {"A", "R"}) diff = std::max(diff, (double)std::fabs(px(baked12, x, y, ch) - px(live12, x, y, ch)));
+        CHECK(diff < 1e-3);
+        // baking again: nothing changed, nothing written
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        bakeAll();
+        int same = 0;
+        for (auto& [f, t] : stamps()) same += t == t0[f];
+        CHECK(same == 40);
+        // (c) a correction keyframe for the car on frame 20: only frames 11-29 bake again
+        s = tmscene::parse(n->params);
+        tmscene::Anchor& k = s.find(1)->anchorFor(20);
+        k.keyframe = true;
+        std::vector<float> mk(W * H, 1.0f);
+        k.mask = tmscene::encodeRle(mk, W, H);
+        tmscene::store(n->params, s);
+        n->paramsChanged();
+        bakeAll();
+        auto t1 = stamps();
+        std::vector<int> rebaked;
+        for (int f = 1; f <= 40; ++f)
+            if (t1[f] != t0[f]) rebaked.push_back(f);
+        std::vector<int> want;
+        for (int f = 11; f <= 29; ++f) want.push_back(f);
+        std::printf("  after a keyframe on 20: %zu of 40 frames baked again (%d-%d)\n", rebaked.size(), rebaked.empty() ? 0 : rebaked.front(),
+                    rebaked.empty() ? 0 : rebaked.back());
+        CHECK(rebaked == want);
+        // the render reads the bake: a file swapped for one of the same frame shows
+        {
+            Image fake(Box(0, 0, W, H), {"A", "Y"});
+            for (auto& v : fake.data) v = 0.25f;
+            ExrWriteOptions o;
+            writeExr((bake / "matte.00005.exr").string(), fake, Format{W, H}, o);
+            CHECK_NEAR(px(render(*c, "TM", 5), 3, 3, "A"), 0.25, 1e-3);
+        }
+        // a damaged file: worked out instead (no crash), and the next bake makes it again
+        std::ofstream(bake / "matte.00007.exr", std::ios::trunc) << "not an exr";
+        auto r7 = render(*c, "TM", 7);
+        CHECK_NEAR(px(r7, 2, 20, "A"), 1, 1e-3);  // the car's matte: x < 8 + 7
+        CHECK_NEAR(px(r7, 20, 20, "A"), 0, 1e-3);
+        bakeAll();
+        CHECK(readExr((bake / "matte.00007.exr").string()).image != nullptr);
+        // a damaged frame from the worker: renders (from what was read before, or no matte), no crash
+        std::ofstream(d / "out" / "matte.3.npy", std::ios::trunc) << "garbage";
+        n->params.data["use_baked"] = false;
+        n->paramsChanged();
+        CHECK(render(*c, "TM", 3) != nullptr);
+        n->params.data["use_baked"] = true;
+        n->paramsChanged();
+        // a damaged manifest: everything bakes again, nothing breaks
+        std::ofstream(bake / "manifest.json", std::ios::trunc) << "{ broken";
+        auto t2 = stamps();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        bakeAll();
+        int remade = 0;
+        for (auto& [f, t] : stamps()) remade += t != t2[f];
+        CHECK(remade == 40);
         ml::setHome("");
     });
     test("Lens distortion: model, LensDistortion / STMap nodes, solving it in the camera tracker", [] {

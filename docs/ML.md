@@ -368,13 +368,68 @@ the model folders Welder uses from `<ml home>\model_dirs.json`.
   exactly as it shows now, and the track holds to it from both sides. **< key** / **key >**
   jump between the active object's keyframes. Clicking on a keyframe's frame replaces the
   kept matte with the new clicks.
+* **Object manager** (floating over the viewer; drag its header to move it). Per object:
+  the eye (shown at all), the diamond (a visibility key on this frame: off / on from here on),
+  its name (click: the active object; double-click: rename), **R G B A** (the output channels
+  it goes into; alpha by default), **< o >** (previous keyframe, set / remove a correction
+  keyframe here, next keyframe), the square (hide its points and boxes), **x** (delete). **+**
+  adds an object.
+* **Mask input:** besides giving objects their masks, its **Main** (alpha), **R**, **G** and
+  **B** channels can each be blended onto the matte with its own operator (Off, Add,
+  Subtract, Intersect, Multiply), always in the order Main, R, G, B. On the GPU for large
+  frames.
 * **Text:** type what to look for in **find** ("person, dog") and press **Find text objects**:
   OWLv2 (Google, Apache 2.0) boxes each one on the current frame and each box becomes an
   object. **Re-find Text Objects** looks for them again every few frames while tracking and
   picks up an object again where its track lost it, matched by position and look.
 * **model:** large (best), base_plus, small, tiny (quickest) - all SAM 2.1, Apache 2.0.
-* **matte:** grow / shrink (px), softness (px), invert; **output** alpha (the plate with
-  the matte in alpha, optionally premultiplied) or matte (white on black).
+* **mask output:** how the tracked matte is shown.
+  * **RAW Mask**: the model's matte as it comes (older saves keep this look).
+  * **Hard Mask**: cut at a threshold.
+  * **Guided Smooth Mask** (the default): smoothed along the plate's own edges with a guided
+    filter (radius, edge detail). On the GPU for large frames.
+  * **ViTMatte** / **MEMatte**: a matting model works out the edges. **Refine edges** (also
+    started by itself after Track) crops each object's box plus **crop padding** %, makes a
+    trimap (sure inside / the band between **trimap inside** and **trimap outside** px / sure
+    outside) and runs the model on the crop, in overlapping tiles on big plates. Only frames
+    tracked from the current anchors whose refined edge is out of date run. **Direct Refiner**
+    refines the mask input's alpha instead (a roto or key from upstream).
+  * The weights are installed by hand (no download button until their licences are
+    confirmed): ViTMatte (hustvl, through transformers) in the Welder folder's
+    models/vitmatte-small or vitmatte-base; MEMatte (its code, a .pth checkpoint and
+    detectron2) in models/mematte. Until they're there, or on frames not refined yet,
+    Guided Smooth is shown and the panel says why.
+* **matte:** binarize (threshold), grow / shrink (px), edge offset (fractions of a px),
+  softness (px), levels (black, white, gamma), **temporal smoothing** (blends each pixel with
+  the same pixel up to 4 frames either side, weighted by how far and how different, so edge
+  flicker settles and real motion is kept), invert; **output** alpha (the plate with the
+  matte in alpha, optionally premultiplied) or matte (white on black). Grow, edge offset
+  and the guided filter run on the GPU for large frames, with the CPU as the fallback.
+* **Convert to Splines** turns the tracked mattes into animated Bezier shapes. Each object's outlines
+  are traced (holes come out as shapes blended minus), corners are kept as cusp points, and the
+  handles are fitted to the outline. Every key of a shape has the same number of points starting
+  at the same place, so the shape doesn't swim between keys.
+  * **convert:** the active object or all objects.
+  * **key every:** a key every N frames, plus one on the last frame.
+  * **points:** the count per shape (0: as many as the shape's most detailed frame needs).
+  * **tolerance** and **corner angle:** how closely the shapes follow the matte, and how sharp a
+    turn must be to count as a corner.
+  * **to:** a new PowerRoto (the default) or Roto node next to TrackMask and fed by its src, or
+    the clipboard.
+  * **motion blur samples** and **shutter angle:** set the roto node's motion blur (shutter =
+    angle / 360 frames).
+* **Bake Masks to Disk** writes each frame's finished matte to the **bake folder** as a half-float
+  EXR in the background, like a render. The EXR holds Y (the matte as grey) and A, plus R / G / B
+  for objects routed there. A manifest keeps the hash each frame was made from: its anchors either
+  side (per object), its refined edge, the settings and the inputs. Baking again only writes the
+  frames whose hash changed, so after a correction keyframe only the frames between its
+  neighbouring anchors bake again. With **use baked frames** on, frames show from the bake when
+  their hash still matches. A damaged file or manifest is ignored: that frame is worked out and
+  baked again.
+* **GPU memory:** the worker keeps SAM's image features in a capped cache (a quarter of the free
+  GPU memory, 256 MB to 2 GB). When the GPU runs out of memory, Track runs again with a small cache
+  and then on the CPU. Refine edges first moves to smaller tiles (down to 256 px), then to the CPU.
+  Either way the job finishes slower rather than failing.
 * The panel says when the clicks have changed since the last Track.
 
 ### NeRF
