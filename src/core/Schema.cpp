@@ -1231,6 +1231,36 @@ std::vector<NodeDef> build() {
                                C("hole", "burned through to", "white", {"white", "black", "transparent"}),
                                When(F("hole_brightness", "brightness", 1, 0, 10), "hole=white")})),
             "Film burning in the gate: holes start at a few spots and spread with progress, with a glowing edge, scorch and flicker."});
+        // Psychic Rendering: motion-coupled looks that grow out of the plate
+        d.push_back({"FlowBreath", "Stylize",
+            withMask({F("strength", "displacement (px)", 6, 0, 100, "How far surfaces are pushed around"),
+                      F("flow_scale", "flow scale (px)", 180, 4, 4000, "Size of the swirls"),
+                      F("flow_speed", "flow speed", 0.3, 0, 5, "How fast the swirls evolve (per second)"),
+                      F("octaves", "detail octaves", 2, 1, 6, "Finer swirls layered on top"), I("seed", "seed", 0, 0, 1000),
+                      Div("detail lock"),
+                      F("detail_lock", "detail lock", 0.7, 0, 1, "1: only textured areas (foliage, bark, fabric) breathe; flat ones (sky) hold still"),
+                      F("detail_size", "detail size (px)", 4, 1, 50, "The window texture is measured over"),
+                      F("detail_gain", "detail gain", 12, 0.5, 100, "How little texture counts as textured"),
+                      Div("flow adhesion"),
+                      F("adhesion", "flow adhesion", 1, 0, 1, "With vectors (VectorGenerator) on the vectors input: 1 = the swirls ride on moving surfaces, 0 = they stay on the screen"),
+                      I("reference", "reference frame", 1, -100000, 100000), I("reanchor", "re-anchor every (frames)", 48, 0, 10000),
+                      C("view", "view", "result", {"result", "displacement", "detail mask"}),
+                      Width(C("filter", "filter", "cubic", {"impulse", "bilinear", "cubic", "keys", "lanczos4"}), 110)}),
+            "Surfaces breathe: the plate is gently pushed around by curl noise that rides along with the plate's motion (connect "
+            "VectorGenerator to the vectors input), strongest where there is texture, so foliage and fabric ripple while the sky holds."});
+        d.push_back({"FractalFold", "Stylize",
+            withMask({I("symmetry", "symmetry (N)", 6, 1, 64), F("tile_size", "tile size (px)", 0, 0, 4000, "0: one kaleidoscope around the centre; above 0: a grid of them"),
+                      F("rotation", "rotation", 0, -360, 360), PickXY(XY("center", "center", "$center", 0, 4096)),
+                      I("iterations", "iterations", 3, 1, 12), F("fold_scale", "fold scale", 1.6, 1, 4, "How much each fold grows the pattern"),
+                      F("fold_offset", "fold offset", 0.3, -2, 2), F("zoom", "zoom", 1, 0.05, 20),
+                      Div("where it shows"),
+                      C("drive", "driven by", "detail", {"detail", "luminance", "everywhere"}),
+                      F("detail_threshold", "threshold", 0.3, 0, 1), F("softness", "softness", 0.25, 0, 1),
+                      F("detail_size", "detail size (px)", 4, 1, 50),
+                      C("view", "view", "result", {"result", "weight"}),
+                      Width(C("filter", "filter", "cubic", {"impulse", "bilinear", "cubic", "keys", "lanczos4"}), 110)}),
+            "Kaleidoscopic geometry folded out of the plate's own texture: recursive polar folds around a centre or on a grid of "
+            "tiles, mixed back in where the plate has detail (or brightness), so patterns emerge from the surfaces."});
         d.push_back({"FilmBurnTransition", "MoGraph", trans(burnLook({})),
             "A burns away to reveal B: the cut is hidden in a spreading film burn."});
         auto leak = [](std::vector<KnobDef> k) {

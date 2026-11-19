@@ -224,6 +224,7 @@ void registerKillOutline();
 void registerMoGraphFx();
 void registerMoGraphGen();
 void registerFilmLookNodes();
+void registerPsychicNodes();
 void registerLensFlare();
 void registerKeyingExtraNodes();
 void registerSplineFlow();
@@ -283,6 +284,7 @@ void registerBuiltinNodes() {
     registerMoGraphFx();
     registerMoGraphGen();
     registerFilmLookNodes();
+    registerPsychicNodes();
     registerLensFlare();
     registerKeyingExtraNodes();
     registerSplineFlow();

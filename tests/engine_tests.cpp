@@ -7467,6 +7467,161 @@ Connections:  {
             for (int x = 0; x < 64; ++x) d1 = std::max(d1, (double)std::fabs(px(f1, x, y, "R") - px(m1, x, y, "R")));
         CHECK(d1 == 0);
     });
+    // ---------------------------------------------------------------- Psychic Rendering: FlowBreath, FractalFold
+    test("Psychic: FlowBreath pushes by about `strength`, more on texture, tiles agree, sticks to moving surfaces, scrubs cleanly", [] {
+        const int W = 160, H = 96;
+        auto c = comp(json::array({
+            {{"name", "P"}, {"type", "Plasma"}, {"params", {{"size", 40}, {"complexity", 8}, {"cycles", 3}, {"speed", 0}}}},
+            {{"name", "M"}, {"type", "Transform"}, {"inputs", {"P"}}, {"params", {{"translate", {json{{"expr", "frame * 4"}}, json{{"expr", "frame * -2"}}}}}}},
+            {{"name", "VG"}, {"type", "VectorGenerator"}, {"inputs", {"M"}}},
+            {{"name", "Flat"}, {"type", "Constant"}, {"params", {{"color", {0.3, 0.4, 0.5, 1}}}}},
+            {{"name", "Ramp"}, {"type", "Ramp"}, {"params", {{"p0", {0, 0}}, {"p1", {160, 96}}, {"color0", {0.1, 0.2, 0.4, 1}}, {"color", {0.9, 0.5, 0.2, 1}}}}},
+            {{"name", "Off"}, {"type", "FlowBreath"}, {"inputs", {"M"}}, {"params", {{"strength", 0}}}},
+            {{"name", "DFlat"}, {"type", "FlowBreath"}, {"inputs", {"Flat"}}, {"params", {{"strength", 8}, {"detail_lock", 0}, {"view", "displacement"}}}},
+            {{"name", "LRamp"}, {"type", "FlowBreath"}, {"inputs", {"Ramp"}}, {"params", {{"strength", 8}, {"detail_lock", 1}, {"view", "displacement"}}}},
+            {{"name", "LTex"}, {"type", "FlowBreath"}, {"inputs", {"P"}}, {"params", {{"strength", 8}, {"detail_lock", 1}, {"view", "displacement"}}}},
+            {{"name", "Res"}, {"type", "FlowBreath"}, {"inputs", {"M", "VG"}}, {"params", {{"strength", 5}, {"flow_scale", 60}}}},
+            {{"name", "Adh"}, {"type", "FlowBreath"}, {"inputs", {"M", "VG"}},
+             {"params", {{"strength", 8}, {"flow_scale", 50}, {"flow_speed", 0}, {"detail_lock", 0}, {"reference", 1}, {"reanchor", 0}, {"view", "displacement"}}}},
+            {{"name", "Re3"}, {"type", "FlowBreath"}, {"inputs", {"M", "VG"}},
+             {"params", {{"strength", 8}, {"flow_scale", 50}, {"flow_speed", 0}, {"detail_lock", 0}, {"reference", 1}, {"reanchor", 6}, {"view", "displacement"}}}},
+            {{"name", "Scr"}, {"type", "FlowBreath"}, {"inputs", {"M", "VG"}},
+             {"params", {{"strength", 8}, {"flow_scale", 50}, {"flow_speed", 0}, {"detail_lock", 0}, {"reference", 1}, {"reanchor", 0}, {"adhesion", 0}, {"view", "displacement"}}}},
+        }), W, H);
+        c->firstFrame = 1;
+        c->lastFrame = 12;
+        // strength 0: the plate as is
+        auto m3 = render(*c, "M", 3), off = render(*c, "Off", 3);
+        double d0 = 0;
+        for (size_t i = 0; i < m3->data.size(); ++i) d0 = std::max(d0, (double)std::fabs(m3->data[i] - off->data[i]));
+        CHECK(d0 == 0);
+        // displacement view: 0.5 + push / (2 strength)
+        auto disp = [&](const ImagePtr& im, int x, int y, double s) {
+            return std::array<double, 2>{(px(im, x, y, "R") - 0.5) * 2 * s, (px(im, x, y, "G") - 0.5) * 2 * s};
+        };
+        auto dflat = render(*c, "DFlat", 3);
+        double rms = 0, mx = 0;
+        int n = 0;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                auto d = disp(dflat, x, y, 8);
+                const double l = std::hypot(d[0], d[1]);
+                rms += l * l, mx = std::max(mx, l), ++n;
+            }
+        rms = std::sqrt(rms / n);
+        auto lr = render(*c, "LRamp", 3), lt = render(*c, "LTex", 3);
+        double mr = 0, mt = 0;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                auto a = disp(lr, x, y, 8), b = disp(lt, x, y, 8);
+                mr += std::hypot(a[0], a[1]), mt += std::hypot(b[0], b[1]);
+            }
+        mr /= n, mt /= n;
+        std::printf("  FlowBreath: push RMS %.2f px (strength 8), max %.2f; detail lock: smooth ramp %.3f px, texture %.2f px\n", rms, mx, mr, mt);
+        CHECK(rms > 4 && rms < 12);
+        CHECK(mx <= 8 * 2.5 + 1e-3);
+        CHECK(mt > 2 && mr < 0.25 * mt);
+        // tiles: the same pixels in 16 px tiles as in one
+        {
+            auto big = render(*c, "Res", 4, 256), small = render(*c, "Res", 4, 16);
+            double dt = 0;
+            for (size_t i = 0; i < big->data.size(); ++i) dt = std::max(dt, (double)std::fabs(big->data[i] - small->data[i]));
+            CHECK(dt < 1e-6);
+        }
+        // adhesion: frame 6's push at p is frame 5's push where p was (p - (4, -2)); without adhesion it is not
+        auto shiftedError = [&](const std::string& node, int f) {
+            auto a = render(*c, node, f), b = render(*c, node, f + 1);
+            double e = 0;
+            int k = 0;
+            for (int y = 20; y < H - 20; y += 2)
+                for (int x = 30; x < W - 30; x += 2) {
+                    auto pa = disp(a, x - 4, y + 2, 8), pb = disp(b, x, y, 8);
+                    e += std::hypot(pa[0] - pb[0], pa[1] - pb[1]), ++k;
+                }
+            return e / k;
+        };
+        const double eAdh = shiftedError("Adh", 5), eScreen = shiftedError("Scr", 5), eRe = std::max(shiftedError("Re3", 6), shiftedError("Re3", 7));
+        std::printf("  FlowBreath: push vs one frame earlier where the surface was: adhesion %.2f px, re-anchored %.2f px, on screen %.2f px\n",
+                    eAdh, eRe, eScreen);
+        CHECK(eAdh < 0.3 * eScreen);
+        CHECK(eRe < 0.6 * eScreen);
+        // the reference frame has no past: the push there is the unadhered one
+        {
+            auto a = render(*c, "Adh", 1), s = render(*c, "Scr", 1);
+            double d = 0;
+            for (size_t i = 0; i < a->data.size(); ++i) d = std::max(d, (double)std::fabs(a->data[i] - s->data[i]));
+            CHECK(d < 1e-6);
+        }
+        // scrub 9 back to 3 in one engine = a fresh render of 3
+        {
+            Engine e;
+            Node* nd = c->find("Adh");
+            const Box B = nd->format(e, 1).box();
+            e.renderRegion(nd, 9, B);
+            auto back = e.renderRegion(nd, 3, B);
+            auto c2 = comp(c->toJson()["nodes"], W, H);
+            c2->firstFrame = 1;
+            c2->lastFrame = 12;
+            auto fresh = render(*c2, "Adh", 3);
+            double d = 0;
+            for (size_t i = 0; i < back->data.size(); ++i) d = std::max(d, (double)std::fabs(back->data[i] - fresh->data[i]));
+            CHECK(d == 0);
+            CHECK(nd->pastHash(e, 5) != nd->pastHash(e, 6));  // the engine knows frames depend on the frames before
+        }
+        // proxy: about the same picture at half resolution
+        const double pe = proxyError(*c, "Res", 0.5), pb = proxyError(*c, "M", 0.5);
+        std::printf("  FlowBreath at half res: %.4f (the plate itself: %.4f)\n", pe, pb);
+        CHECK(pe < pb + 0.03);
+    });
+
+    test("Psychic: FractalFold is N-fold symmetric, leaves flat areas alone when driven by detail, tiles agree", [] {
+        const int W = 64, H = 48;
+        auto c = comp(json::array({
+            {{"name", "P"}, {"type", "Plasma"}, {"params", {{"size", 20}, {"complexity", 8}, {"cycles", 3}, {"speed", 0}}}},
+            {{"name", "Flat"}, {"type", "Constant"}, {"params", {{"color", {0.3, 0.4, 0.5, 1}}}}},
+            {{"name", "K4"}, {"type", "FractalFold"}, {"inputs", {"P"}}, {"params", {{"symmetry", 4}, {"iterations", 3}, {"drive", "everywhere"}}}},
+            {{"name", "Off"}, {"type", "FractalFold"}, {"inputs", {"P"}}, {"params", {{"mix", 0}}}},
+            {{"name", "DFlat"}, {"type", "FractalFold"}, {"inputs", {"Flat"}}, {"params", {{"drive", "detail"}}}},
+            {{"name", "Lum"}, {"type", "FractalFold"}, {"inputs", {"P"}}, {"params", {{"drive", "luminance"}, {"tile_size", 24}, {"rotation", 20}}}},
+            {{"name", "Wt"}, {"type", "FractalFold"}, {"inputs", {"P"}}, {"params", {{"view", "weight"}}}},
+        }), W, H);
+        auto k4 = render(*c, "K4"), p = render(*c, "P");
+        // a quarter turn about the centre (32, 24) maps pixel (x, y) to (55 - y, x - 8)
+        double sym = 0, changed = 0;
+        int n = 0;
+        for (int y = 12; y < 36; ++y)
+            for (int x = 20; x < 44; ++x) {
+                const int x2 = 55 - y, y2 = x - 8;
+                for (const char* ch : {"R", "G", "B"}) {
+                    sym = std::max(sym, (double)std::fabs(px(k4, x, y, ch) - px(k4, x2, y2, ch)));
+                    changed += std::fabs(px(k4, x, y, ch) - px(p, x, y, ch));
+                }
+                ++n;
+            }
+        std::printf("  FractalFold: 4-fold symmetry error %.2e, mean change %.3f\n", sym, changed / n / 3);
+        CHECK(sym < 1e-4);
+        CHECK(changed / n / 3 > 0.01);
+        auto off = render(*c, "Off");
+        auto fl = render(*c, "DFlat"), flat = render(*c, "Flat");
+        double d0 = 0, df = 0;
+        for (size_t i = 0; i < off->data.size(); ++i) d0 = std::max(d0, (double)std::fabs(off->data[i] - p->data[i]));
+        for (size_t i = 0; i < fl->data.size(); ++i) df = std::max(df, (double)std::fabs(fl->data[i] - flat->data[i]));
+        CHECK(d0 == 0);
+        CHECK(df < 1e-6);
+        auto big = render(*c, "Lum", 1, 256), small = render(*c, "Lum", 1, 16);
+        double dt = 0;
+        for (size_t i = 0; i < big->data.size(); ++i) dt = std::max(dt, (double)std::fabs(big->data[i] - small->data[i]));
+        CHECK(dt < 1e-6);
+        auto wt = render(*c, "Wt");
+        float lo = 1, hi = 0;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) lo = std::min(lo, px(wt, x, y, "R")), hi = std::max(hi, px(wt, x, y, "R"));
+        CHECK(lo >= 0 && hi <= 1 && hi > 0.5);
+        // proxy: about the same picture at half resolution
+        const double pe = proxyError(*c, "Lum", 0.5), pb = proxyError(*c, "P", 0.5);
+        std::printf("  FractalFold at half res: %.4f (the plate itself: %.4f)\n", pe, pb);
+        CHECK(pe < 2.5 * pb);  // folds squeeze detail together, so a little more aliasing than the plate
+    });
     std::printf("\n%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }
