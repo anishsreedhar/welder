@@ -71,4 +71,25 @@ float perlin3(float x, float y, float z, uint32_t seed);
 float perlin4(float x, float y, float z, float w, uint32_t seed);
 float value3(float x, float y, float z, uint32_t seed);
 
+// ---------------------------------------------------------------- simplex and curl (flow noise)
+// Simplex noise with its exact gradient, and divergence-free curl fields built from it: motion
+// that swirls without bunching up or thinning out (used for displacement, advection and
+// chromatic dispersion). Coordinates are feature units; z is usually time (evolution).
+struct Deriv3 {
+    float v = 0;                  // the noise, roughly -1..1
+    float dx = 0, dy = 0, dz = 0; // its partial derivatives (exact, not finite differences)
+};
+Deriv3 simplex3d(float x, float y, float z, uint32_t seed);
+
+// Fractal sum of simplex octaves (the potential the fractal curls use): octave o has frequency
+// lacunarity^o and amplitude gain^o / lacunarity^o, so each octave adds velocity in proportion
+// gain^o (the curl differentiates once). Octaves may be fractional (the last one fades in).
+Deriv3 simplexFbm3d(float x, float y, float z, uint32_t seed, float octaves, float lacunarity = 2, float gain = 0.5f);
+
+// 2D curl of a scalar potential psi(x, y, z): (d psi / dy, -d psi / dx). Divergence-free in x, y
+// for every z, so a z animated over time keeps it incompressible on every frame.
+void curl2(float x, float y, float z, uint32_t seed, float out[2], float octaves = 1, float lacunarity = 2, float gain = 0.5f);
+// 3D curl of a vector potential (three decorrelated simplex fields).
+void curl3(float x, float y, float z, uint32_t seed, float out[3], float octaves = 1, float lacunarity = 2, float gain = 0.5f);
+
 }  // namespace strata::noise

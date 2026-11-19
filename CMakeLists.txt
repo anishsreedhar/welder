@@ -90,6 +90,7 @@ add_library(strata_core STATIC
   src/core/Brand.cpp
   src/nodes/BlenderNode.cpp
   src/nodes/NoiseLib.cpp
+  src/nodes/DetailMask.cpp
   src/nodes/CreativeNodes.cpp
   src/nodes/CGNodes.cpp
   src/nodes/GroupNodes.cpp

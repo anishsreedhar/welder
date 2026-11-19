@@ -460,4 +460,89 @@ float bandLimit(const Settings& s, float sizePx) {
     return std::clamp(std::min(s.octaves, maxOct), 1.0f, 16.0f);
 }
 
+
+// ---------------------------------------------------------------- simplex and curl
+namespace {
+// The 3D simplex lattice (skewed so a cube splits into six tetrahedra). Each corner adds
+// t^4 (g . d) with t = 0.5 - |d|^2 (clamped at 0): radius 0.5 keeps the sum smooth (C2) across
+// simplex borders.
+constexpr float kF3 = 1.0f / 3.0f, kG3s = 1.0f / 6.0f;
+constexpr float kSimplexScale = 72.0f;  // sets the range to about -1..1 (checked in the tests)
+}  // namespace
+
+Deriv3 simplex3d(float x, float y, float z, uint32_t seed) {
+    const float s = (x + y + z) * kF3;
+    const int i = fl(x + s), j = fl(y + s), k = fl(z + s);
+    const float t = (float)(i + j + k) * kG3s;
+    const float x0 = x - ((float)i - t), y0 = y - ((float)j - t), z0 = z - ((float)k - t);
+    int i1, j1, k1, i2, j2, k2;
+    if (x0 >= y0) {
+        if (y0 >= z0) i1 = 1, j1 = 0, k1 = 0, i2 = 1, j2 = 1, k2 = 0;
+        else if (x0 >= z0) i1 = 1, j1 = 0, k1 = 0, i2 = 1, j2 = 0, k2 = 1;
+        else i1 = 0, j1 = 0, k1 = 1, i2 = 1, j2 = 0, k2 = 1;
+    } else {
+        if (y0 < z0) i1 = 0, j1 = 0, k1 = 1, i2 = 0, j2 = 1, k2 = 1;
+        else if (x0 < z0) i1 = 0, j1 = 1, k1 = 0, i2 = 0, j2 = 1, k2 = 1;
+        else i1 = 0, j1 = 1, k1 = 0, i2 = 1, j2 = 1, k2 = 0;
+    }
+    const int ci[4][3] = {{0, 0, 0}, {i1, j1, k1}, {i2, j2, k2}, {1, 1, 1}};
+    Deriv3 r;
+    for (int c = 0; c < 4; ++c) {
+        const float off = (float)c * kG3s;
+        const float dx = x0 - (float)ci[c][0] + off, dy = y0 - (float)ci[c][1] + off, dz = z0 - (float)ci[c][2] + off;
+        const float tt = 0.5f - dx * dx - dy * dy - dz * dz;
+        if (tt <= 0) continue;
+        const G3& g = kG3[hash3(i + ci[c][0], j + ci[c][1], k + ci[c][2], seed) & 15];
+        const float gd = g.x * dx + g.y * dy + g.z * dz;
+        const float t2 = tt * tt, t4 = t2 * t2, t3 = t2 * tt;
+        r.v += t4 * gd;
+        // d/dx [t^4 (g . d)] = t^4 g.x + 4 t^3 (-2 dx) (g . d)
+        r.dx += t4 * g.x - 8 * t3 * gd * dx;
+        r.dy += t4 * g.y - 8 * t3 * gd * dy;
+        r.dz += t4 * g.z - 8 * t3 * gd * dz;
+    }
+    r.v *= kSimplexScale;
+    r.dx *= kSimplexScale;
+    r.dy *= kSimplexScale;
+    r.dz *= kSimplexScale;
+    return r;
+}
+
+Deriv3 simplexFbm3d(float x, float y, float z, uint32_t seed, float octaves, float lacunarity, float gain) {
+    octaves = std::clamp(octaves, 0.0f, 16.0f);
+    Deriv3 r;
+    float freq = 1, amp = 1;
+    const int n = (int)std::ceil(octaves);
+    for (int o = 0; o < n; ++o) {
+        const float w = std::min(1.0f, octaves - (float)o);  // the last octave fades in
+        // each octave its own seed and an offset, so the octaves don't line up at the origin
+        const Deriv3 d = simplex3d(x * freq + (float)o * 17.31f, y * freq - (float)o * 9.77f, z * freq + (float)o * 3.13f,
+                                   seed + (uint32_t)o * 0x9e3779b9u);
+        const float a = amp / freq * w;  // potential amplitude: the velocity octave is amp * w
+        r.v += a * d.v;
+        r.dx += a * freq * d.dx;
+        r.dy += a * freq * d.dy;
+        r.dz += a * freq * d.dz;
+        freq *= lacunarity;
+        amp *= gain;
+    }
+    return r;
+}
+
+void curl2(float x, float y, float z, uint32_t seed, float out[2], float octaves, float lacunarity, float gain) {
+    const Deriv3 p = simplexFbm3d(x, y, z, seed, octaves, lacunarity, gain);
+    out[0] = p.dy;
+    out[1] = -p.dx;
+}
+
+void curl3(float x, float y, float z, uint32_t seed, float out[3], float octaves, float lacunarity, float gain) {
+    // three decorrelated potentials (own seeds and offsets)
+    const Deriv3 a = simplexFbm3d(x, y, z, seed ^ 0x2545f491u, octaves, lacunarity, gain);
+    const Deriv3 b = simplexFbm3d(x + 31.416f, y - 47.853f, z + 12.793f, seed ^ 0x6c8e9cf5u, octaves, lacunarity, gain);
+    const Deriv3 c = simplexFbm3d(x - 19.191f, y + 33.071f, z - 27.459f, seed ^ 0xb5297a4du, octaves, lacunarity, gain);
+    out[0] = c.dy - b.dz;
+    out[1] = a.dz - c.dx;
+    out[2] = b.dx - a.dy;
+}
+
 }  // namespace strata::noise
