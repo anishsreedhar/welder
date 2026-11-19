@@ -7593,8 +7593,11 @@ Connections:  {
         CHECK(mx <= 8 * 2.5 + 1e-3);
         CHECK(mt > 2 && mr < 0.25 * mt);
         // tiles: the same pixels in 16 px tiles as in one
-        {
+        {  // (on the CPU: 16 px tiles are too small for the GPU; its tiles are checked in "Psychic GPU")
+            const bool was = gpu::enabled();
+            gpu::setEnabled(false);
             auto big = render(*c, "Res", 4, 256), small = render(*c, "Res", 4, 16);
+            gpu::setEnabled(was);
             double dt = 0;
             for (size_t i = 0; i < big->data.size(); ++i) dt = std::max(dt, (double)std::fabs(big->data[i] - small->data[i]));
             CHECK(dt < 1e-6);
@@ -7730,7 +7733,10 @@ Connections:  {
         CHECK(dL < 1e-5 && dHue > 0.05);
         CHECK(dG < 1e-6 && dRB > 0.02);
         CHECK(dGrey < 1e-5);
+        const bool was = gpu::enabled();
+        gpu::setEnabled(false);  // (CPU tiles; the GPU's are checked in "Psychic GPU")
         auto big = render(*c, "All", 3, 256), small = render(*c, "All", 3, 16);
+        gpu::setEnabled(was);
         double dt = 0;
         for (size_t i = 0; i < big->data.size(); ++i) dt = std::max(dt, (double)std::fabs(big->data[i] - small->data[i]));
         CHECK(dt < 1e-6);
@@ -7806,6 +7812,113 @@ Connections:  {
         double sum = 0;
         for (float v : img->data) sum += std::isfinite(v) ? v : 1e9;
         CHECK(sum > 0 && sum < 1e8);
+    });
+    // ---------------------------------------------------------------- Psychic Rendering on the GPU
+    test("Psychic GPU: FlowBreath, FractalFold, SpectralPhase, TemporalTracer match the CPU (and the CPU fallback still runs)", [] {
+        if (!gpu::available()) {
+            std::printf("  (no GPU: %s)\n", gpu::status().c_str());
+            return;
+        }
+        const int W = 300, H = 200;
+        json nodes = json::array({
+            {{"name", "P"}, {"type", "Plasma"}, {"params", {{"size", 40}, {"complexity", 8}, {"cycles", 3}, {"speed", 0}}}},
+            {{"name", "M"}, {"type", "Transform"}, {"inputs", {"P"}}, {"params", {{"translate", {json{{"expr", "frame * 4"}}, json{{"expr", "frame * -2"}}}}}}},
+            {{"name", "VG"}, {"type", "VectorGenerator"}, {"inputs", {"M"}}},
+            {{"name", "Rad"}, {"type", "Radial"}, {"params", {{"radius", 90}}}},
+            {{"name", "FB1"}, {"type", "FlowBreath"}, {"inputs", {"M"}}, {"params", {{"strength", 6}, {"flow_scale", 60}}}},
+            {{"name", "FB2"}, {"type", "FlowBreath"}, {"inputs", {"M", "VG"}}, {"params", {{"strength", 8}, {"flow_scale", 50}, {"reanchor", 3}, {"reference", 1}}}},
+            {{"name", "FB3"}, {"type", "FlowBreath"}, {"inputs", {"M", "VG", "Rad"}}, {"params", {{"strength", 5}, {"filter", "bilinear"}, {"mix", 0.7}}}},
+            {{"name", "FB4"}, {"type", "FlowBreath"}, {"inputs", {"M"}}, {"params", {{"strength", 5}, {"view", "displacement"}}}},
+            {{"name", "FB5"}, {"type", "FlowBreath"}, {"inputs", {"M"}}, {"params", {{"strength", 5}, {"view", "detail mask"}}}},
+            {{"name", "FB6"}, {"type", "FlowBreath"}, {"inputs", {"M"}}, {"params", {{"strength", 5}, {"filter", "mitchell"}}}},
+            {{"name", "FF1"}, {"type", "FractalFold"}, {"inputs", {"M"}}},
+            {{"name", "FF2"}, {"type", "FractalFold"}, {"inputs", {"M"}}, {"params", {{"drive", "everywhere"}, {"tile_size", 70}, {"rotation", 20}, {"iterations", 5}}}},
+            {{"name", "FF3"}, {"type", "FractalFold"}, {"inputs", {"M", "Rad"}}, {"params", {{"drive", "luminance"}, {"filter", "bilinear"}}}},
+            {{"name", "FF4"}, {"type", "FractalFold"}, {"inputs", {"M"}}, {"params", {{"view", "weight"}}}},
+            {{"name", "SP1"}, {"type", "SpectralPhase"}, {"inputs", {"M"}}},
+            {{"name", "SP2"}, {"type", "SpectralPhase"}, {"inputs", {"M", "Rad"}}, {"params", {{"chromatic_split", 9}, {"hue_shift", 120}, {"chroma_boost", 2}}}},
+            {{"name", "SP3"}, {"type", "SpectralPhase"}, {"inputs", {"M"}}, {"params", {{"chromatic_split", 0}}}},
+            {{"name", "TT1"}, {"type", "TemporalTracer"}, {"inputs", {"M", "VG"}}, {"params", {{"trail_length", 6}}}},
+            {{"name", "TT2"}, {"type", "TemporalTracer"}, {"inputs", {"M"}}, {"params", {{"trail_length", 5}, {"phase_shift", 0}, {"blend", "screen"}}}},
+            {{"name", "TT3"}, {"type", "TemporalTracer"}, {"inputs", {"M", "VG", "Rad"}}, {"params", {{"trail_length", 4}, {"decay_curve", "linear"}, {"blend", "max"}}}},
+        });
+        auto c = comp(nodes, W, H);
+        c->firstFrame = 1;
+        c->lastFrame = 12;
+        for (const char* nm : {"FB1", "FB2", "FB3", "FB4", "FB5", "FB6", "FF1", "FF2", "FF3", "FF4", "SP1", "SP2", "SP3", "TT1", "TT2", "TT3"}) {
+            gpu::setEnabled(false);
+            auto cpu = render(*c, nm, 5, 128);
+            gpu::setEnabled(true);
+            const auto before = gpu::stats().runs;
+            auto g = render(*c, nm, 5, 128);
+            const bool used = gpu::stats().runs > before;
+            double worst = 0, sum = 0;
+            for (size_t i = 0; i < cpu->data.size() && i < g->data.size(); ++i) {
+                const double d = std::fabs(cpu->data[i] - g->data[i]);
+                worst = std::max(worst, d), sum += d;
+            }
+            const double mean = sum / std::max<size_t>(1, cpu->data.size());
+            // the folds and pushes land on slightly different positions in float, so a pixel on a hard
+            // edge of the source can differ a little; on average they are the same picture
+            const double tol = nm[0] == 'F' && nm[1] == 'F' ? 2e-2 : 2e-3;
+            std::printf("  %s: max |cpu - gpu| %.2g, mean %.2g, gpu used %d\n", nm, worst, mean, used);
+            CHECK(cpu->bounds == g->bounds);
+            CHECK(used);
+            CHECK(worst < tol);
+            CHECK(mean < 1e-4);
+        }
+        // GPU tiles agree with each other (64 px tiles against 256), to float rounding: each tile's
+        // source buffer starts somewhere else, so positions round a little differently
+        for (const char* nm : {"FB2", "FF2", "SP2", "TT1"}) {
+            auto big = render(*c, nm, 5, 256), small = render(*c, nm, 5, 64);
+            double dt = 0;
+            for (size_t i = 0; i < big->data.size(); ++i) dt = std::max(dt, (double)std::fabs(big->data[i] - small->data[i]));
+            if (dt >= 5e-4) std::printf("  %s: GPU tiles differ by %g\n", nm, dt);
+            CHECK(dt < 5e-4);
+        }
+    });
+    test("GPU: optical flow (VectorGenerator) matches the CPU and finds the motion", [] {
+        if (!gpu::available()) {
+            std::printf("  (no GPU: %s)\n", gpu::status().c_str());
+            return;
+        }
+        const int W = 640, H = 360;
+        auto make = [&] { return comp(json::array({
+            {{"name", "P"}, {"type", "Plasma"}, {"params", {{"size", 40}, {"complexity", 8}, {"cycles", 3}, {"speed", 0}}}},
+            {{"name", "M"}, {"type", "Transform"}, {"inputs", {"P"}}, {"params", {{"translate", {json{{"expr", "frame * 4"}}, json{{"expr", "frame * -2"}}}}}}},
+            {{"name", "VG"}, {"type", "VectorGenerator"}, {"inputs", {"M"}}},
+            {{"name", "VGf"}, {"type", "VectorGenerator"}, {"inputs", {"M"}}, {"params", {{"flicker", true}, {"vector_detail", 0.5}}}},
+        }), W, H); };
+        for (const char* nm : {"VG", "VGf"}) {
+            // a comp each (VectorGenerator keeps its results)
+            auto c1 = make(), c2 = make();
+            gpu::setEnabled(false);
+            auto cpu = render(*c1, nm, 5);
+            gpu::setEnabled(true);
+            const auto before = gpu::stats().runs;
+            auto g = render(*c2, nm, 5);
+            const bool used = gpu::stats().runs > before;
+            double worst = 0, sum = 0, eg = 0, ec = 0;
+            int n = 0;
+            for (size_t i = 0; i < cpu->data.size(); ++i) {
+                const double d = std::fabs(cpu->data[i] - g->data[i]);
+                worst = std::max(worst, d), sum += d;
+            }
+            // away from the borders (where the plate slides in), forward = (4, -2)
+            for (int y = 40; y < H - 40; y += 4)
+                for (int x = 40; x < W - 40; x += 4) {
+                    eg += std::hypot(px(g, x, y, "forward.u") - 4, px(g, x, y, "forward.v") + 2);
+                    ec += std::hypot(px(cpu, x, y, "forward.u") - 4, px(cpu, x, y, "forward.v") + 2);
+                    ++n;
+                }
+            const double mean = sum / std::max<size_t>(1, cpu->data.size());
+            std::printf("  %s: |cpu - gpu| max %.2g mean %.2g px; error vs the true motion: gpu %.3f, cpu %.3f px; gpu used %d\n", nm, worst,
+                        mean, eg / n, ec / n, used);
+            CHECK(used);
+            CHECK(mean < 0.01);
+            CHECK(eg / n < 0.4);
+            CHECK(eg / n < ec / n + 0.02);
+        }
     });
     std::printf("\n%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

@@ -1,0 +1,68 @@
+// SpectralPhase (nodes/PsychicNodes.cpp) on the GPU: R and B sampled either side along the curl
+// field (bilinear, extended edges), then the OKLCH phase (hue swing, chroma boost), lightness kept.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { float src[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Map { int chmap[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Prm { float prm[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Msk { float msk[]; };
+layout(std430, set = 0, binding = 4) buffer Dst { float dst[]; };
+
+layout(push_constant) uniform P {
+    int sw, sh, sn;
+    int ow, oh, on;
+    int rx1, ry1, sx1, sy1;
+    int oR, oG, oB;  // output channels (-1: none)
+    int seed, flags; // 1 mask, 2 the OKLCH phase (else the R / B split only)
+} p;
+// prm: 0 split (render px), 1 invNoise, 2 z, 3 kCurlRms, 4 maxPush, 5 freq, 6 couple, 7 phase0
+// (2 pi speed secs), 8 amp (rad), 9 boost, 10..13 edge clamp box (image coords)
+
+#include "psy_common.glsl"
+#include "psy_sample.glsl"
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x), j = int(gl_GlobalInvocationID.y);
+    if (i >= p.ow || j >= p.oh) return;
+    const float PI = 3.14159265358979;
+    int o = (j * p.ow + i) * p.on;
+    float X = float(p.rx1 + i) + 0.5, Y = float(p.ry1 + j) + 0.5;
+    PsyTaps t = psyTaps(X - float(p.sx1), Y - float(p.sy1), p.sw, p.sh, 1, 0.0, 0.0, false);
+    for (int c = 0; c < p.on; ++c) dst[o + c] = chmap[c] >= 0 ? psyGather(t, p.sw, p.sh, p.sn, chmap[c], false) : 0.0;
+    if (p.oR < 0 || p.oG < 0 || p.oB < 0 || chmap[p.oR] < 0 || chmap[p.oG] < 0 || chmap[p.oB] < 0) return;
+    vec3 keep = vec3(dst[o + p.oR], dst[o + p.oG], dst[o + p.oB]);
+    vec3 rgb = keep;
+    float split = prm[0];
+    if (split != 0.0) {
+        vec2 d = psyCurl2(X * prm[1], Y * prm[1], prm[2], uint(p.seed), 2.0);
+        float dx = d.x / prm[3] * split, dy = d.y / prm[3] * split;
+        float len = sqrt(dx * dx + dy * dy);
+        if (len > prm[4]) {
+            dx *= prm[4] / len;
+            dy *= prm[4] / len;
+        }
+        float ax = clamp(X + dx, prm[10] + 0.5, prm[12] - 0.5), ay = clamp(Y + dy, prm[11] + 0.5, prm[13] - 0.5);
+        float bx = clamp(X - dx, prm[10] + 0.5, prm[12] - 0.5), by = clamp(Y - dy, prm[11] + 0.5, prm[13] - 0.5);
+        PsyTaps ta = psyTaps(ax - float(p.sx1), ay - float(p.sy1), p.sw, p.sh, 1, 0.0, 0.0, false);
+        PsyTaps tb = psyTaps(bx - float(p.sx1), by - float(p.sy1), p.sw, p.sh, 1, 0.0, 0.0, false);
+        rgb.r = psyGather(ta, p.sw, p.sh, p.sn, chmap[p.oR], false);
+        rgb.b = psyGather(tb, p.sw, p.sh, p.sn, chmap[p.oB], false);
+    }
+    float w = (p.flags & 1) != 0 ? msk[j * p.ow + i] : 1.0;
+    if ((p.flags & 2) == 0) {
+        dst[o + p.oR] = keep.r + (rgb.r - keep.r) * w;
+        dst[o + p.oB] = keep.b + (rgb.b - keep.b) * w;
+        return;
+    }
+    vec3 lab = psyToOklab(rgb);
+    float C = sqrt(lab.y * lab.y + lab.z * lab.z), h = atan(lab.z, lab.y);
+    float th = 2.0 * PI * (prm[5] * (prm[6] * lab.x + (1.0 - prm[6]) * 0.5)) + prm[7];
+    h += prm[8] * sin(th);
+    C *= 1.0 + (prm[9] - 1.0) * (0.5 + 0.5 * cos(th));
+    vec3 res = psyFromOklab(vec3(lab.x, C * cos(h), C * sin(h)));
+    dst[o + p.oR] = keep.r + (res.r - keep.r) * w;
+    dst[o + p.oG] = keep.g + (res.g - keep.g) * w;
+    dst[o + p.oB] = keep.b + (res.b - keep.b) * w;
+}

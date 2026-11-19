@@ -23,6 +23,7 @@ struct DetailOptions {
     double scale = 1;           // render scale (Engine::scale)
     Box limit;                  // if set: reads stay inside it (the input's dod), so the black beyond a
                                 // padded fetch doesn't read as a hard edge along the frame border
+    bool gpu = true;            // use the GPU when there is one (the CPU otherwise, or if it fails)
 };
 
 // How far around a region the source must reach (render pixels) for detailMask to see everything.

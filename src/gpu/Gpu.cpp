@@ -478,10 +478,23 @@ Stats stats() { return {gRuns.load(), gFails.load()}; }
 
 bool run(const char* kernel, const std::vector<In>& in, const std::vector<Out>& out, const void* push, size_t pushBytes,
          uint32_t gx, uint32_t gy, uint32_t gz) {
+    if (pushBytes > 128) return false;
+    std::vector<Buffer> bufs;
+    bufs.reserve(in.size() + out.size());
+    for (auto& i : in) bufs.push_back({i.data, nullptr, i.bytes});
+    for (auto& o : out) bufs.push_back({nullptr, o.data, o.bytes});
+    std::vector<Dispatch> ds(1);
+    if (push && pushBytes) std::memcpy(ds[0].push, push, pushBytes);
+    ds[0].gx = gx, ds[0].gy = gy, ds[0].gz = gz;
+    return runSequence(kernel, bufs, ds);
+}
+
+bool runSequence(const char* kernel, const std::vector<Buffer>& bufs, const std::vector<Dispatch>& ds) {
     Device* dp = ready();
-    if (!dp || pushBytes > 128 || gx == 0 || gy == 0 || gz == 0) return false;
+    if (!dp || ds.empty()) return false;
     Device& d = *dp;
-    if (gx > d.maxGroupsX || gy > d.maxGroupsY) return false;
+    for (auto& x : ds)
+        if (x.gx == 0 || x.gy == 0 || x.gz == 0 || x.gx > d.maxGroupsX || x.gy > d.maxGroupsY) return false;
     // a free slot
     Slot* s = nullptr;
     {
@@ -509,10 +522,9 @@ bool run(const char* kernel, const std::vector<In>& in, const std::vector<Out>& 
             d.slotCv.notify_one();
         }
     } release{d, s};
-    const uint32_t nb = (uint32_t)(in.size() + out.size());
+    const uint32_t nb = (uint32_t)bufs.size();
     std::vector<size_t> sizes(nb);
-    for (size_t i = 0; i < in.size(); ++i) sizes[i] = in[i].bytes;
-    for (size_t i = 0; i < out.size(); ++i) sizes[in.size() + i] = out[i].bytes;
+    for (size_t i = 0; i < nb; ++i) sizes[i] = bufs[i].bytes;
     // stay within the GPU memory budget: free idle slots' buffers, or leave this job to the CPU
     {
         size_t want = 0;
@@ -560,11 +572,12 @@ bool run(const char* kernel, const std::vector<In>& in, const std::vector<Out>& 
         s->bytes = want;
     }
     try {
-        Pipe& p = pipeline(d, kernel, nb, (uint32_t)pushBytes);
+        Pipe& p = pipeline(d, kernel, nb, 128);
         for (uint32_t i = 0; i < nb; ++i) ensure(d, *s, i, sizes[i]);
         // inputs into their staging buffers
-        for (size_t i = 0; i < in.size(); ++i) {
-            if (in[i].bytes) std::memcpy(s->stage[i].map, in[i].data, in[i].bytes);
+        for (size_t i = 0; i < nb; ++i) {
+            if (!bufs[i].in) continue;
+            if (bufs[i].bytes) std::memcpy(s->stage[i].map, bufs[i].in, bufs[i].bytes);
             if (!s->stage[i].coherent) {
                 VkMappedMemoryRange mr{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
                 mr.memory = s->stage[i].mem;
@@ -598,9 +611,9 @@ bool run(const char* kernel, const std::vector<In>& in, const std::vector<Out>& 
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         check(vkBeginCommandBuffer(c, &bi), "vkBeginCommandBuffer");
-        for (size_t i = 0; i < in.size(); ++i)
-            if (in[i].bytes) {
-                VkBufferCopy cp{0, 0, in[i].bytes};
+        for (size_t i = 0; i < nb; ++i)
+            if (bufs[i].in && bufs[i].bytes) {
+                VkBufferCopy cp{0, 0, bufs[i].bytes};
                 vkCmdCopyBuffer(c, s->stage[i].buf, s->dev[i].buf, 1, &cp);
             }
         VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -609,17 +622,24 @@ bool run(const char* kernel, const std::vector<In>& in, const std::vector<Out>& 
         vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
         vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipe);
         vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout, 0, 1, &set, 0, nullptr);
-        unsigned char pc[128] = {};
-        if (push && pushBytes) std::memcpy(pc, push, pushBytes);
-        vkCmdPushConstants(c, p.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 128, pc);
-        vkCmdDispatch(c, gx, gy, gz);
+        for (size_t k = 0; k < ds.size(); ++k) {
+            if (k > 0) {  // each dispatch sees what the one before wrote
+                VkMemoryBarrier cb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                cb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                cb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &cb, 0, nullptr,
+                                     0, nullptr);
+            }
+            vkCmdPushConstants(c, p.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 128, ds[k].push);
+            vkCmdDispatch(c, ds[k].gx, ds[k].gy, ds[k].gz);
+        }
         mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
-        for (size_t i = 0; i < out.size(); ++i)
-            if (out[i].bytes) {
-                VkBufferCopy cp{0, 0, out[i].bytes};
-                vkCmdCopyBuffer(c, s->dev[in.size() + i].buf, s->stage[in.size() + i].buf, 1, &cp);
+        for (size_t i = 0; i < nb; ++i)
+            if (bufs[i].out && bufs[i].bytes) {
+                VkBufferCopy cp{0, 0, bufs[i].bytes};
+                vkCmdCopyBuffer(c, s->dev[i].buf, s->stage[i].buf, 1, &cp);
             }
         mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -634,15 +654,16 @@ bool run(const char* kernel, const std::vector<In>& in, const std::vector<Out>& 
             check(vkQueueSubmit(d.queue, 1, &si, s->fence), "vkQueueSubmit");
         }
         check(vkWaitForFences(d.device, 1, &s->fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
-        for (size_t i = 0; i < out.size(); ++i) {
-            Buf& sb = s->stage[in.size() + i];
+        for (size_t i = 0; i < nb; ++i) {
+            if (!bufs[i].out) continue;
+            Buf& sb = s->stage[i];
             if (!sb.coherent) {
                 VkMappedMemoryRange mr{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
                 mr.memory = sb.mem;
                 mr.size = VK_WHOLE_SIZE;
                 vkInvalidateMappedMemoryRanges(d.device, 1, &mr);
             }
-            if (out[i].bytes) std::memcpy(out[i].data, sb.map, out[i].bytes);
+            if (bufs[i].bytes) std::memcpy(bufs[i].out, sb.map, bufs[i].bytes);
         }
         ++gRuns;
         return true;

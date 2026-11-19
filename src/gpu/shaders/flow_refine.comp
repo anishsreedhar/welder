@@ -1,0 +1,158 @@
+// The optical flow solver's refine step (nodes/Retime.cpp, Solver::refine) on the GPU, one pass
+// per dispatch (gpu::runSequence runs them all in one submission): edge weights, warp, image
+// derivatives, robust weights, red-black SOR sweeps, update and median. Each pass follows the CPU
+// code operation by operation; red-black SOR only reads the other colour, so it is the same
+// sweep in parallel.
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer A { float a[]; };
+layout(std430, set = 0, binding = 1) readonly buffer B { float b[]; };
+layout(std430, set = 0, binding = 2) buffer U { float u[]; };
+layout(std430, set = 0, binding = 3) buffer V { float v[]; };
+layout(std430, set = 0, binding = 4) buffer S { float s[]; };  // the work planes, N floats each
+
+layout(push_constant) uniform P {
+    int mode;     // 0 edge weights, 1 warp, 2 derivatives, 3 robust weights, 4 SOR (one colour), 5 update, 6 median
+    int w, h;
+    int colour;   // SOR: 0 or 1
+    int flicker;  // gradient constancy on
+    int medianR;  // 1 (3x3) or 2 (5x5)
+    float alpha;
+} p;
+
+// the planes in s
+const int WE = 0, BW = 1, VALID = 2, IX = 3, IY = 4, IT = 5, IXX = 6, IXY = 7, IYY = 8, IXT = 9, IYT = 10, DU = 11, DV = 12,
+          DD = 13, GG = 14, SS = 15, TU = 16, TV = 17;
+
+int N() { return p.w * p.h; }
+float pl(int k, int i) { return s[k * N() + i]; }
+void set(int k, int i, float x) { s[k * N() + i] = x; }
+int idx(int x, int y) { return clamp(y, 0, p.h - 1) * p.w + clamp(x, 0, p.w - 1); }
+float aAt(int x, int y) { return a[idx(x, y)]; }
+float bwAt(int x, int y) { return s[BW * N() + idx(x, y)]; }
+
+float sampleB(float x, float y) {
+    x = clamp(x, 0.0, float(p.w - 1));
+    y = clamp(y, 0.0, float(p.h - 1));
+    int x0 = int(x), y0 = int(y);
+    int x1 = min(x0 + 1, p.w - 1), y1 = min(y0 + 1, p.h - 1);
+    float fx = x - float(x0), fy = y - float(y0);
+    float r00 = b[y0 * p.w + x0], r01 = b[y0 * p.w + x1], r10 = b[y1 * p.w + x0], r11 = b[y1 * p.w + x1];
+    float ta = r00 + (r01 - r00) * fx;
+    float tb = r10 + (r11 - r10) * fx;
+    return ta + (tb - ta) * fy;
+}
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y);
+    if (x >= p.w || y >= p.h) return;
+    int i = y * p.w + x;
+    const float eps = 0.001, epsS = 0.001, omega = 1.8;
+    float gamma = p.flicker != 0 ? 2.0 : 0.0;
+    if (p.mode == 0) {
+        float gx = 0.5 * (aAt(x + 1, y) - aAt(x - 1, y));
+        float gy = 0.5 * (aAt(x, y + 1) - aAt(x, y - 1));
+        set(WE, i, max(0.05, exp(-5.0 * sqrt(gx * gx + gy * gy))));
+    } else if (p.mode == 1) {
+        float sx = float(x) + u[i], sy = float(y) + v[i];
+        set(VALID, i, sx > -0.5 && sy > -0.5 && sx < float(p.w) - 0.5 && sy < float(p.h) - 0.5 ? 1.0 : 0.0);
+        set(BW, i, sampleB(sx, sy));
+    } else if (p.mode == 2) {
+        float ax = 0.5 * (aAt(x + 1, y) - aAt(x - 1, y));
+        float ay = 0.5 * (aAt(x, y + 1) - aAt(x, y - 1));
+        float bx = 0.5 * (bwAt(x + 1, y) - bwAt(x - 1, y));
+        float by = 0.5 * (bwAt(x, y + 1) - bwAt(x, y - 1));
+        set(IX, i, 0.5 * (ax + bx));
+        set(IY, i, 0.5 * (ay + by));
+        float c = bwAt(x, y);
+        set(IT, i, c - a[i]);
+        if (gamma > 0.0) {
+            set(IXX, i, bwAt(x + 1, y) - 2.0 * c + bwAt(x - 1, y));
+            set(IYY, i, bwAt(x, y + 1) - 2.0 * c + bwAt(x, y - 1));
+            set(IXY, i, 0.25 * (bwAt(x + 1, y + 1) - bwAt(x - 1, y + 1) - bwAt(x + 1, y - 1) + bwAt(x - 1, y - 1)));
+            set(IXT, i, bx - ax);
+            set(IYT, i, by - ay);
+        }
+        set(DU, i, 0.0);
+        set(DV, i, 0.0);
+    } else if (p.mode == 3) {
+        float du = pl(DU, i), dv = pl(DV, i);
+        if (pl(VALID, i) == 0.0) {
+            set(DD, i, 0.0);
+            set(GG, i, 0.0);
+        } else {
+            float e = pl(IT, i) + pl(IX, i) * du + pl(IY, i) * dv;
+            set(DD, i, 0.5 / sqrt(e * e + eps * eps));
+            if (gamma > 0.0) {
+                float ex = pl(IXT, i) + pl(IXX, i) * du + pl(IXY, i) * dv;
+                float ey = pl(IYT, i) + pl(IXY, i) * du + pl(IYY, i) * dv;
+                set(GG, i, gamma * 0.5 / sqrt(ex * ex + ey * ey + eps * eps));
+            }
+        }
+        int xr = min(x + 1, p.w - 1), yu = min(y + 1, p.h - 1);
+        int ir = y * p.w + xr, iu = yu * p.w + x;
+        float uc = u[i] + du, vc = v[i] + dv;
+        float ux = (u[ir] + pl(DU, ir)) - uc;
+        float uy = (u[iu] + pl(DU, iu)) - uc;
+        float vx = (v[ir] + pl(DV, ir)) - vc;
+        float vy = (v[iu] + pl(DV, iu)) - vc;
+        set(SS, i, p.alpha * pl(WE, i) * 0.5 / sqrt(ux * ux + uy * uy + vx * vx + vy * vy + epsS * epsS));
+    } else if (p.mode == 4) {
+        if (((x + y) & 1) != p.colour) return;
+        float sum = 0.0, ru = 0.0, rv = 0.0;
+        float s0 = pl(SS, i);
+        for (int k = 0; k < 4; ++k) {
+            int j;
+            if (k == 0) { if (x == 0) continue; j = i - 1; }
+            else if (k == 1) { if (x + 1 >= p.w) continue; j = i + 1; }
+            else if (k == 2) { if (y == 0) continue; j = i - p.w; }
+            else { if (y + 1 >= p.h) continue; j = i + p.w; }
+            float sw = 0.5 * (s0 + pl(SS, j));
+            sum += sw;
+            ru += sw * (u[j] + pl(DU, j) - u[i]);
+            rv += sw * (v[j] + pl(DV, j) - v[i]);
+        }
+        float d = pl(DD, i), Ix = pl(IX, i), Iy = pl(IY, i), It = pl(IT, i);
+        float a11 = d * Ix * Ix + sum, a12 = d * Ix * Iy, a22 = d * Iy * Iy + sum;
+        float b1 = -d * Ix * It + ru, b2 = -d * Iy * It + rv;
+        if (gamma > 0.0) {
+            float g = pl(GG, i), Ixx = pl(IXX, i), Ixy = pl(IXY, i), Iyy = pl(IYY, i), Ixt = pl(IXT, i), Iyt = pl(IYT, i);
+            a11 += g * (Ixx * Ixx + Ixy * Ixy);
+            a12 += g * (Ixx * Ixy + Ixy * Iyy);
+            a22 += g * (Ixy * Ixy + Iyy * Iyy);
+            b1 -= g * (Ixx * Ixt + Ixy * Iyt);
+            b2 -= g * (Ixy * Ixt + Iyy * Iyt);
+        }
+        float du = pl(DU, i), dv = pl(DV, i);
+        if (a11 > 1e-12) du = (1.0 - omega) * du + omega * (b1 - a12 * dv) / a11;
+        if (a22 > 1e-12) dv = (1.0 - omega) * dv + omega * (b2 - a12 * du) / a22;
+        set(DU, i, du);
+        set(DV, i, dv);
+    } else if (p.mode == 5) {
+        set(TU, i, u[i] + clamp(pl(DU, i), -2.0, 2.0));
+        set(TV, i, v[i] + clamp(pl(DV, i), -2.0, 2.0));
+    } else if (p.mode == 6) {
+        int r = p.medianR;
+        for (int c = 0; c < 2; ++c) {
+            int k = c == 0 ? TU : TV;
+            float buf[25];
+            int n = 0;
+            for (int j = -r; j <= r; ++j)
+                for (int q = -r; q <= r; ++q) buf[n++] = s[k * N() + idx(x + q, y + j)];
+            // the middle value (insertion sort: 9 or 25 values)
+            for (int m = 1; m < n; ++m) {
+                float t = buf[m];
+                int q = m - 1;
+                while (q >= 0 && buf[q] > t) {
+                    buf[q + 1] = buf[q];
+                    --q;
+                }
+                buf[q + 1] = t;
+            }
+            float med = r > 0 ? buf[n / 2] : s[k * N() + i];
+            if (c == 0) u[i] = med;
+            else v[i] = med;
+        }
+    }
+}

@@ -1,0 +1,99 @@
+// FlowBreath (nodes/PsychicNodes.cpp) on the GPU: the curl-noise push, carried by the anchor
+// position maps, weighted by detail lock and the mask, then the source resampled. Output pixel
+// (i, j) is image pixel (rx1 + i, ry1 + j); the source buffer starts at image (sx1, sy1).
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { float src[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Map { int chmap[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Prm { float prm[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Det { float det[]; };   // detail mask per output pixel
+layout(std430, set = 0, binding = 4) readonly buffer Msk { float msk[]; };   // mask x mix per output pixel
+layout(std430, set = 0, binding = 5) readonly buffer CurX { float curX[]; };  // position maps: dx, dy grids
+layout(std430, set = 0, binding = 6) readonly buffer CurY { float curY[]; };
+layout(std430, set = 0, binding = 7) readonly buffer PrvX { float prvX[]; };
+layout(std430, set = 0, binding = 8) readonly buffer PrvY { float prvY[]; };
+layout(std430, set = 0, binding = 9) writeonly buffer Dst { float dst[]; };
+
+layout(push_constant) uniform P {
+    int sw, sh, sn;
+    int ow, oh, on;
+    int rx1, ry1, sx1, sy1;
+    int gw, gh;         // position map grid
+    int seed, kind, view;
+    int flags;          // 1 cur map, 2 prev map, 4 detail, 8 mask
+} p;
+// prm: 0 invNoise (1 / (scale * flow_scale)), 1 z, 2 octaves, 3 strength (render px), 4 adhesion,
+// 5 wPrev, 6 lock, 7 norm, 8 maxPush, 9 B, 10 C, 11 map origin x, 12 map origin y, 13 cell,
+// 14..17 edge clamp box (image coords: x1, y1, x2, y2)
+
+#include "psy_common.glsl"
+#include "psy_sample.glsl"
+
+vec2 mapAt(bool prev, float X, float Y) {
+    float fx = clamp((X - prm[11]) / prm[13] - 0.5, 0.0, float(p.gw - 1));
+    float fy = clamp((Y - prm[12]) / prm[13] - 0.5, 0.0, float(p.gh - 1));
+    int x0 = int(fx), y0 = int(fy), x1 = min(x0 + 1, p.gw - 1), y1 = min(y0 + 1, p.gh - 1);
+    float tx = fx - float(x0), ty = fy - float(y0);
+    int i00 = y0 * p.gw + x0, i10 = y0 * p.gw + x1, i01 = y1 * p.gw + x0, i11 = y1 * p.gw + x1;
+    vec2 a00, a10, a01, a11;
+    if (prev) {
+        a00 = vec2(prvX[i00], prvY[i00]);
+        a10 = vec2(prvX[i10], prvY[i10]);
+        a01 = vec2(prvX[i01], prvY[i01]);
+        a11 = vec2(prvX[i11], prvY[i11]);
+    } else {
+        a00 = vec2(curX[i00], curY[i00]);
+        a10 = vec2(curX[i10], curY[i10]);
+        a01 = vec2(curX[i01], curY[i01]);
+        a11 = vec2(curX[i11], curY[i11]);
+    }
+    vec2 a = a00 + (a10 - a00) * tx, b = a01 + (a11 - a01) * tx;
+    return a + (b - a) * ty;
+}
+
+vec2 pushAt(bool has, bool prev, float X, float Y) {
+    float qx = X, qy = Y;
+    if (has) {
+        vec2 o = mapAt(prev, X, Y);
+        qx += prm[4] * o.x;
+        qy += prm[4] * o.y;
+    }
+    return psyCurl2(qx * prm[0], qy * prm[0], prm[1], uint(p.seed), prm[2]);
+}
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x), j = int(gl_GlobalInvocationID.y);
+    if (i >= p.ow || j >= p.oh) return;
+    int o = (j * p.ow + i) * p.on;
+    float X = float(p.rx1 + i) + 0.5, Y = float(p.ry1 + j) + 0.5;
+    float dm = (p.flags & 4) != 0 ? det[j * p.ow + i] : 1.0;
+    if (p.view == 2) {  // detail mask
+        for (int c = 0; c < p.on; ++c) dst[o + c] = dm;
+        return;
+    }
+    vec2 d = pushAt((p.flags & 1) != 0, false, X, Y);
+    if ((p.flags & 2) != 0) {
+        vec2 dp = pushAt(true, true, X, Y);
+        d += (dp - d) * prm[5];
+    }
+    float lock = prm[6];
+    float w = ((1.0 - lock) + lock * dm) * ((p.flags & 8) != 0 ? msk[j * p.ow + i] : 1.0);
+    float px = d.x * prm[7] * prm[3] * w, py = d.y * prm[7] * prm[3] * w;
+    float len = sqrt(px * px + py * py);
+    if (len > prm[8]) {
+        px *= prm[8] / len;
+        py *= prm[8] / len;
+    }
+    if (p.view == 1) {  // displacement
+        float s = prm[3] > 0.0 ? 0.5 / prm[3] : 0.0;
+        vec4 v = vec4(0.5 + px * s, 0.5 + py * s, 0.5, 1.0);
+        for (int c = 0; c < p.on; ++c) dst[o + c] = c < 4 ? v[c] : 0.0;
+        return;
+    }
+    float sx = clamp(X - px, prm[14] + 0.5, prm[16] - 0.5) - float(p.sx1);
+    float sy = clamp(Y - py, prm[15] + 0.5, prm[17] - 0.5) - float(p.sy1);
+    PsyTaps t = psyTaps(sx, sy, p.sw, p.sh, p.kind, prm[9], prm[10], false);
+    for (int c = 0; c < p.on; ++c) dst[o + c] = chmap[c] >= 0 ? psyGather(t, p.sw, p.sh, p.sn, chmap[c], false) : 0.0;
+}

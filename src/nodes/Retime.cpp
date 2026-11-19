@@ -4,11 +4,13 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <thread>
 
 #include "../core/Comp.h"
 #include "../core/Node.h"
+#include "../gpu/Gpu.h"
 #include "NodeUtils.h"
 
 namespace strata::retime {
@@ -334,8 +336,49 @@ struct Solver {
         if (o.cancelled && o.cancelled()) throw RenderCancelled();
     }
 
+    // The same refine on the GPU (gpu/shaders/flow_refine.comp): every pass of this level in one
+    // submission. False when there's no GPU, the level is small, or the call failed.
+    bool refineGpu(const Plane& a, const Plane& b, Plane& u, Plane& v) const {
+        const int w = a.w, h = a.h;
+        if ((size_t)w * h < 4096 || !gpu::available()) return false;
+        struct Push {
+            int mode, w, h, colour, flicker, medianR;
+            float alpha;
+        };
+        const uint32_t gx = (uint32_t)(w + 15) / 16, gy = (uint32_t)(h + 15) / 16;
+        std::vector<gpu::Dispatch> ds;
+        auto pass = [&](int mode, int colour = 0) {
+            const Push pc{mode, w, h, colour, o.flicker ? 1 : 0, medianR, (float)alpha};
+            gpu::Dispatch d;
+            std::memcpy(d.push, &pc, sizeof pc);
+            d.gx = gx, d.gy = gy;
+            ds.push_back(d);
+        };
+        pass(0);
+        for (int k = 0; k < warps; ++k) {
+            pass(1);
+            pass(2);
+            for (int fp = 0; fp < fixedPoint; ++fp) {
+                pass(3);
+                for (int it = 0; it < sor; ++it) {
+                    pass(4, 0);
+                    pass(4, 1);
+                }
+            }
+            pass(5);
+            pass(6);
+        }
+        const size_t N = (size_t)w * h, bytes = N * sizeof(float);
+        return gpu::runSequence("flow_refine",
+                                {{a.v.data(), nullptr, bytes}, {b.v.data(), nullptr, bytes}, {u.v.data(), u.v.data(), bytes},
+                                 {v.v.data(), v.v.data(), bytes}, {nullptr, nullptr, 18 * bytes}},
+                                ds);
+    }
+
     // Refine u, v (pixels of this level) so that b(x + u) matches a(x).
     void refine(const Plane& a, const Plane& b, Plane& u, Plane& v) const {
+        cancelCheck();
+        if (refineGpu(a, b, u, v)) return;
         const int w = a.w, h = a.h;
         const size_t N = (size_t)w * h;
         const float eps = 0.001f, epsS = 0.001f, omega = 1.8f;

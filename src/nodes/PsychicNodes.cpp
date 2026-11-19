@@ -25,6 +25,7 @@
 #include "../core/Comp.h"
 #include "../color/OkLab.h"
 #include "../core/Engine.h"
+#include "../gpu/Gpu.h"
 #include "DetailMask.h"
 #include "MotionHistory.h"
 #include "NodeUtils.h"
@@ -68,6 +69,38 @@ std::vector<int> channelMap(const Image& src, const Image& out) {
     for (int c = 0; c < out.nch(); ++c) m[c] = src.ch(out.channels[c]);
     return m;
 }
+
+// ---------------------------------------------------------------- GPU helpers
+// Each node renders a tile on the GPU when there is one (psy_*.comp, the same maths as the CPU code
+// below, step by step) and falls back to the CPU code when there isn't, the tile is tiny, the
+// filter has no GPU version, or the call fails.
+bool gpuWorth(const Box& R, const Image& out) { return out.bounds == R && R.area() >= 4096 && gpu::available(); }
+
+// 1 bilinear, 2 BC-cubic (any B, C), 0 no GPU version (impulse, lanczos: the CPU does those)
+int gpuFilterKind(const Filter& f) { return f.kind == Filter::Bilinear ? 1 : f.kind == Filter::BC ? 2 : 0; }
+
+// A stand-in for an unused buffer (a binding must have something behind it).
+const float kGpuNone[4] = {0, 0, 0, 0};
+gpu::In gpuIn(const std::vector<float>& v) { return v.empty() ? gpu::In{kGpuNone, sizeof kGpuNone} : gpu::In{v.data(), v.size() * sizeof(float)}; }
+gpu::In gpuIn(const std::vector<int>& v) { return v.empty() ? gpu::In{kGpuNone, sizeof kGpuNone} : gpu::In{v.data(), v.size() * sizeof(int)}; }
+
+// MaskMix's weight per pixel of R (empty when it is 1 everywhere).
+std::vector<float> maskWeights(const MaskMix& mm, const Box& R) {
+    std::vector<float> w;
+    if (!mm.active()) return w;
+    w.resize((size_t)R.area());
+    for (int y = R.y1; y < R.y2; ++y)
+        for (int x = R.x1; x < R.x2; ++x) w[(size_t)(y - R.y1) * R.width() + (x - R.x1)] = mm.weight(x, y);
+    return w;
+}
+
+// The edge clamp box for a kernel (image coordinates): "off" is a box nothing reaches.
+void edgeBox(const EdgeClamp& ec, std::vector<float>& prm) {
+    if (ec.on) prm.insert(prm.end(), {(float)(ec.x1 - 0.5), (float)(ec.y1 - 0.5), (float)(ec.x2 + 0.5), (float)(ec.y2 + 0.5)});
+    else prm.insert(prm.end(), {-1e9f, -1e9f, 1e9f, 1e9f});
+}
+
+uint32_t groups(int n) { return (uint32_t)(n + 15) / 16; }
 
 // ================================================================== FlowBreath
 // curl2's speed for one octave is about this on average (RMS), so "strength" means pixels
@@ -173,6 +206,29 @@ public:
         const EdgeClamp edge(e.dod(input(0), f), src->bounds);
         const float norm = 1.0f / kCurlRms;
         const float maxPush = kMaxPush * strength;
+        if (const int kind = gpuFilterKind(fl); kind && gpuWorth(R, out)) {
+            const PosMap* pc = cur.get();
+            const PosMap* pp = prev && cur && prev->gw == cur->gw && prev->gh == cur->gh ? prev.get() : nullptr;
+            if (!prev || pp) {
+                const std::vector<float> mw = maskWeights(mm, R);
+                const int vw = view == "detail mask" ? 2 : view == "displacement" ? 1 : 0;
+                struct Push {
+                    int sw, sh, sn, ow, oh, on, rx1, ry1, sx1, sy1, gw, gh, seed, kind, view, flags;
+                } P{src->bounds.width(), src->bounds.height(), src->nch(), R.width(), R.height(), out.nch(), R.x1, R.y1,
+                    src->bounds.x1, src->bounds.y1, pc ? pc->gw : 0, pc ? pc->gh : 0, (int)seed, kind, vw,
+                    (pc ? 1 : 0) | (pp ? 2 : 0) | (detail.empty() ? 0 : 4) | (mw.empty() ? 0 : 8)};
+                std::vector<float> prm = {(float)(1.0 / (sc * size)), z, octaves, strength, (float)adh, wPrev, (float)lock, norm,
+                                          maxPush, fl.B, fl.C, pc ? (float)pc->D.x1 : 0.0f, pc ? (float)pc->D.y1 : 0.0f,
+                                          pc ? (float)pc->cell : 1.0f};
+                edgeBox(edge, prm);
+                static const std::vector<float> none;
+                if (gpu::run("psy_breath",
+                             {{src->data.data(), src->bytes()}, gpuIn(map), gpuIn(prm), gpuIn(detail), gpuIn(mw),
+                              gpuIn(pc ? pc->dx : none), gpuIn(pc ? pc->dy : none), gpuIn(pp ? pp->dx : none), gpuIn(pp ? pp->dy : none)},
+                             {{out.data.data(), out.bytes()}}, &P, sizeof P, groups(P.ow), groups(P.oh)))
+                    return;
+            }
+        }
         auto push = [&](const PosMap* pm, double X, double Y, float* d) {
             double qx = X, qy = Y;
             if (pm) {
@@ -382,6 +438,22 @@ public:
         const bool weightView = params.str("view", "result") == "weight";
         const Filter fl = parseFilter(params.str("filter", "cubic"));
         const double W = fb.width(), H = fb.height();
+        if (const int kind = gpuFilterKind(fl); kind && gpuWorth(R, out)) {
+            const std::vector<float> mw = maskWeights(mm, R);
+            const int dv = drive == "detail" ? 0 : drive == "luminance" ? 1 : drive == "everywhere" ? 2 : 3;
+            struct Push {
+                int sw, sh, sn, ow, oh, on, rx1, ry1, sx1, sy1, iters, drive, view, kind, iR, iG, iB, flags, fbx1, fby1, fbx2, fby2;
+            } P{src->bounds.width(), src->bounds.height(), src->nch(), R.width(), R.height(), out.nch(), R.x1, R.y1, src->bounds.x1,
+                src->bounds.y1, iters, dv, weightView ? 1 : 0, kind, iR, iG, iB, (tile > 0 ? 1 : 0) | (mw.empty() ? 0 : 2),
+                fb.x1, fb.y1, fb.x2, fb.y2};
+            if (fb.empty()) P.fbx1 = P.fby1 = P.fbx2 = P.fby2 = 0;
+            const std::vector<float> prm = {(float)sc,    (float)seg,    (float)tile, (float)cr,   (float)sr,
+                                            (float)cxy[0], (float)cxy[1], (float)k,    (float)off,  (float)back,
+                                            (float)th,    (float)soft,   fl.B,        fl.C};
+            if (gpu::run("psy_fold", {{src->data.data(), src->bytes()}, gpuIn(map), gpuIn(prm), gpuIn(detail), gpuIn(mw)},
+                         {{out.data.data(), out.bytes()}}, &P, sizeof P, groups(P.ow), groups(P.oh)))
+                return;
+        }
         auto mirror = [](double v, double lo, double len) {
             if (len <= 1) return lo + 0.5;
             const double t = v - lo, m = t - 2 * len * std::floor(t / (2 * len));
@@ -502,6 +574,21 @@ public:
         so.blackOutside = false;
         const int n = out.nch();
         const EdgeClamp edge(e.dod(input(0), f), src->bounds);
+        const bool phase = amp != 0 || boost != 1;  // without: R / B split only (no trip through OKLCH)
+        if (gpuWorth(R, out)) {
+            const std::vector<float> mw = maskWeights(mm, R);
+            struct Push {
+                int sw, sh, sn, ow, oh, on, rx1, ry1, sx1, sy1, oR, oG, oB, seed, flags;
+            } P{src->bounds.width(), src->bounds.height(), src->nch(), R.width(), R.height(), n, R.x1, R.y1, src->bounds.x1,
+                src->bounds.y1, oR, oG, oB, (int)seed, (mw.empty() ? 0 : 1) | (phase ? 2 : 0)};
+            std::vector<float> prm = {split,         (float)(1.0 / (sc * size)), z,           kCurlRms, kMaxPush * std::fabs(split),
+                                      (float)freq,   (float)couple,              (float)std::fmod(2 * kPi * speed * secs, 2 * kPi),
+                                      (float)amp,    (float)boost};
+            edgeBox(edge, prm);
+            if (gpu::run("psy_spectral", {{src->data.data(), src->bytes()}, gpuIn(map), gpuIn(prm), gpuIn(mw)},
+                         {{out.data.data(), out.bytes()}}, &P, sizeof P, groups(P.ow), groups(P.oh)))
+                return;
+        }
         std::vector<float> tmp(n);
         for (int y = R.y1; y < R.y2; ++y) {
             Engine::cancelPoint();
@@ -527,6 +614,12 @@ public:
                     sample(*src, bx, by, fl, tmp.data(), map, so);
                     rgb[2] = tmp[oB];
                 }
+                const float w = mm.weight(x, y);
+                if (!phase) {
+                    o[oR] = keep[0] + (rgb[0] - keep[0]) * w;
+                    o[oB] = keep[2] + (rgb[2] - keep[2]) * w;
+                    continue;
+                }
                 // OKLCH phase: hue turns with a phase set by lightness (coupling) and time; L is kept
                 double in[3] = {rgb[0], rgb[1], rgb[2]}, lab[3], lch[3];
                 color::oklab::fromLinear(in, lab);
@@ -537,7 +630,6 @@ public:
                 color::oklab::fromLch(lch, lab);
                 double res[3];
                 color::oklab::toLinear(lab, res);
-                const float w = mm.weight(x, y);
                 o[oR] = keep[0] + ((float)res[0] - keep[0]) * w;
                 o[oG] = keep[1] + ((float)res[1] - keep[1]) * w;
                 o[oB] = keep[2] + ((float)res[2] - keep[2]) * w;
@@ -592,41 +684,73 @@ public:
         if (oR < 0 || oG < 0 || oB < 0) return;
         const int W = R.width(), H = R.height(), N = (int)frames.size();
         std::vector<float> trail((size_t)W * H * 4, 0.0f);
-        for (int i = 0; i < N; ++i) {
-            Engine::cancelPoint();
-            const int k = i + 1;  // frames back
-            const double wk = linear ? std::max(0.0, 1.0 - (double)k / (N + 1)) : std::pow(decay, k);
-            if (wk <= 1e-4) break;
-            ImagePtr im = a.fetch(input(0), R, frames[i]);
-            history::Motion mv;
-            if (input(1)) {
-                ImagePtr vi = a.fetch(input(1), R, frames[i]);
-                mv = history::readMotion(*vi, R, history::Direction::Forward);
+        // On the GPU: every earlier frame of the tile goes up at once (rgba, speed) and the kernel
+        // sums the trail. On the CPU (or if that fails): frame by frame, below.
+        auto accumulate = [&](bool onGpu) {
+            std::vector<float> gSrc, gSpd, gPrm;
+            int gN = 0;
+            if (onGpu) {
+                gPrm = {(float)(vth - vsoft / 2), (float)(vth + vsoft / 2), (float)tint[0], (float)tint[1], (float)tint[2], 0, 0, 0};
+                gSrc.reserve((size_t)W * H * 4 * N);
             }
-            // this step's tint: a hue turn of k x phase shift in OKLCH, times the trail colour
-            const double turn = shift * k;
-            const double ct = std::cos(turn), st = std::sin(turn);
-            const int iR = im->ch("R"), iG = im->ch("G"), iB = im->ch("B"), iA = im->ch("A");
-            if (iR < 0 || iG < 0 || iB < 0) continue;
-            for (int y = R.y1; y < R.y2; ++y)
-                for (int x = R.x1; x < R.x2; ++x) {
-                    float m = 1;
-                    if (input(1)) m = smoothstepf(vth - vsoft / 2, vth + vsoft / 2, mv.speed(x, y));
-                    if (m <= 0) continue;
-                    const float* p = im->bounds.contains(x, y) ? im->px(x, y) : nullptr;
-                    if (!p) continue;
-                    double rgb[3] = {p[iR], p[iG], p[iB]}, lab[3];
-                    if (turn != 0) {
-                        color::oklab::fromLinear(rgb, lab);
-                        const double a2 = lab[1] * ct - lab[2] * st, b2 = lab[1] * st + lab[2] * ct;
-                        lab[1] = a2, lab[2] = b2;
-                        color::oklab::toLinear(lab, rgb);
-                    }
-                    const float w = (float)(wk * m);
-                    float* t = trail.data() + ((size_t)(y - R.y1) * W + (x - R.x1)) * 4;
-                    for (int c = 0; c < 3; ++c) t[c] += (float)(rgb[c] * tint[c]) * w;
-                    t[3] += (iA >= 0 ? p[iA] : 1.0f) * w;
+            for (int i = 0; i < N; ++i) {
+                Engine::cancelPoint();
+                const int k = i + 1;  // frames back
+                const double wk = linear ? std::max(0.0, 1.0 - (double)k / (N + 1)) : std::pow(decay, k);
+                if (wk <= 1e-4) break;
+                ImagePtr im = a.fetch(input(0), R, frames[i]);
+                history::Motion mv;
+                if (input(1)) {
+                    ImagePtr vi = a.fetch(input(1), R, frames[i]);
+                    mv = history::readMotion(*vi, R, history::Direction::Forward);
                 }
+                // this step's tint: a hue turn of k x phase shift in OKLCH, times the trail colour
+                const double turn = shift * k;
+                const double ct = std::cos(turn), st = std::sin(turn);
+                const int iR = im->ch("R"), iG = im->ch("G"), iB = im->ch("B"), iA = im->ch("A");
+                if (iR < 0 || iG < 0 || iB < 0) continue;
+                if (onGpu) {
+                    for (int y = R.y1; y < R.y2; ++y)
+                        for (int x = R.x1; x < R.x2; ++x) {
+                            const float* p = im->bounds.contains(x, y) ? im->px(x, y) : nullptr;
+                            if (p) gSrc.insert(gSrc.end(), {p[iR], p[iG], p[iB], iA >= 0 ? p[iA] : 1.0f});
+                            else gSrc.insert(gSrc.end(), {0.0f, 0.0f, 0.0f, 0.0f});
+                            if (input(1)) gSpd.push_back(mv.speed(x, y));
+                        }
+                    gPrm.insert(gPrm.end(), {(float)wk, (float)ct, (float)st});
+                    ++gN;
+                    continue;
+                }
+                for (int y = R.y1; y < R.y2; ++y)
+                    for (int x = R.x1; x < R.x2; ++x) {
+                        float m = 1;
+                        if (input(1)) m = smoothstepf(vth - vsoft / 2, vth + vsoft / 2, mv.speed(x, y));
+                        if (m <= 0) continue;
+                        const float* p = im->bounds.contains(x, y) ? im->px(x, y) : nullptr;
+                        if (!p) continue;
+                        double rgb[3] = {p[iR], p[iG], p[iB]}, lab[3];
+                        if (turn != 0) {
+                            color::oklab::fromLinear(rgb, lab);
+                            const double a2 = lab[1] * ct - lab[2] * st, b2 = lab[1] * st + lab[2] * ct;
+                            lab[1] = a2, lab[2] = b2;
+                            color::oklab::toLinear(lab, rgb);
+                        }
+                        const float w = (float)(wk * m);
+                        float* t = trail.data() + ((size_t)(y - R.y1) * W + (x - R.x1)) * 4;
+                        for (int c = 0; c < 3; ++c) t[c] += (float)(rgb[c] * tint[c]) * w;
+                        t[3] += (iA >= 0 ? p[iA] : 1.0f) * w;
+                    }
+            }
+            if (!onGpu || gN == 0) return true;
+            struct Push {
+                int ow, oh, n, flags;
+            } P{W, H, gN, (input(1) ? 1 : 0) | (shift != 0 ? 2 : 0)};
+            return gpu::run("psy_tracer", {gpuIn(gSrc), gpuIn(gSpd), gpuIn(gPrm)}, {{trail.data(), trail.size() * sizeof(float)}}, &P,
+                            sizeof P, groups(W), groups(H));
+        };
+        if (!(gpuWorth(R, out) && accumulate(true))) {
+            std::fill(trail.begin(), trail.end(), 0.0f);
+            accumulate(false);
         }
         // normalised by the weight of a full trail, so a pixel moving through every frame of it adds at
         // most one copy of itself (times intensity), however long the trail

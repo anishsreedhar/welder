@@ -9,5 +9,6 @@ void setEnabled(bool) {}
 bool enabled() { return false; }
 bool built() { return false; }
 bool run(const char*, const std::vector<In>&, const std::vector<Out>&, const void*, size_t, uint32_t, uint32_t, uint32_t) { return false; }
+bool runSequence(const char*, const std::vector<Buffer>&, const std::vector<Dispatch>&) { return false; }
 Stats stats() { return {}; }
 }  // namespace strata::gpu
