@@ -53,6 +53,9 @@
 #include "nodes/PrecompNode.h"
 #include "nodes/BlenderNode.h"
 #include "nodes/NoiseLib.h"
+#include "nodes/DetailMask.h"
+#include "nodes/MotionHistory.h"
+#include "color/OkLab.h"
 #include "nodes/Cryptomatte.h"
 #include "io/ExrIO.h"
 #include "core/Process.h"
@@ -7175,6 +7178,294 @@ Connections:  {
         CHECK(fs::exists(home / ".config" / "strata" / "settings.json"));  // the old folder is left alone
         fs::remove_all(home);
 #endif
+    });
+    // ---------------------------------------------------------------- Psychic Rendering: shared utilities
+    test("Psychic utils: OKLab / OKLCH round trip under 1e-5, white is L 1, hue turns keep L", [] {
+        namespace ok = color::oklab;
+        const double vals[] = {-0.1, 0.0, 0.002, 0.05, 0.18, 0.5, 0.9, 1.0, 4.0, 16.0};
+        double worst = 0, worstF = 0, worstLch = 0;
+        for (double r : vals)
+            for (double g : vals)
+                for (double b : vals) {
+                    const double rgb[3] = {r, g, b};
+                    double lab[3], back[3], lch[3], lab2[3];
+                    ok::fromLinear(rgb, lab);
+                    ok::toLinear(lab, back);
+                    for (int k = 0; k < 3; ++k) worst = std::max(worst, std::fabs(back[k] - rgb[k]) / std::max(1.0, std::fabs(rgb[k])));
+                    ok::toLch(lab, lch);
+                    ok::fromLch(lch, lab2);
+                    for (int k = 0; k < 3; ++k) worstLch = std::max(worstLch, std::fabs(lab2[k] - lab[k]));
+                    if (r >= 0 && r <= 1 && g >= 0 && g <= 1 && b >= 0 && b <= 1) {  // the float path, SDR
+                        const float fr[3] = {(float)r, (float)g, (float)b};
+                        float fl[3], fb[3];
+                        ok::fromLinear(fr, fl);
+                        ok::toLinear(fl, fb);
+                        for (int k = 0; k < 3; ++k) worstF = std::max(worstF, (double)std::fabs(fb[k] - fr[k]));
+                    }
+                }
+        std::printf("  OKLab round trip: double %.2e (relative), float %.2e, LCH %.2e\n", worst, worstF, worstLch);
+        CHECK(worst < 1e-5);
+        CHECK(worstF < 1e-5);
+        CHECK(worstLch < 1e-9);
+        const double white[3] = {1, 1, 1};
+        double wl[3];
+        ok::fromLinear(white, wl);
+        CHECK_NEAR(wl[0], 1.0, 1e-4);
+        CHECK_NEAR(wl[1], 0.0, 1e-4);
+        CHECK_NEAR(wl[2], 0.0, 1e-4);
+        // a hue turn in OKLCH leaves L alone
+        const double red[3] = {0.8, 0.1, 0.05};
+        double lab[3], lch[3], turned[3], rgb2[3], lab3[3];
+        ok::fromLinear(red, lab);
+        ok::toLch(lab, lch);
+        lch[2] += 2.0;
+        ok::fromLch(lch, turned);
+        ok::toLinear(turned, rgb2);
+        ok::fromLinear(rgb2, lab3);
+        CHECK_NEAR(lab3[0], lab[0], 1e-9);
+        CHECK(std::fabs(rgb2[0] - red[0]) > 0.1);  // and does change the colour
+    });
+
+    test("Psychic utils: simplex noise derivatives are exact, curl fields are divergence-free", [] {
+        std::mt19937 rng(7);
+        std::uniform_real_distribution<float> U(-40.0f, 40.0f);
+        double vmax = 0, derr = 0, dmag = 0;
+        for (int i = 0; i < 200000; ++i) {
+            const float x = U(rng), y = U(rng), z = U(rng);
+            vmax = std::max(vmax, (double)std::fabs(noise::simplex3d(x, y, z, 3).v));
+        }
+        for (int i = 0; i < 2000; ++i) {
+            const float x = U(rng), y = U(rng), z = U(rng), h = 1e-3f;
+            const auto d = noise::simplex3d(x, y, z, 11);
+            const double fx = (noise::simplex3d(x + h, y, z, 11).v - noise::simplex3d(x - h, y, z, 11).v) / (2.0 * h);
+            const double fy = (noise::simplex3d(x, y + h, z, 11).v - noise::simplex3d(x, y - h, z, 11).v) / (2.0 * h);
+            const double fz = (noise::simplex3d(x, y, z + h, 11).v - noise::simplex3d(x, y, z - h, 11).v) / (2.0 * h);
+            derr += std::fabs(fx - d.dx) + std::fabs(fy - d.dy) + std::fabs(fz - d.dz);
+            dmag += std::fabs(d.dx) + std::fabs(d.dy) + std::fabs(d.dz);
+        }
+        std::printf("  simplex: max |v| %.3f, derivative error %.2e of its size\n", vmax, derr / dmag);
+        CHECK(vmax > 0.6 && vmax <= 1.1);
+        CHECK(derr / dmag < 5e-3);
+        // divergence by central differences, relative to how fast the field changes
+        double div2 = 0, mag2 = 0, div3 = 0, mag3 = 0;
+        for (int i = 0; i < 2000; ++i) {
+            const float x = U(rng) * 0.1f, y = U(rng) * 0.1f, z = U(rng) * 0.1f, h = 2e-3f;
+            float a[2], b[2], c[2], d[2];
+            noise::curl2(x + h, y, z, 5, a, 3);
+            noise::curl2(x - h, y, z, 5, b, 3);
+            noise::curl2(x, y + h, z, 5, c, 3);
+            noise::curl2(x, y - h, z, 5, d, 3);
+            const double ux = (a[0] - b[0]) / (2.0 * h), vy = (c[1] - d[1]) / (2.0 * h);
+            div2 += std::fabs(ux + vy);
+            mag2 += std::fabs(ux) + std::fabs(vy);
+            float p[3][2][3];
+            const float o[3][3] = {{h, 0, 0}, {0, h, 0}, {0, 0, h}};
+            for (int k = 0; k < 3; ++k) {
+                noise::curl3(x + o[k][0], y + o[k][1], z + o[k][2], 9, p[k][0], 2);
+                noise::curl3(x - o[k][0], y - o[k][1], z - o[k][2], 9, p[k][1], 2);
+            }
+            double s = 0, m = 0;
+            for (int k = 0; k < 3; ++k) {
+                const double g = (p[k][0][k] - p[k][1][k]) / (2.0 * h);
+                s += g;
+                m += std::fabs(g);
+            }
+            div3 += std::fabs(s);
+            mag3 += m;
+        }
+        std::printf("  curl divergence: 2D %.2e, 3D %.2e (of the gradient)\n", div2 / mag2, div3 / mag3);
+        CHECK(div2 / mag2 < 1e-2);
+        CHECK(div3 / mag3 < 1e-2);
+        // fractional octaves blend smoothly: 2.0 and 2.001 are almost the same field
+        float q1[2], q2[2];
+        noise::curl2(1.3f, 2.7f, 0.4f, 1, q1, 2.0f);
+        noise::curl2(1.3f, 2.7f, 0.4f, 1, q2, 2.001f);
+        CHECK(std::fabs(q1[0] - q2[0]) + std::fabs(q1[1] - q2[1]) < 1e-2);
+    });
+
+    test("Psychic utils: detail mask is 0 on flat areas, high on texture, about the same at proxy", [] {
+        const int W = 96, H = 64;
+        Image flat(Box(0, 0, W, H), rgbaChannels()), tex(Box(0, 0, W, H), rgbaChannels()), half(Box(0, 0, W / 2, H / 2), rgbaChannels());
+        auto texAt = [](double X, double Y) { return 0.3 + 0.2 * std::sin(X * 0.4) * std::cos(Y * 0.35); };
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                float* f = flat.px(x, y);
+                f[0] = f[1] = f[2] = 0.4f, f[3] = 1;
+                float* t = tex.px(x, y);
+                // left half textured, right half flat
+                t[0] = t[1] = t[2] = (float)(x < W / 2 ? texAt(x + 0.5, y + 0.5) : 0.3), t[3] = 1;
+            }
+        for (int y = 0; y < H / 2; ++y)
+            for (int x = 0; x < W / 2; ++x) {
+                float* h = half.px(x, y);
+                double s = 0;
+                for (int j = 0; j < 2; ++j)
+                    for (int i = 0; i < 2; ++i) s += tex.px(2 * x + i, 2 * y + j)[0];
+                h[0] = h[1] = h[2] = (float)(s / 4), h[3] = 1;
+            }
+        fx::DetailOptions o;
+        auto mf = fx::detailMask(flat, flat.bounds, o);
+        auto mt = fx::detailMask(tex, tex.bounds, o);
+        double mxf = 0, left = 0, right = 0;
+        for (float v : mf) mxf = std::max(mxf, (double)v);
+        int nl = 0, nr = 0;
+        for (int y = 8; y < H - 8; ++y)
+            for (int x = 8; x < W - 8; ++x) {
+                if (x < W / 2 - 8) left += mt[(size_t)y * W + x], ++nl;
+                if (x >= W / 2 + 8) right += mt[(size_t)y * W + x], ++nr;
+            }
+        left /= nl, right /= nr;
+        fx::DetailOptions oh = o;
+        oh.scale = 0.5;
+        auto mh = fx::detailMask(half, half.bounds, oh);
+        double lh = 0;
+        int nh = 0;
+        for (int y = 4; y < H / 2 - 4; ++y)
+            for (int x = 4; x < W / 4 - 4; ++x) lh += mh[(size_t)y * (W / 2) + x], ++nh;
+        lh /= nh;
+        std::printf("  detail mask: flat %.4f, texture %.3f, flat side %.4f, texture at half res %.3f\n", mxf, left, right, lh);
+        CHECK(mxf < 1e-6);
+        CHECK(left > 0.5);
+        CHECK(right < 1e-6);
+        CHECK(std::fabs(lh - left) < 0.12);
+        // a tile gives the same values as the whole image (with the padding it asks for)
+        const Box tile(20, 10, 50, 40);
+        Image src(tile.pad(fx::detailPad(o), fx::detailPad(o)).intersect(tex.bounds), rgbaChannels());
+        src.copyFrom(tex);
+        auto mtile = fx::detailMask(src, tile, o);
+        double d = 0;
+        for (int y = tile.y1; y < tile.y2; ++y)
+            for (int x = tile.x1; x < tile.x2; ++x)
+                d = std::max(d, (double)std::fabs(mtile[(size_t)(y - tile.y1) * tile.width() + (x - tile.x1)] - mt[(size_t)y * W + x]));
+        CHECK(d < 1e-5);
+    });
+
+    test("Psychic utils: history chains are scrub-safe (100 back to 1 = a fresh render), cached forward, frame 0 has no past", [] {
+        struct S {
+            long sum;
+        };
+        int input5 = 5;  // what "the input" is at frame 5 (changed below)
+        auto stepHash = [&](int k) { return (uint64_t)(k == 5 ? input5 : k) * 0x9e3779b97f4a7c15ull; };
+        auto step = [&](int k, const S* prev) { return std::make_shared<const S>(S{(prev ? prev->sum : 0) + (k == 5 ? input5 : k)}); };
+        auto expect = [&](int anchor, int f) {
+            long s = 0;
+            for (int k = anchor; k <= std::max(anchor, f); ++k) s += k == 5 ? input5 : k;
+            return s;
+        };
+        history::Chain<S> ch(3);
+        CHECK(ch.at(1, 1, 42, stepHash, step)->sum == 1);  // the anchor: no past, just itself
+        CHECK(ch.at(1, -3, 42, stepHash, step)->sum == 1); // before the anchor: the anchor
+        for (int f = 2; f <= 10; ++f) CHECK(ch.at(1, f, 42, stepHash, step)->sum == expect(1, f));
+        CHECK(ch.stepsRun() == 10);  // playing forward: one step per frame
+        CHECK(ch.at(1, 100, 42, stepHash, step)->sum == expect(1, 100));
+        const long before = ch.stepsRun();
+        auto one = ch.at(1, 1, 42, stepHash, step);  // scrub back to 1
+        history::Chain<S> fresh(3);
+        CHECK(one->sum == fresh.at(1, 1, 42, stepHash, step)->sum);
+        CHECK(ch.stepsRun() - before <= 1);
+        CHECK(ch.at(1, 37, 42, stepHash, step)->sum == fresh.at(1, 37, 42, stepHash, step)->sum);
+        // an earlier input changes: the key changes and later frames rebuild
+        const uint64_t k0 = ch.key(1, 20, 42, stepHash);
+        input5 = 500;
+        CHECK(ch.key(1, 20, 42, stepHash) != k0);
+        CHECK(ch.at(1, 20, 42, stepHash, step)->sum == expect(1, 20));
+        CHECK(ch.key(1, 4, 42, stepHash) == fresh.key(1, 4, 42, stepHash));  // ...but not earlier ones
+        // a different base (resolution, proxy) is a different chain
+        CHECK(ch.key(1, 20, 43, stepHash) != ch.key(1, 20, 42, stepHash));
+        // re-anchoring
+        CHECK(history::anchorFor(1, 1, 24) == 1 && history::anchorFor(24, 1, 24) == 1 && history::anchorFor(25, 1, 24) == 25);
+        CHECK(history::anchorFor(-5, 1, 24) == 1 && history::anchorFor(1000, 1, 0) == 1);
+        CHECK(ch.at(history::anchorFor(30, 1, 24), 30, 42, stepHash, step)->sum == expect(25, 30));
+        // cancel between steps
+        bool threw = false;
+        try {
+            history::Chain<S> c2;
+            c2.at(1, 50, 42, stepHash, step, [] { return true; });
+        } catch (const RenderCancelled&) {
+            threw = true;
+        }
+        CHECK(threw);
+        // trails: what exists before the start is left out, frame `first` has nothing
+        CHECK(history::pastFrames(1, 8, 1).empty());
+        CHECK((history::pastFrames(5, 8, 1) == std::vector<int>{4, 3, 2, 1}));
+        CHECK((history::pastFrames(20, 3, 1) == std::vector<int>{19, 18, 17}));
+    });
+
+    test("Psychic utils: motion read from VectorGenerator on a translating pattern, first frame has no backward motion", [] {
+        const int W = 160, H = 96;
+        auto c = comp(json::array({
+            {{"name", "P"}, {"type", "Plasma"}, {"params", {{"size", 50}, {"complexity", 8}, {"cycles", 3}, {"speed", 0}}}},
+            {{"name", "M"}, {"type", "Transform"}, {"inputs", {"P"}}, {"params", {{"translate", {json{{"expr", "frame * 4"}}, json{{"expr", "frame * -2"}}}}}}},
+            {{"name", "VG"}, {"type", "VectorGenerator"}, {"inputs", {"M"}}},
+            {{"name", "FF"}, {"type", "FlowField"}, {"params", {{"base", "direction"}, {"angle", 0}, {"speed", 2}}}},
+        }), W, H);
+        c->firstFrame = 1;
+        c->lastFrame = 10;
+        auto vg = render(*c, "VG", 5);
+        const Box in(40, 24, W - 40, H - 24);
+        bool found = false;
+        auto fwd = history::readMotion(*vg, in, history::Direction::Forward, 1, 8, &found);
+        auto bwd = history::readMotion(*vg, in, history::Direction::Backward);
+        double fu = 0, fv = 0, bu = 0, sp = 0;
+        int n = 0;
+        for (int y = in.y1; y < in.y2; y += 3)
+            for (int x = in.x1; x < in.x2; x += 3) {
+                float u, v, bu1, bv1;
+                fwd.at(x + 0.5, y + 0.5, u, v);
+                bwd.at(x + 0.5, y + 0.5, bu1, bv1);
+                fu += u, fv += v, bu += bu1, sp += fwd.speed(x, y);
+                ++n;
+            }
+        fu /= n, fv /= n, bu /= n, sp /= n;
+        std::printf("  motion: forward (%.2f, %.2f) of (4, -2), backward.u %.2f, speed %.2f\n", fu, fv, bu, sp);
+        CHECK(found);
+        CHECK(std::fabs(fu - 4) < 0.4 && std::fabs(fv + 2) < 0.4);
+        CHECK(std::fabs(bu + 4) < 0.4);
+        CHECK(std::fabs(sp - std::sqrt(20.0)) < 0.5);
+        // the first frame: no frame before it, so backward motion is zero (not garbage)
+        auto first = render(*c, "VG", 1);
+        auto b1 = history::readMotion(*first, first->bounds, history::Direction::Backward);
+        double mx = 0;
+        for (size_t i = 0; i < b1.u.size(); ++i) mx = std::max(mx, (double)std::fabs(b1.u[i]) + std::fabs(b1.v[i]));
+        CHECK(mx < 1e-6);
+        // an RG flowmap (FlowField) reads as pixels per frame
+        auto ff = render(*c, "FF", 1);
+        bool rgFound = false;
+        auto rg = history::readMotion(*ff, Box(10, 10, 20, 20), history::Direction::Backward, 1, 8, &rgFound);
+        float ru, rv;
+        rg.at(15, 15, ru, rv);
+        CHECK(rgFound);
+        CHECK(ru > 0.5 && std::fabs(rv) < 0.2);
+        // nothing to read: zero motion and found = false
+        Image plain(Box(0, 0, 4, 4), {"Y"});
+        bool none = true;
+        auto z = history::readMotion(plain, plain.bounds, history::Direction::Forward, 1, 8, &none);
+        CHECK(!none && z.speed(1, 1) == 0);
+    });
+
+    test("Psychic utils: Feedback (the chain pattern) scrubs 9 back to 2 to the same pixels as a fresh render", [] {
+        json nodes = json::array({
+            {{"name", "M"}, {"type", "MovingScene"}},
+            {{"name", "FB"}, {"type", "Feedback"}, {"inputs", {"M"}}, {"params", {{"feedback", 0.8}, {"zoom", 1.05}, {"start", 1}}}},
+        });
+        auto c = comp(nodes, 64, 48);
+        EngineOptions eo;
+        Engine e(eo);
+        Node* fb = c->find("FB");
+        const Box B = fb->format(e, 1).box();
+        e.renderRegion(fb, 9, B);
+        auto scrubbed = e.renderRegion(fb, 2, B);
+        auto c2 = comp(nodes, 64, 48);
+        auto freshImg = render(*c2, "FB", 2);
+        double d = 0;
+        for (size_t i = 0; i < scrubbed->data.size(); ++i) d = std::max(d, (double)std::fabs(scrubbed->data[i] - freshImg->data[i]));
+        CHECK(d == 0);
+        // the start frame has no past: it is the source as is
+        auto f1 = render(*c2, "FB", 1), m1 = render(*c2, "M", 1);
+        double d1 = 0;
+        for (int y = 0; y < 48; ++y)
+            for (int x = 0; x < 64; ++x) d1 = std::max(d1, (double)std::fabs(px(f1, x, y, "R") - px(m1, x, y, "R")));
+        CHECK(d1 == 0);
     });
     std::printf("\n%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
