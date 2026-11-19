@@ -472,6 +472,7 @@ std::string status() {
 
 void setEnabled(bool on) { gEnabled = on; }
 bool enabled() { return gEnabled; }
+bool built() { return true; }
 
 Stats stats() { return {gRuns.load(), gFails.load()}; }
 

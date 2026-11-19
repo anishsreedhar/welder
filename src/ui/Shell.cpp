@@ -848,12 +848,15 @@ static void drawPreferences(App& app, UiState& ui) {
     ImGui::Spacing();
     {  // GPU processing (Vulkan): Transform & co. run on the graphics card when there is one
         bool on = gpu::enabled();
-        if (ImGui::Checkbox("Use the GPU", &on)) {
+        ImGui::BeginDisabled(!gpu::built());  // a build without the GPU code (#46)
+        const bool changed = ImGui::Checkbox("Use the GPU", &on);
+        ImGui::EndDisabled();
+        if (changed) {
             gpu::setEnabled(on);
             app.clearCaches();  // re-render with the change
             app.saveSettings();
         }
-        if (ImGui::IsItemHovered())
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Heavy nodes (Transform, CornerPin and others as they're added) run on the graphics card\n"
                               "through Vulkan. Results match the CPU's. Off: everything on the CPU.");
         ImGui::SameLine();
@@ -1262,7 +1265,7 @@ static void drawPerformance(App& app, UiState& ui) {
     }
     std::snprintf(b, sizeof b, "%.0f MB of %.0f free", platform::availableRamGB() * 1024, platform::physicalRamGB() * 1024);
     line("memory", b);
-    line("GPU", gpu::enabled() ? gpu::status() : std::string("off (Preferences)"));
+    line("GPU", gpu::status());
     line("disk cache", app.diskCache() ? "on" : "off");
 
     // ---- the viewer's last full render

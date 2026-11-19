@@ -44,6 +44,9 @@ jobs:
           dnf install -y libX11-devel libXrandr-devel libXinerama-devel libXcursor-devel libXi-devel \
                          mesa-libGL-devel git
           dnf install -y nasm || dnf --enablerepo=powertools install -y nasm || true
+          # glslangValidator compiles the GPU shaders; without it the GPU code is left out (#46)
+          dnf install -y glslang || dnf --enablerepo=powertools install -y glslang
+          command -v glslangValidator
           git config --global --add safe.directory '*'
           pipx install cmake || true; pipx install ninja || true
           pipx environment --value PIPX_BIN_DIR >> "$GITHUB_PATH" 2>/dev/null || echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -108,7 +111,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: tools
-        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64-posix ninja-build nasm cmake
+        # glslang-tools: glslangValidator compiles the GPU shaders; without it the GPU code is left out (#46)
+        run: |
+          sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64-posix ninja-build nasm cmake glslang-tools
+          command -v glslangValidator
       - uses: actions/cache@v4
         with:
           path: ../deps
