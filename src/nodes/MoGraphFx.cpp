@@ -253,26 +253,57 @@ class VHSNode : public FxBase {
         const double f = a.frame, sc = scale(a);
         Sampler S(src, false);
         Format fm = fmt(a);
-        const double H = fm.height / sc;
-        const double bleed = params.num("chroma_bleed", f, 4) * sc, cshift = params.num("chroma_shift", f, 3) * sc;
-        const double lblur = params.num("luma_blur", f, 1) * sc;
-        const float noise = (float)params.num("noise", f, 0.06), sat = (float)params.num("saturation", f, 0.85);
-        const float track = (float)params.num("tracking", f, 0.5);
+        const double H = fm.height / sc, Wf = fm.width / sc;
+        // modules: each can be switched off on its own
+        const bool colourOn = params.flag("colour_on", true), softOn = params.flag("soft_on", true), noiseOn = params.flag("noise_on", true);
+        const bool trackOn = params.flag("tracking_on", true), headOn = params.flag("head_on", true), wobOn = params.flag("wobble_on", true);
+        const double bleed = colourOn ? params.num("chroma_bleed", f, 4) * sc : 0, cshift = colourOn ? params.num("chroma_shift", f, 3) * sc : 0;
+        const double lblur = softOn ? params.num("luma_blur", f, 1) * sc : 0;
+        const float noise = noiseOn ? (float)params.num("noise", f, 0.06) : 0.0f;
+        const float sat = colourOn ? (float)params.num("saturation", f, 0.85) : 1.0f;
+        const float track = trackOn ? (float)params.num("tracking", f, 0.5) : 0.0f;
         const double trackH = std::max(0.01, params.num("tracking_height", f, 0.08)), trackSpeed = params.num("tracking_speed", f, 0.25);
-        const double head = params.num("head_switch", f, 8), wob = params.num("wobble", f, 1);
+        const double head = headOn ? params.num("head_switch", f, 8) : 0, wob = wobOn ? params.num("wobble", f, 1) : 0;
+        // damage modules (off by default)
+        const float crease = (float)std::clamp(params.num("crease", f, 0), 0.0, 1.0);
+        const double dropouts = std::max(0.0, params.num("dropouts", f, 0));
+        const bool colourUnder = params.flag("colour_under", false);
+        const float ringing = (float)std::clamp(params.num("ringing", f, 0), 0.0, 2.0);
         const uint32_t seed = (uint32_t)params.num("seed", f, 0);
         const long fr = std::lround(f);
         const double secs = f / fps(this);
         double tpos = 1 - (trackSpeed * secs - std::floor(trackSpeed * secs));  // the band moves down the screen
+        // a crease: now and then (a new chance every half second) a band of the tape is folded
+        double creaseY = -1, creaseH = 0;
+        if (crease > 0) {
+            const long slot = (long)std::floor(secs * 2);
+            if (rnd(seed + 61, (uint32_t)slot) < 0.25f + 0.75f * crease) {
+                creaseY = rnd(seed + 62, (uint32_t)slot) * H;
+                creaseH = H * (0.015 + 0.05 * rnd(seed + 63, (uint32_t)slot)) * (0.5 + crease);
+            }
+        }
         for (int y = fx.bounds.y1; y < fx.bounds.y2; ++y) {
             const double Y = (y + 0.5) / sc, sv = Y / H;
             double dx = wob * (vnoise(Y / 6 + secs * 30, seed) * 2 - 1);
             double band = std::fabs(sv - tpos);
             band = std::min(band, 1 - band);
-            const float inBand = band < trackH ? (float)(1 - band / trackH) : 0.0f;
+            const float inBand = track > 0 && band < trackH ? (float)(1 - band / trackH) : 0.0f;
             dx += inBand * track * 40 * (rnd(seed, (uint32_t)fr, (uint32_t)ifloor(Y)) - 0.3);
             if (Y < head) dx += (head - Y) * 3 * (rnd(seed + 5, (uint32_t)fr, (uint32_t)ifloor(Y / 2)) * 2 - 1);
+            float inCrease = 0;
+            if (creaseH > 0 && std::fabs(Y - creaseY) < creaseH) {
+                inCrease = (float)(1 - std::fabs(Y - creaseY) / creaseH);
+                dx += inCrease * crease * 60 * std::sin(Y * 0.7 + secs * 40) + inCrease * crease * 30 * (rnd(seed + 64, (uint32_t)fr, (uint32_t)ifloor(Y)) - 0.5);
+            }
+            // a dropout on this line: a bright streak from xs for len px
+            double dropX = -1, dropLen = 0;
+            if (dropouts > 0 && rnd(seed + 71, (uint32_t)fr, (uint32_t)ifloor(Y)) < dropouts / std::max(1.0, H)) {
+                dropX = rnd(seed + 72, (uint32_t)fr, (uint32_t)ifloor(Y)) * Wf;
+                dropLen = 10 + 120 * rnd(seed + 73, (uint32_t)fr, (uint32_t)ifloor(Y));
+            }
             dx *= sc;
+            // colour-under: chroma has half the lines
+            const double cy = colourUnder ? ((ifloor(Y / 2) * 2 + 1.0) * sc) : y + 0.5;
             for (int x = fx.bounds.x1; x < fx.bounds.x2; ++x) {
                 const double sx = x + 0.5 - dx, sy = y + 0.5;
                 float l[4] = {0, 0, 0, 0}, c[3] = {0, 0, 0};
@@ -285,18 +316,37 @@ class VHSNode : public FxBase {
                 for (int k = 0; k < taps; ++k) {
                     const double ox = cshift + (k / (taps - 1.0) - 0.5) * 2 * bleed;
                     float t[4];
-                    S.rgba(sx - ox, sy, t);
+                    S.rgba(sx - ox, cy, t);
                     for (int q = 0; q < 3; ++q) c[q] += t[q] / taps;
                 }
-                const float Yl = luma(l), Yc = luma(c);
+                float Yl = luma(l);
+                if (ringing > 0) {  // edges overshoot, with a faint echo to the right
+                    float t1[4], t2[4], t3[4];
+                    S.rgba(sx - 2 * sc, sy, t1);
+                    S.rgba(sx + 2 * sc, sy, t2);
+                    S.rgba(sx - 5 * sc, sy, t3);
+                    const float avg = 0.5f * (luma(t1) + luma(t2));
+                    Yl += ringing * (0.6f * (Yl - avg) + 0.25f * (Yl - luma(t3)));
+                }
+                const float Yc = luma(c);
                 float U = (c[2] - Yc) * sat, V = (c[0] - Yc) * sat;
                 float o[4];
                 o[0] = Yl + V;
                 o[2] = Yl + U;
                 o[1] = (Yl - 0.2126f * o[0] - 0.0722f * o[2]) / 0.7152f;
                 const float n = (rnd(seed + 2, (uint32_t)fr, (uint32_t)ifloor((x + 0.5) / sc), (uint32_t)ifloor(Y)) - 0.5f) *
-                                (noise + inBand * track * 0.6f);
+                                (noise + inBand * track * 0.6f + inCrease * crease * 0.5f);
                 for (int q = 0; q < 3; ++q) o[q] = o[q] + n;
+                if (dropLen > 0) {
+                    const double X = (x + 0.5) / sc;
+                    if (X >= dropX && X < dropX + dropLen) {
+                        const float t = (float)((X - dropX) / dropLen);
+                        const float w = 0.9f * (1 - t * t);
+                        for (int q = 0; q < 3; ++q) o[q] = o[q] + (1.0f - o[q]) * w;
+                    }
+                }
+                if (inCrease > 0)
+                    for (int q = 0; q < 3; ++q) o[q] = o[q] * (1 - 0.4f * inCrease * crease) + 0.25f * inCrease * crease;
                 o[3] = l[3];
                 put(fx, x, y, o);
             }

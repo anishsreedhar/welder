@@ -808,6 +808,16 @@ std::vector<NodeDef> build() {
                      "Video feedback: each frame is the source mixed with the previous result, zoomed, turned, moved, pushed along the "
                      "plate's motion, hue-shifted and blurred a little more every frame - tracers, trails, tunnels. Every knob can be "
                      "driven by modulators. The mask input limits where the result shows (a person matte: trails only around the actor)."});
+        d.push_back({"PixelMosh", "Time",
+                     withMask({Tip(start, "The cut: from here on the picture is not refreshed (the frame before is the last clean one)"),
+                               I("length", "length (frames, 0: to the end)", 0, 0, 100000),
+                               F("block_size", "block size (px)", 16, 2, 256), F("search", "search (px)", 16, 1, 128,
+                                 "How far block matching looks for motion (with nothing on the flow input)"),
+                               F("motion_gain", "motion gain", 1, -4, 4, "Above 1: the smear runs ahead of the motion"),
+                               F("residual", "residual", 0.3, 0, 1, "How much of each new frame's change seeps through"),
+                               F("freeze", "frozen blocks", 0, 0, 1, "The chance a block skips a frame"), I("seed", "seed", 0, 0, 1000)}),
+                     "Datamosh: from the cut on, the last clean picture is dragged block by block along the new shot's motion (from "
+                     "the flow input's vectors, or found by block matching), melting into it."});
     }
     d.push_back({"TimeEcho", "Time",
                  {I("frames", "frames", 5, 1, 100), F("step", "frame step", 1, 0.1, 10), F("falloff", "falloff", 0.7, 0, 1),
@@ -1109,11 +1119,23 @@ std::vector<NodeDef> build() {
             F("bloom_size", "bloom size", 6, 0, 50), F("vignette", "vignette", 0.35, 0, 1), F("brightness", "brightness", 1.25, 0, 4),
             F("flicker", "flicker", 0.03, 0, 0.5), F("roll", "rolling bar", 0.08, 0, 1), F("roll_speed", "roll speed", 0.3, -4, 4), I("seed", "seed", 0, 0, 1000)}),
             "An old tube monitor: curved glass, scanlines, a phosphor mask, bloom, vignette, flicker and a rolling bar."});
-        d.push_back({"VHS", "MoGraph", withMask({F("chroma_bleed", "chroma bleed (px)", 4, 0, 40), F("chroma_shift", "chroma shift (px)", 3, -40, 40),
-            F("luma_blur", "luma softness (px)", 1, 0, 10), F("saturation", "saturation", 0.85, 0, 2), F("noise", "tape noise", 0.06, 0, 1),
-            F("tracking", "tracking error", 0.5, 0, 2), F("tracking_height", "tracking band height", 0.08, 0.01, 0.5), F("tracking_speed", "tracking band speed", 0.25, -4, 4),
-            F("head_switch", "head switching (px)", 8, 0, 60), F("wobble", "wobble (px)", 1, 0, 20), I("seed", "seed", 0, 0, 1000)}),
-            "Videotape: colour bleeding sideways, soft picture, tape noise, a rolling tracking band and head-switching noise at the bottom."});
+        d.push_back({"VHS", "MoGraph", withMask({
+            Div("colour"), B("colour_on", "on", true), EnableIf(F("chroma_bleed", "chroma bleed (px)", 4, 0, 40), "colour_on=true"),
+            EnableIf(F("chroma_shift", "chroma shift (px)", 3, -40, 40), "colour_on=true"), EnableIf(F("saturation", "saturation", 0.85, 0, 2), "colour_on=true"),
+            B("colour_under", "colour-under (chroma on half the lines)", false),
+            Div("picture"), B("soft_on", "on", true), EnableIf(F("luma_blur", "luma softness (px)", 1, 0, 10), "soft_on=true"),
+            F("ringing", "edge ringing", 0, 0, 2, "Edges overshoot with a faint echo to the right"),
+            Div("tape noise"), B("noise_on", "on", true), EnableIf(F("noise", "tape noise", 0.06, 0, 1), "noise_on=true"),
+            F("dropouts", "dropouts per frame", 0, 0, 100, "Bright streaks where the tape lost its oxide"),
+            Div("tracking"), B("tracking_on", "on", true), EnableIf(F("tracking", "tracking error", 0.5, 0, 2), "tracking_on=true"),
+            EnableIf(F("tracking_height", "tracking band height", 0.08, 0.01, 0.5), "tracking_on=true"),
+            EnableIf(F("tracking_speed", "tracking band speed", 0.25, -4, 4), "tracking_on=true"),
+            Div("transport"), B("head_on", "head switching", true), EnableIf(Same(F("head_switch", "(px)", 8, 0, 60)), "head_on=true"),
+            B("wobble_on", "wobble", true), EnableIf(Same(F("wobble", "(px)", 1, 0, 20)), "wobble_on=true"),
+            F("crease", "tape crease", 0, 0, 1, "Now and then a band of folded tape tears across the picture"),
+            Div(""), I("seed", "seed", 0, 0, 1000)}),
+            "Videotape, in modules you can switch off: colour bleeding sideways (and colour-under), soft picture and edge ringing, tape noise and "
+            "dropouts, a rolling tracking band, head-switching noise, wobble and tape creases."});
         d.push_back({"Hologram", "MoGraph", withMask({Col4("color", "colour", json::array({0.3, 0.85, 1, 1})), F("keep_colour", "keep the picture's colour", 0.2, 0, 1),
             F("opacity", "opacity", 0.85, 0, 1), F("scan_spacing", "scan line spacing", 4, 1, 50), F("scan_strength", "scan lines", 0.5, 0, 1),
             F("scan_speed", "scan speed (px/s)", 20, -500, 500), F("flicker", "flicker", 0.15, 0, 1), F("jitter", "row jitter", 0.15, 0, 1),
