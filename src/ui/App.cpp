@@ -407,7 +407,8 @@ void App::loadSettings() {
                 for (auto& r : j["recent_files"])
                     if (r.is_string() && recentFiles.size() < kMaxRecent) recentFiles.push_back(r.get<std::string>());
             netpath::enabled() = uncPaths;
-            gpu::setEnabled(j.value("gpu", true));
+            // "use_gpu": the release builds up to 0.2.0 had no GPU code and saved "gpu" as false (#46)
+            gpu::setEnabled(j.value("use_gpu", true));
             cacheDirSetting = j.value("cache_dir", std::string());
             setCacheRoot(cacheDirSetting);
         }
@@ -445,7 +446,8 @@ void App::saveSettings() {
     else j.erase("ui_scale");
     if (themeChosen) j["ui_theme"] = themeName;
     j["recent_files"] = recentFiles;
-    j["gpu"] = gpu::enabled();
+    if (gpu::built()) j["use_gpu"] = gpu::enabled();  // a build without the GPU code keeps the saved choice
+    j.erase("gpu");
     if (cacheDirSetting.empty()) j.erase("cache_dir");
     else j["cache_dir"] = cacheDirSetting;
     writeFileAtomic(settingsPath, j.dump(2), nullptr);

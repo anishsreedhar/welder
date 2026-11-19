@@ -28,6 +28,9 @@ std::string status();
 // The preference: off keeps everything on the CPU.
 void setEnabled(bool on);
 bool enabled();
+// This build has the GPU code (false: built without glslangValidator, so the
+// preference can't be switched on and isn't saved).
+bool built();
 
 struct In {
     const void* data;
