@@ -46,6 +46,21 @@ struct Out {
 bool run(const char* kernel, const std::vector<In>& in, const std::vector<Out>& out, const void* push, size_t pushBytes,
          uint32_t gx, uint32_t gy, uint32_t gz = 1);
 
+// Several dispatches of one kernel over the same buffers, in one submission (each sees what the
+// one before wrote): for iterative solvers, without a round trip per step. A buffer is uploaded
+// first when `in` is set and read back at the end when `out` is set (both: the same memory may
+// be both); one with neither is GPU scratch, its contents undefined until a dispatch writes it.
+struct Buffer {
+    const void* in = nullptr;
+    void* out = nullptr;
+    size_t bytes = 0;
+};
+struct Dispatch {
+    unsigned char push[128] = {};
+    uint32_t gx = 1, gy = 1, gz = 1;
+};
+bool runSequence(const char* kernel, const std::vector<Buffer>& buffers, const std::vector<Dispatch>& dispatches);
+
 // Counters, for tests and the status line.
 struct Stats {
     uint64_t runs = 0, failures = 0;

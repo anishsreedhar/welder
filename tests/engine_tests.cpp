@@ -7877,6 +7877,49 @@ Connections:  {
             CHECK(dt < 5e-4);
         }
     });
+    test("GPU: optical flow (VectorGenerator) matches the CPU and finds the motion", [] {
+        if (!gpu::available()) {
+            std::printf("  (no GPU: %s)\n", gpu::status().c_str());
+            return;
+        }
+        const int W = 640, H = 360;
+        auto make = [&] { return comp(json::array({
+            {{"name", "P"}, {"type", "Plasma"}, {"params", {{"size", 40}, {"complexity", 8}, {"cycles", 3}, {"speed", 0}}}},
+            {{"name", "M"}, {"type", "Transform"}, {"inputs", {"P"}}, {"params", {{"translate", {json{{"expr", "frame * 4"}}, json{{"expr", "frame * -2"}}}}}}},
+            {{"name", "VG"}, {"type", "VectorGenerator"}, {"inputs", {"M"}}},
+            {{"name", "VGf"}, {"type", "VectorGenerator"}, {"inputs", {"M"}}, {"params", {{"flicker", true}, {"vector_detail", 0.5}}}},
+        }), W, H); };
+        for (const char* nm : {"VG", "VGf"}) {
+            // a comp each (VectorGenerator keeps its results)
+            auto c1 = make(), c2 = make();
+            gpu::setEnabled(false);
+            auto cpu = render(*c1, nm, 5);
+            gpu::setEnabled(true);
+            const auto before = gpu::stats().runs;
+            auto g = render(*c2, nm, 5);
+            const bool used = gpu::stats().runs > before;
+            double worst = 0, sum = 0, eg = 0, ec = 0;
+            int n = 0;
+            for (size_t i = 0; i < cpu->data.size(); ++i) {
+                const double d = std::fabs(cpu->data[i] - g->data[i]);
+                worst = std::max(worst, d), sum += d;
+            }
+            // away from the borders (where the plate slides in), forward = (4, -2)
+            for (int y = 40; y < H - 40; y += 4)
+                for (int x = 40; x < W - 40; x += 4) {
+                    eg += std::hypot(px(g, x, y, "forward.u") - 4, px(g, x, y, "forward.v") + 2);
+                    ec += std::hypot(px(cpu, x, y, "forward.u") - 4, px(cpu, x, y, "forward.v") + 2);
+                    ++n;
+                }
+            const double mean = sum / std::max<size_t>(1, cpu->data.size());
+            std::printf("  %s: |cpu - gpu| max %.2g mean %.2g px; error vs the true motion: gpu %.3f, cpu %.3f px; gpu used %d\n", nm, worst,
+                        mean, eg / n, ec / n, used);
+            CHECK(used);
+            CHECK(mean < 0.01);
+            CHECK(eg / n < 0.4);
+            CHECK(eg / n < ec / n + 0.02);
+        }
+    });
     std::printf("\n%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }
