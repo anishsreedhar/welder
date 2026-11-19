@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <set>
 
 #include "Panels.h"
@@ -3144,6 +3145,22 @@ static void rotoCurvesTable(App& app, UiState& ui, Node* n) {
 // the curves list), 1 Transform, 2 Motion Blur, 3 Shape, 4 Lifetime, 5 Tracking. SplineWarp and
 // SplineFlow show 0, 1, 3 and 4 one after another on their own tab (`combined`).
 static void rotoSection(App& app, UiState& ui, Node* n, int section, bool combined) {
+    // The viewer's roto state (selection, tool, a shape being drawn) belongs to the active roto
+    // (activeRoto). Another roto's panel showing in the bin draws with a state of its own: taking
+    // ui.roto over, each panel cleared what the viewer was doing every frame, so with two rotos
+    // open nothing could be drawn, selected or moved (#65).
+    static std::map<std::string, RotoState> parked;
+    struct Park {
+        UiState& ui;
+        RotoState* other = nullptr;
+        ~Park() {
+            if (other) std::swap(ui.roto, *other);
+        }
+    } park{ui};
+    if (Node* act = activeRoto(app); act && act != n) {
+        park.other = &parked[n->name];
+        std::swap(ui.roto, *park.other);
+    }
     RotoState& r = ui.roto;
     const json& items = itemsOf(n);
     const std::string name = n->name;

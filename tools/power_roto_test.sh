@@ -7,6 +7,7 @@
 #   Magnetic Reshape   dragging an ellipse's right point moves it, not the far points
 #   Brush Reshape      the same, pushed with the brush
 #   snap to edges      Ctrl+A, Alt+S: an ellipse just outside the disc snaps onto it
+#   two rotos          with a Roto's panel open too, the Power Roto still draws (#65)
 #
 #   tools/power_roto_test.sh [build dir]
 #
@@ -36,9 +37,15 @@ print('[{\"name\":\"E\",\"kind\":\"ellipse\",\"points\":[[%g,540,0,%g,0,%g],[960
 comp "$WORK/empty.weld" "[]"
 comp "$WORK/e200.weld" "$(ellipse 200)"
 comp "$WORK/e280.weld" "$(ellipse 280)"
+cat > "$WORK/two.weld" <<JSON
+{"strata": 1, "format": {"width": 1920, "height": 1080}, "frame_range": [1, 1], "fps": 24,
+ "nodes": [{"name": "Disc", "type": "Radial", "params": {"center": [960, 540], "radius": 270, "softness": 0}},
+           {"name": "Roto1", "type": "Roto", "inputs": ["Disc"]},
+           {"name": "PowerRoto1", "type": "PowerRoto", "inputs": ["Roto1"], "params": {"shapes": []}}]}
+JSON
 
-run() {  # <comp> <keys>: prints the PowerRoto's shapes afterwards
-  local cmd=("$UI" "$1" --view PowerRoto1 --props PowerRoto1 --size 1600x1200 --screenshot "$WORK/shot.png")
+run() {  # <comp> <keys> [panels]: prints the PowerRoto's shapes afterwards
+  local cmd=("$UI" "$1" --view PowerRoto1 --props "${3:-PowerRoto1}" --size 1600x1200 --screenshot "$WORK/shot.png")
   if [ -z "${DISPLAY:-}" ]; then cmd=(xvfb-run -a -s "-screen 0 1600x1300x24" "${cmd[@]}"); fi
   HOME="$WORK/home" STRATA_TEST_KEYS="$2;at=1000,560;shapejson=PowerRoto1" timeout 180 "${cmd[@]}" 2>&1 | grep "^KEYS shapejson" | tail -1 | cut -d' ' -f3- || true
 }
@@ -75,4 +82,8 @@ check "brush reshape pushes the near point" "$(run "$WORK/e200.weld" "rototool=B
   'pts[0][0] > 1190 and abs(pts[2][0] - 760) < 0.01'
 check "snap to edges (Ctrl+A, Alt+S)" "$(run "$WORK/e280.weld" "rototool=Select All;at=1000,560;key=ctrl+a;alt=1;key=s;alt=0")" \
   'len(pts) == 4 and all(abs(r - 270) < 2.5 for r in radii)'
+# both panels open, the Power Roto's on top: the Roto's panel used to take the viewer's roto state
+# every frame, so nothing could be drawn (#65)
+check "two rotos open: the active one still draws" "$(run "$WORK/two.weld" "rototool=X-Spline;click=490,320;click=690,320;click=690,480;click=490,480;key=enter" PowerRoto1,Roto1)" \
+  's0.get("kind") == "xspline" and len(pts) == 4'
 exit $fail
