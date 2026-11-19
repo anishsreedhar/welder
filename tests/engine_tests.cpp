@@ -1653,7 +1653,7 @@ int main(int argc, char** argv) {
         const std::vector<std::string> fx = {"GlitchBlocks", "Tear", "RGBSplit", "PixelSort", "CRT", "VHS", "Hologram", "BitCrush",
                                              "SignalLoss", "WaveWarp", "Bulge", "SliceShift", "LCDScreen", "FilmBurn", "Dust"};
         const std::vector<std::string> tr = {"WipeTransition", "WarpTransition", "GlitchTransition", "PixelTransition", "ZoomTransition", "PushTransition",
-                                             "FilmBurnTransition", "LightLeakDissolve"};
+                                             "FilmBurnTransition", "LightLeakDissolve", "WhipTransition"};
         const std::vector<std::string> gen = {"Shape", "Bars", "BoxGrid", "Scatter", "Radar", "Waveform", "FlowLines", "PatternGrid", "NoisePattern", "CodeRain",
                                               "LightLeak"};
         for (auto& t : fx) nodes.push_back({{"name", t}, {"type", t}, {"inputs", {"Src"}}});
@@ -1684,6 +1684,33 @@ int main(int argc, char** argv) {
             CHECK_NEAR(px(a0, 40, 30, "R"), px(src, 40, 30, "R"), 1e-5);
             CHECK_NEAR(px(a1, 40, 30, "G"), px(two, 40, 30, "G"), 1e-5);
         }
+    });
+
+    test("Lens and noise extras: Defocus fringe splits colour, rim brightens the edge; bubbles dome up from their seams", [] {
+        auto c = comp(json::array({
+            {{"name", "Dot"}, {"type", "Expression"}, {"params", {{"channel0", "rgba"}, {"expr0", "(x == 32 && y == 32) ? 1 : 0"}}}},
+            {{"name", "Fr"}, {"type", "Defocus"}, {"inputs", {"Dot"}}, {"params", {{"defocus", 8}, {"fringe", 0.3}}}},
+            {{"name", "Rim"}, {"type", "Defocus"}, {"inputs", {"Dot"}}, {"params", {{"defocus", 8}, {"rim", 1}}}},
+            {{"name", "Plain"}, {"type", "Defocus"}, {"inputs", {"Dot"}}, {"params", {{"defocus", 8}}}},
+            {{"name", "Bub"}, {"type", "Noise"}, {"params", {{"type", "bubbles"}, {"size", 16}, {"octaves", 1}}}},
+        }), 64, 64);
+        auto fr = render(*c, "Fr"), rim = render(*c, "Rim"), plain = render(*c, "Plain");
+        // 10 px out: inside red's disc (8 x 1.3), outside blue's (8 x 0.7)
+        CHECK(px(fr, 42, 32, "R") > 0 && px(fr, 42, 32, "B") == 0);
+        CHECK(px(fr, 37, 32, "B") > 0);
+        // all three keep the light
+        double sr = 0, sb = 0, sp = 0;
+        for (int y = 0; y < 64; ++y)
+            for (int x = 0; x < 64; ++x) sr += px(fr, x, y, "R"), sb += px(fr, x, y, "B"), sp += px(plain, x, y, "R");
+        CHECK_NEAR(sr, 1, 0.02);
+        CHECK_NEAR(sb, 1, 0.02);
+        CHECK_NEAR(sp, 1, 0.02);
+        CHECK(px(rim, 39, 32, "R") > px(rim, 32, 32, "R") * 2);  // bright edge, dim middle
+        auto b = render(*c, "Bub");
+        double lo = 1, hi = 0;
+        for (int y = 0; y < 64; ++y)
+            for (int x = 0; x < 64; ++x) lo = std::min(lo, (double)px(b, x, y, "R")), hi = std::max(hi, (double)px(b, x, y, "R"));
+        CHECK(lo < 0.15 && hi > 0.6 && hi <= 1.0);
     });
 
     test("Film looks: FilmBurn burns with progress, Dust with nothing to add changes nothing, MultiTone maps tones", [] {
@@ -1785,6 +1812,13 @@ int main(int argc, char** argv) {
             {"MatteRefine", "MatteRefine", json::array({"Fg"}), {{"chew", 0.5}}},
             {"SplineFlow", "SplineFlow", json::array({"Src", "Bg"}), {{"shapes", path}, {"width", 20}}},
             {"Halation", "Halation", json::array({"Src"}), {{"size", 6}}},
+            {"HalationLin2", "Halation", json::array({"Src"}), {{"size", 6}, {"footage", "scene linear"}, {"two_colour", true}}},
+            {"FlareBlue", "LensFlare", json::array({"Src"}), {{"position", {30, 40}}, {"style", "blue streak"}}},
+            {"FlareZoom", "LensFlare", json::array({"Src"}), {{"position", {60, 20}}, {"style", "vintage zoom"}}},
+            {"DefocusLens", "Defocus", json::array({"Src"}),
+             {{"defocus", 6}, {"cat_eye", 0.8}, {"swirl", 0.5}, {"onion_rings", 0.5}, {"rim", 0.4}, {"fringe", 0.2}}},
+            {"DefocusLensBig", "Defocus", json::array({"Src"}), {{"defocus", 30}, {"quality", 8}, {"cat_eye", 0.6}, {"fringe", 0.1}}},
+            {"PrismLens", "PrismLens", json::array({"Src"}), {{"spread", 12}}},
             {"Diffusion", "Diffusion", json::array({"Src"}), {{"size", 4}}},
             {"HighlightSuppress", "HighlightSuppress", json::array({"Src"}), json::object()},
             {"DeHaze", "DeHaze", json::array({"Src"}), {{"patch", 5}, {"refine", 6}}},

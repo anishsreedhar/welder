@@ -436,9 +436,9 @@ std::vector<NodeDef> build() {
                       F("gain", "gain (roughness)", 0.5, 0, 1), B("nyquist", "limit to resolution", true),
                       F("distortion", "distortion", 0, 0, 4, "domain warp, in noise sizes"),
                       F("distortion_scale", "distortion scale", 1, 0.05, 8),
-                      When(F("jitter", "jitter", 1, 0, 1), "type=cells f1|cells f2|cell edges|voronoi|crackle|dents|dots"),
+                      When(F("jitter", "jitter", 1, 0, 1), "type=cells f1|cells f2|cell edges|voronoi|crackle|dents|dots|bubbles|puffy|bumpy"),
                       When(C("metric", "distance", "euclidean", {"euclidean", "manhattan", "chebyshev"}),
-                           "type=cells f1|cells f2|cell edges|voronoi|crackle|dents"),
+                           "type=cells f1|cells f2|cell edges|voronoi|crackle|dents|bubbles|puffy|bumpy"),
                       When(F("sharpness", "sharpness", 8, 1, 32), "type=electro|blistered|crackle"),
                       When(F("waves", "waves", 1, 0.1, 16), "type=wavy|plasma"),
                       When(F("density", "density", 0.5, 0, 1), "type=dots"),
@@ -455,7 +455,7 @@ std::vector<NodeDef> build() {
                       Col4("color0", "low colour", json::array({0, 0, 0, 1})), Col4("color1", "high colour", json::array({1, 1, 1, 1})),
                       Tip(C("alpha", "alpha", "luminance", {"luminance", "1", "noise", "colour", "0"}), "luminance: the alpha is how bright the noise is (the colours as they come out); noise: the raw noise, with the colours premultiplied by it; colour: from color0 / color1's alpha"), F("mix", "mix", 1, 0, 1),
                       Fmt("format", "format")},
-                     "Procedural noise: perlin, value, turbulence, ridged, gas, wavy, electro, plasma, cells, crackle, dents, dots ... "
+                     "Procedural noise: perlin, value, turbulence, ridged, gas, wavy, electro, plasma, cells, crackle, dents, dots, bubbles ... "
                      "Fractal, distortable, animated (evolution, drift) and loopable (loop: frames per cycle, with a speed)."});
     }
     d.push_back({"Ramp", "Image",
@@ -894,7 +894,10 @@ std::vector<NodeDef> build() {
     // ---------------------------------------------------------------- finishing tools (flares, keying, everyday 2D)
     {
         d.push_back({"LensFlare", "Draw",
-                     {C("style", "style", "classic", {"classic", "anamorphic", "sun", "sci-fi", "spotlight", "subtle"}),
+                     {Tip(C("style", "style", "classic", {"classic", "anamorphic", "sun", "sci-fi", "spotlight", "subtle", "blue streak", "warm sunset",
+                                                          "vintage zoom", "rainbow ghosts", "sparkle", "sunburst", "cool anamorphic", "red planet",
+                                                          "neon", "soft haze", "headlight", "dusty lens"}),
+                           "A finished look to start from; every element knob below scales it"),
                       PickXY(XY("position", "light position", "$center", 0, 4096)),
                       PickXY(XY("axis_center", "lens centre", "$center", 0, 4096)),
                       F("brightness", "brightness", 1, 0, 10), F("scale", "scale", 1, 0.05, 5), Col4("color", "tint", json::array({1, 1, 1, 1})),
@@ -991,9 +994,14 @@ std::vector<NodeDef> build() {
                      "with the roto tools (they are used open); src's x (or y) runs along each path, the other axis across the width; "
                      "speed slides it along over time. A lighter alternative to warping the whole frame."});
         d.push_back({"Halation", "Filter",
-                     withMask({F("threshold", "threshold", 0.8, 0, 10), F("knee", "knee", 0.4, 0.01, 4), F("size", "size", 30, 0.1, 500),
+                     withMask({Tip(C("footage", "footage is", "display", {"display", "scene linear"}),
+                                   "display: Rec.709 / sRGB pictures; scene linear: the threshold reads brightness as a display would, so highlights above 1 key sensibly"),
+                               F("threshold", "threshold", 0.8, 0, 10), F("knee", "knee", 0.4, 0.01, 4), F("size", "size", 30, 0.1, 500),
                                F("spread", "spread", 4, 1, 20), F("intensity", "intensity", 0.6, 0, 10),
-                               Col4("color", "colour", json::array({1, 0.28, 0.08, 1})), F("color_from_image", "colour from image", 0.2, 0, 1),
+                               Col4("color", "colour", json::array({1, 0.28, 0.08, 1})),
+                               B("two_colour", "two colours (core and outer)", false),
+                               When(Col4("outer_color", "outer colour", json::array({1, 0.55, 0.15, 1})), "two_colour=true"),
+                               F("color_from_image", "colour from image", 0.2, 0, 1),
                                B("effect_only", "effect only", false), B("crop", "crop to format", true)}),
                      "Film halation: light from the highlights scattered back through the film base - a warm red-orange glow hugging bright edges."});
         d.push_back({"Diffusion", "Filter",
@@ -1312,6 +1320,19 @@ std::vector<NodeDef> build() {
                       F("softness", "softness (px)", 0.7, 0.05, 20), I("hold", "hold (frames)", 1, 1, 100), I("seed", "seed", 0, 0, 1000),
                       F("weave", "gate weave (px)", 0, 0, 20, "The whole picture drifts a little, like film in a projector gate")}),
             "Dust, hairs and scratches on the print, new every frame (dark: dirt on the print, light: dirt on the negative)."});
+        d.push_back({"WhipTransition", "MoGraph",
+            trans({F("angle", "angle", 0, -180, 180, "The whip's direction (animate or link it to a Tracker with an expression)"),
+                   F("distance", "distance (frames across)", 1, 0.1, 10), F("overshoot", "overshoot", 0.3, 0, 2, "B swings past and settles back"),
+                   F("shutter", "shutter", 0.5, 0, 4), I("samples", "blur samples", 24, 1, 128), F("crossfade", "crossfade", 0.06, 0, 0.5),
+                   C("edges", "edges", "repeat", {"repeat", "mirror", "clamp", "black"})}),
+            "A whip pan: A flies off along the angle, B flies in from the other side with motion blur, overshoots and settles."});
+        d.push_back({"PrismLens", "Stylize",
+            withMask({I("facets", "facets", 3, 1, 12), F("spread", "spread (px)", 120, 0, 2000), F("angle", "angle", 90, -180, 180),
+                      PickXY(XY("center", "centre", "$center", 0, 4096)), F("copy_scale", "copy magnification", 1.03, 0.5, 2),
+                      F("dispersion", "dispersion", 0.15, 0, 1, "Red, green and blue of each copy shifted by different amounts"),
+                      F("copy_opacity", "copy opacity", 0.6, 0, 1), F("centre", "centre image", 1, 0, 1),
+                      C("blend", "blend", "average", {"average", "add"})}),
+            "Shooting through a faceted prism: the picture with refracted, colour-split copies around it."});
         d.push_back({"LCDScreen", "MoGraph", withMask({F("pixel_size", "screen pixel size", 6, 1, 100, "The screen's pixel pitch in output pixels"),
             C("layout", "subpixels", "RGB stripes", {"RGB stripes", "BGR stripes", "dots", "none"}), F("gap", "gap", 0.15, 0, 0.45),
             F("grid_darkness", "gap darkness", 0.6, 0, 1), F("subpixel_strength", "subpixel strength", 1, 0, 1), F("brightness", "brightness", 3, 0, 8),
@@ -1562,6 +1583,13 @@ std::vector<NodeDef> build() {
             k.push_back(F("highlight_threshold", "highlight threshold", 0, 0, 10, "brighter than this blooms into bokeh (0: off)"));
             k.push_back(F("highlight_gain", "highlight gain", 2, 0, 20));
             k.push_back(I("quality", "quality", 12, 2, 64));
+            k.push_back(Div("Lens imperfections (disc and bladed)"));
+            k.push_back(When(F("cat_eye", "cat-eye", 0, 0, 1, "Bokeh toward the frame edges clipped into cat's-eye shapes"), "filter_type=disc|bladed"));
+            k.push_back(When(F("swirl", "swirl", 0, 0, 1, "Turns the cat-eyes from pointing at the centre to running around it"), "filter_type=disc|bladed"));
+            k.push_back(When(F("onion_rings", "onion rings", 0, 0, 1, "Concentric rings inside each bokeh disc"), "filter_type=disc|bladed"));
+            k.push_back(When(Same(F("ring_count", "count", 6, 1, 30)), "filter_type=disc|bladed"));
+            k.push_back(When(F("rim", "rim", 0, -1, 1, "+: bright-edged (soap bubble) bokeh, -: soft, centre-weighted"), "filter_type=disc|bladed"));
+            k.push_back(When(F("fringe", "colour fringe", 0, 0, 0.5, "Red's disc a little bigger than green's, blue's a little smaller"), "filter_type=disc|bladed"));
             return k;
         };
         d.push_back({"ZDefocus", "Filter",

@@ -85,16 +85,33 @@ public:
         if (R < 0 || G < 0 || B < 0) return;
         const float thr = (float)params.num("threshold", f, 0.8), knee = (float)params.num("knee", f, 0.4);
         const float imgCol = (float)std::clamp(params.num("color_from_image", f, 0.2), 0.0, 1.0);
+        // scene-linear footage: the key reads brightness as a display would (highlights above 1
+        // keep rising, a stop at a time), so the same threshold suits both kinds of footage
+        const bool linear = params.str("footage", "display") == "scene linear";
+        auto keyLum = [linear](float l) {
+            if (!linear) return l;
+            l = std::max(l, 0.0f);
+            return l <= 1 ? std::pow(l, 1 / 2.2f) : 1 + 0.5f * std::log2(l);
+        };
         Image hl = rgbOf(*src, big);
         for (size_t i = 0; i < hl.data.size(); i += 3) {
             float* c = &hl.data[i];
-            const float k = highKey(lum3(c), thr, knee);
+            const float k = highKey(keyLum(lum3(c)), thr, knee);
             for (int j = 0; j < 3; ++j) c[j] *= k;
         }
         const double s = std::max(0.1, params.num("size", f, 30)) * sc, s2 = s * std::max(1.0, params.num("spread", f, 4));
-        Image h(a.region, {"R", "G", "B"});
-        blurSum(hl, h, {{s, s, 0.6}, {s2, s2, 0.4}}, {0, 1, 2});
+        // one colour over both blurs, or a core colour hugging the edge and an outer colour further out
+        const bool two = params.flag("two_colour", false);
+        Image h(a.region, {"R", "G", "B"}), h2;
+        if (two) {
+            h2 = Image(a.region, {"R", "G", "B"});
+            blurSum(hl, h, {{s, s, 0.6}}, {0, 1, 2});
+            blurSum(hl, h2, {{s2, s2, 0.4}}, {0, 1, 2});
+        } else {
+            blurSum(hl, h, {{s, s, 0.6}, {s2, s2, 0.4}}, {0, 1, 2});
+        }
         const auto col = params.vec<4>("color", f, {1, 0.28, 0.08, 1});
+        const auto col2 = params.vec<4>("outer_color", f, {1, 0.55, 0.15, 1});
         const float inten = (float)std::max(0.0, params.num("intensity", f, 0.6));
         const bool only = params.flag("effect_only", false);
         for (int y = a.region.y1; y < a.region.y2 && (Engine::cancelPoint(), true); ++y)
@@ -104,6 +121,11 @@ public:
                 float* o = out.px(x, y);
                 float add[3];
                 for (int c = 0; c < 3; ++c) add[c] = inten * (l * (float)col[c] * (1 - imgCol) + q[c] * imgCol);
+                if (two) {
+                    const float* q2 = h2.px(x, y);
+                    const float l2 = lum3(q2);
+                    for (int c = 0; c < 3; ++c) add[c] += inten * (l2 * (float)col2[c] * (1 - imgCol) + q2[c] * imgCol);
+                }
                 o[R] = (only ? 0 : o[R]) + add[0];
                 o[G] = (only ? 0 : o[G]) + add[1];
                 o[B] = (only ? 0 : o[B]) + add[2];

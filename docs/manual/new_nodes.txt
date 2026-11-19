@@ -139,3 +139,5 @@ LightLeak
 LightLeakDissolve
 Dust
 MultiTone
+WhipTransition
+PrismLens

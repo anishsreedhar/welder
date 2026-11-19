@@ -13,7 +13,8 @@ const std::vector<TypeInfo>& types() {
         {Type::Electro, "electro"},       {Type::Plasma, "plasma"},        {Type::CellF1, "cells f1"},
         {Type::CellF2, "cells f2"},       {Type::CellEdges, "cell edges"}, {Type::Cells, "voronoi"},
         {Type::Crackle, "crackle"},       {Type::Dents, "dents"},          {Type::Dots, "dots"},
-        {Type::Random, "random"},
+        {Type::Random, "random"},         {Type::Bubbles, "bubbles"},      {Type::Puffy, "puffy"},
+        {Type::Bumpy, "bumpy"},
     };
     return t;
 }
@@ -300,6 +301,7 @@ Range rangeOf(Type t) {
         case Type::Dents: return {0.51f, 0.96f};
         case Type::Dots: return {0, 0.5f};
         case Type::Random: return {0, 1};
+        case Type::Bubbles: case Type::Puffy: case Type::Bumpy: return {0, 1};
     }
     return {0, 1};
 }
@@ -422,6 +424,23 @@ float raw(const Settings& s, P p) {
                     break;
                 }
                 case Type::Dents: v = 1 - c.f1 * c.f1; break;
+                case Type::Bubbles: case Type::Puffy: case Type::Bumpy: {
+                    // how far inside its cell: 0 on the seam, 1 well inside
+                    const float t = std::clamp((c.f2 - c.f1) / 0.6f, 0.0f, 1.0f);
+                    const float height = 0.65f + 0.35f * unit(mix(c.id1 ^ 0x5bd1e995U));  // each its own
+                    if (s.type == Type::Puffy) {
+                        const float u = std::min(1.0f, t * 2.2f);
+                        v = height * std::sqrt(1 - (1 - u) * (1 - u) * (1 - u) * (1 - u));
+                    } else {
+                        v = height * std::sqrt(std::max(0.0f, 1 - (1 - t) * (1 - t)));
+                        if (s.type == Type::Bumpy) {
+                            const Cell b2 = worley(x * 3.1f + 5.3f, y * 3.1f - 2.9f, z * 1.7f, seed + 101 + i, s.jitter, s.metric);
+                            const float t2 = std::clamp((b2.f2 - b2.f1) / 0.6f, 0.0f, 1.0f);
+                            v *= 0.78f + 0.22f * std::sqrt(std::max(0.0f, 1 - (1 - t2) * (1 - t2)));
+                        }
+                    }
+                    break;
+                }
                 default: v = c.f1;
             }
         }
