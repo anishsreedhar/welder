@@ -33,6 +33,7 @@ struct Style {
     int ghostCount = 8, ghostSides = 6;
     float ghostSqueeze = 1;
     V3 glowCol{1.0f, 0.82f, 0.6f}, streakCol{0.55f, 0.75f, 1.0f}, haloCol{1.0f, 0.75f, 0.5f};
+    V3 ghostTint{1, 1, 1};  // multiplies the ghosts' colours
 };
 
 Style styleFor(const std::string& s) {
@@ -59,6 +60,71 @@ Style styleFor(const std::string& s) {
     } else if (s == "subtle") {
         st.glow = 0.5f, st.glowSize = 80, st.halo = 0.08f, st.rainbow = 0.04f, st.rays = 0.15f, st.streak = 0.08f;
         st.ghosts = 0.35f, st.ghostCount = 6;
+    }
+    // ---- the looks library: finished flares, each a starting point
+    else if (s == "blue streak") {  // a long, hard blue line through a small cool core
+        st.glow = 0.7f, st.glowSize = 70, st.halo = 0.05f, st.rainbow = 0, st.rays = 0;
+        st.streak = 2.2f, st.streakLen = 1800, st.streakThick = 1.6f;
+        st.ghosts = 0.5f, st.ghostCount = 5, st.ghostSides = 0, st.ghostSqueeze = 0.45f;
+        st.glowCol = {0.7f, 0.82f, 1.0f}, st.streakCol = {0.2f, 0.45f, 1.0f}, st.haloCol = {0.4f, 0.6f, 1.0f};
+        st.ghostTint = {0.5f, 0.7f, 1.0f};
+    } else if (s == "warm sunset") {  // a big amber bloom with a soft orange ring
+        st.glow = 1.6f, st.glowSize = 240, st.halo = 0.35f, st.haloR = 300, st.haloW = 40, st.rainbow = 0.05f;
+        st.rays = 0.25f, st.rayCount = 10, st.rayLen = 300, st.streak = 0.2f, st.streakLen = 700;
+        st.ghosts = 0.5f, st.ghostCount = 7, st.ghostSides = 6;
+        st.glowCol = {1.0f, 0.62f, 0.3f}, st.streakCol = {1.0f, 0.55f, 0.25f}, st.haloCol = {1.0f, 0.5f, 0.2f};
+        st.ghostTint = {1.0f, 0.7f, 0.45f};
+    } else if (s == "vintage zoom") {  // gold core, purple streaks, a long chain of heptagon ghosts
+        st.glow = 1.0f, st.glowSize = 120, st.halo = 0.2f, st.haloR = 220, st.rainbow = 0.12f, st.rainbowR = 380;
+        st.rays = 0.3f, st.rayCount = 14, st.rayLen = 220, st.streak = 0.7f, st.streakLen = 900, st.streakThick = 4;
+        st.ghosts = 1.2f, st.ghostCount = 12, st.ghostSides = 7;
+        st.glowCol = {1.0f, 0.82f, 0.45f}, st.streakCol = {0.7f, 0.4f, 1.0f}, st.haloCol = {1.0f, 0.8f, 0.4f};
+        st.ghostTint = {1.0f, 0.85f, 0.75f};
+    } else if (s == "rainbow ghosts") {  // a modest light with bright, coloured reflections
+        st.glow = 0.7f, st.glowSize = 90, st.halo = 0.15f, st.rainbow = 0.6f, st.rainbowR = 360, st.rainbowW = 40;
+        st.rays = 0.15f, st.streak = 0.1f;
+        st.ghosts = 1.8f, st.ghostCount = 14, st.ghostSides = 0, st.ghostSize = 80;
+    } else if (s == "sparkle") {  // a tight point with many fine rays
+        st.glow = 0.9f, st.glowSize = 50, st.halo = 0.1f, st.haloR = 120, st.rainbow = 0.15f, st.rainbowR = 200;
+        st.rays = 1.4f, st.rayCount = 32, st.rayLen = 320, st.streak = 0.1f;
+        st.ghosts = 0.2f, st.ghostCount = 4;
+        st.glowCol = {1.0f, 0.95f, 0.9f};
+    } else if (s == "sunburst") {  // strong white spikes
+        st.glow = 1.3f, st.glowSize = 140, st.halo = 0.1f, st.rainbow = 0.08f;
+        st.rays = 2.0f, st.rayCount = 16, st.rayLen = 600, st.streak = 0.1f;
+        st.ghosts = 0.4f, st.ghostCount = 6, st.ghostSides = 6;
+        st.glowCol = {1.0f, 0.96f, 0.88f};
+    } else if (s == "cool anamorphic") {  // a soft, wide blue-white streak
+        st.glow = 0.8f, st.glowSize = 110, st.halo = 0.1f, st.rainbow = 0, st.rays = 0.05f;
+        st.streak = 1.1f, st.streakLen = 1100, st.streakThick = 6;
+        st.ghosts = 0.7f, st.ghostCount = 7, st.ghostSides = 0, st.ghostSqueeze = 0.6f;
+        st.glowCol = {0.85f, 0.92f, 1.0f}, st.streakCol = {0.6f, 0.78f, 1.0f}, st.haloCol = {0.7f, 0.85f, 1.0f};
+        st.ghostTint = {0.75f, 0.85f, 1.0f};
+    } else if (s == "red planet") {  // a dusty rust-red sun
+        st.glow = 1.4f, st.glowSize = 200, st.halo = 0.4f, st.haloR = 280, st.haloW = 30, st.rainbow = 0;
+        st.rays = 0.2f, st.rayCount = 8, st.streak = 0.15f;
+        st.ghosts = 0.4f, st.ghostCount = 6;
+        st.glowCol = {1.0f, 0.42f, 0.2f}, st.streakCol = {1.0f, 0.45f, 0.3f}, st.haloCol = {0.9f, 0.3f, 0.15f};
+        st.ghostTint = {1.0f, 0.5f, 0.35f};
+    } else if (s == "neon") {  // magenta core, cyan streak and rings
+        st.glow = 1.0f, st.glowSize = 90, st.halo = 0.7f, st.haloR = 160, st.haloW = 8, st.rainbow = 0;
+        st.rays = 0.2f, st.rayCount = 4, st.streak = 1.3f, st.streakLen = 900, st.streakThick = 2;
+        st.ghosts = 0.9f, st.ghostCount = 10, st.ghostSides = 0;
+        st.glowCol = {1.0f, 0.35f, 0.9f}, st.streakCol = {0.2f, 0.95f, 1.0f}, st.haloCol = {0.3f, 0.9f, 1.0f};
+        st.ghostTint = {0.8f, 0.5f, 1.0f};
+    } else if (s == "soft haze") {  // a wide veil of light, barely any structure
+        st.glow = 1.8f, st.glowSize = 380, st.halo = 0.05f, st.rainbow = 0, st.rays = 0, st.streak = 0.05f;
+        st.ghosts = 0.25f, st.ghostCount = 5, st.ghostSides = 0, st.ghostSize = 120;
+        st.glowCol = {1.0f, 0.9f, 0.78f};
+    } else if (s == "headlight") {  // a hot core with a short flat streak
+        st.glow = 1.5f, st.glowSize = 60, st.halo = 0.08f, st.rainbow = 0, st.rays = 0.35f, st.rayCount = 6, st.rayLen = 160;
+        st.streak = 0.9f, st.streakLen = 380, st.streakThick = 3;
+        st.ghosts = 0.3f, st.ghostCount = 4;
+        st.glowCol = {1.0f, 0.95f, 0.85f}, st.streakCol = {0.9f, 0.92f, 1.0f};
+    } else if (s == "dusty lens") {  // a soft light with many faint round reflections
+        st.glow = 1.0f, st.glowSize = 150, st.halo = 0.12f, st.rainbow = 0.1f, st.rays = 0.1f, st.streak = 0.1f;
+        st.ghosts = 1.0f, st.ghostCount = 24, st.ghostSides = 0, st.ghostSize = 45;
+        st.ghostTint = {1.0f, 0.92f, 0.82f};
     }
     return st;
 }
@@ -195,6 +261,7 @@ protected:
             g.rot = (float)blade;
             static const float hues[] = {0.08f, 0.12f, 0.33f, 0.5f, 0.58f, 0.75f, 0.95f};
             g.col = hsv(hues[(int)(rnd(seed, 15, i) * 7) % 7], 0.35f + 0.4f * rnd(seed, 16, i), 1.0f);
+            g.col.r *= st.ghostTint.r, g.col.g *= st.ghostTint.g, g.col.b *= st.ghostTint.b;
             ghosts.push_back(g);
         }
         // the axis: from the light through the centre

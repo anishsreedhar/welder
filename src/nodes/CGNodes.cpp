@@ -46,6 +46,20 @@ struct Bokeh {
     int quality = 12;     // the largest kernel radius (px) before working at a reduced resolution
     ImagePtr picture;     // Picture: its luminance (or alpha) is the kernel
     Box pictureBox;
+    // lens imperfections (disc and bladed only): cat-eye clipping toward the frame edges, which
+    // swirl turns from radial to tangential; onion rings; a brighter (or softer) rim; colour
+    // fringing (red's disc a little bigger than green's, blue's a little smaller)
+    double catEye = 0, swirl = 0, rings = 0, ringCount = 6, rim = 0, fringe = 0;
+    double cx = 0, cy = 0, halfDiag = 1;  // the frame, in render pixels (for the cat-eye)
+
+    bool imperfect() const {
+        return (shape == Disc || shape == Blades) && (catEye > 0 || rings > 0 || rim != 0 || fringe > 0);
+    }
+    void setFrame(const Format& fm) {
+        cx = fm.width * 0.5;
+        cy = fm.height * 0.5;
+        halfDiag = std::max(1.0, 0.5 * std::hypot((double)fm.width, (double)fm.height));
+    }
 
     static Bokeh from(const Params& p, double f) {
         Bokeh b;
@@ -55,6 +69,12 @@ struct Bokeh {
         b.rotation = p.num("rotation", f, 0);
         b.aspect = std::clamp(p.num("aspect", f, 1), 0.1, 10.0);
         b.quality = std::clamp((int)p.num("quality", f, 12), 2, 64);
+        b.catEye = std::clamp(p.num("cat_eye", f, 0), 0.0, 1.0);
+        b.swirl = std::clamp(p.num("swirl", f, 0), 0.0, 1.0);
+        b.rings = std::clamp(p.num("onion_rings", f, 0), 0.0, 1.0);
+        b.ringCount = std::clamp(p.num("ring_count", f, 6), 1.0, 30.0);
+        b.rim = std::clamp(p.num("rim", f, 0), -1.0, 1.0);
+        b.fringe = std::clamp(p.num("fringe", f, 0), 0.0, 0.5);
         return b;
     }
 };
@@ -310,6 +330,88 @@ void convolve(const Buf& src, const Kernel& K, const Box& o, Buf& out) {
         }
 }
 
+// The lens blur with imperfections: every output pixel gathers through its own kernel (the
+// cat-eye depends on where it is in the frame), weighted per channel (fringe) and by radius (rim,
+// onion rings). `k` is the reduction of `src`'s grid, for the pixel's place in the frame.
+void gatherBlur(const Buf& src, double r, int k, const Bokeh& b, const Box& o, Buf& out) {
+    out = Buf(o, src.n);
+    const int n = src.n;
+    const double ax = b.aspect >= 1 ? 1.0 : b.aspect, ay = b.aspect >= 1 ? 1.0 / b.aspect : 1.0;
+    const double rmax = r * (1 + b.fringe);
+    const int R = (int)std::ceil(rmax * std::max(ax, ay)) + 1;
+    const double rot = b.rotation * kPi / 180;
+    const int nb = b.blades;
+    const double apoK = std::cos(kPi / nb);
+    const double sw = b.swirl * kPi / 2, csw = std::cos(sw), ssw = std::sin(sw);
+    // which channel weights which: R G B by the fringe, the rest (alpha, ...) like G
+    std::vector<int> chOf(n, 1);
+    if (n >= 3) chOf[0] = 0, chOf[2] = 2;
+    double rc[3] = {r * (1 + b.fringe), r, r * (1 - b.fringe)};
+    // weight of a tap at (u, v) (round-shape units, after the aspect) for radius q, and the
+    // cat-eye's clipping disc offset (ox, oy) as a fraction of the radius
+    auto weight = [&](double u, double v, double q, double ox, double oy) -> float {
+        if (q <= 1e-6) return u * u + v * v < 0.25 ? 1.0f : 0.0f;
+        const double rho = std::hypot(u, v);
+        double d = rho - q;  // signed distance to the edge (disc)
+        if (b.shape == Bokeh::Blades) {
+            d = -1e9;
+            for (int i = 0; i < nb; ++i) {
+                const double a = rot + (i + 0.5) * 2 * kPi / nb;
+                d = std::max(d, u * std::cos(a) + v * std::sin(a) - q * apoK);
+            }
+        }
+        if (ox != 0 || oy != 0) d = std::max(d, std::hypot(u - ox * q, v - oy * q) - q);
+        const double cov = std::clamp(0.5 - d, 0.0, 1.0);
+        if (cov <= 0) return 0.0f;
+        const double t = std::min(1.0, rho / q);
+        double w = 1 + b.rim * (2 * t * t - 1);
+        if (b.rings > 0) w *= 1 + b.rings * 0.6 * std::cos(t * b.ringCount * 2 * kPi);
+        return (float)(cov * std::max(0.0, w));
+    };
+    std::vector<float> wts((size_t)(2 * R + 1) * (2 * R + 1) * 3);
+    for (int y = o.y1; y < o.y2; ++y)
+        for (int x = o.x1; x < o.x2; ++x) {
+            // the cat-eye: a second disc, pushed toward the frame centre by how far out we are
+            double ox = 0, oy = 0;
+            if (b.catEye > 0) {
+                const double px = (x + 0.5) * k - b.cx, py = (y + 0.5) * k - b.cy, dist = std::hypot(px, py);
+                if (dist > 1e-6) {
+                    const double amt = 1.2 * b.catEye * std::min(1.0, dist / b.halfDiag);
+                    const double ux = -px / dist, uy = -py / dist;  // toward the centre
+                    ox = amt * (ux * csw - uy * ssw);
+                    oy = amt * (ux * ssw + uy * csw);
+                }
+            }
+            double sum[3] = {0, 0, 0};
+            size_t wi = 0;
+            for (int dy = -R; dy <= R; ++dy)
+                for (int dx = -R; dx <= R; ++dx, wi += 3) {
+                    const double u = dx / ax, v = dy / ay;
+                    for (int c = 0; c < 3; ++c) {
+                        const float w = weight(u, v, rc[c] , ox, oy);
+                        wts[wi + c] = w;
+                        sum[c] += w;
+                    }
+                }
+            float* d = out.at(x, y);
+            wi = 0;
+            for (int dy = -R; dy <= R; ++dy) {
+                const int sy = y - dy;  // the image of a point: flipped
+                for (int dx = -R; dx <= R; ++dx, wi += 3) {
+                    const int sx = x - dx;
+                    if (!src.b.contains(sx, sy)) continue;
+                    if (wts[wi] == 0 && wts[wi + 1] == 0 && wts[wi + 2] == 0) continue;
+                    const float* s = src.at(sx, sy);
+                    for (int c = 0; c < n; ++c) d[c] += wts[wi + chOf[c]] * s[c];
+                }
+            }
+            for (int c = 0; c < n; ++c) {
+                const double sm = sum[chOf[c]];
+                d[c] = sm > 0 ? (float)(d[c] / sm) : 0.0f;
+            }
+        }
+}
+
 // Lens-blur `src` (full resolution grid) by radius r px into the box `o`.
 // Large radii work on a box-reduced copy (cells of k x k on the global grid,
 // so tiles agree) and come back bilinearly.
@@ -320,7 +422,8 @@ void lensBlur(const Buf& src, double r, const Bokeh& bk, const Box& o, Buf& out)
     }
     int k = std::max(1, (int)std::ceil(r / bk.quality));
     if (k == 1) {
-        convolve(src, makeKernel(bk, r), o, out);
+        if (bk.imperfect()) gatherBlur(src, r, 1, bk, o, out);
+        else convolve(src, makeKernel(bk, r), o, out);
         return;
     }
     const int n = src.n;
@@ -335,7 +438,8 @@ void lensBlur(const Buf& src, double r, const Bokeh& bk, const Box& o, Buf& out)
         }
     Box ro(floordiv(o.x1, k) - 1, floordiv(o.y1, k) - 1, floordiv(o.x2 - 1, k) + 2, floordiv(o.y2 - 1, k) + 2);
     Buf blurred;
-    convolve(red, makeKernel(bk, r / k), ro, blurred);
+    if (bk.imperfect()) gatherBlur(red, r / k, k, bk, ro, blurred);
+    else convolve(red, makeKernel(bk, r / k), ro, blurred);
     out = Buf(o, n);
     for (int y = o.y1; y < o.y2; ++y)
         for (int x = o.x1; x < o.x2; ++x) {
@@ -382,7 +486,7 @@ public:
     int pad(Engine& e, double f) const {
         double m = params.num("maximum", f, 40) * e.scale();
         double a = std::clamp(params.num("aspect", f, 1), 0.1, 10.0);
-        double r = m * std::max(a, 1 / a);
+        double r = m * std::max(a, 1 / a) * (1 + std::clamp(params.num("fringe", f, 0), 0.0, 0.5));
         int k = std::max(1, (int)std::ceil(r / std::clamp((int)params.num("quality", f, 12), 2, 64)));
         return (int)std::ceil(r) + 3 * k + 2;
     }
@@ -420,6 +524,7 @@ public:
         const double size = params.num("size", f, 20) * sc, maxR = std::max(0.0, params.num("maximum", f, 40) * sc);
         const std::string output = params.str("output", "result");
         Bokeh bk = Bokeh::from(params, f);
+        bk.setFrame(nodeFormat(a.engine, this, input(0), f));
         if (bk.shape == Bokeh::Picture) {
             if (!input(1)) bk.shape = Bokeh::Disc;
             else {
@@ -499,7 +604,7 @@ public:
             const Box& lb = lbox[L + K];
             if (lb.empty()) continue;
             double r = radii[std::abs(L)];
-            int reach = (int)std::ceil(r * std::max(bk.aspect, 1 / bk.aspect)) + 2;
+            int reach = (int)std::ceil(r * std::max(bk.aspect, 1 / bk.aspect) * (1 + bk.fringe)) + 2;
             if (lb.pad(reach, reach).intersect(a.region).empty()) continue;
             Box sb = lb.intersect(B);
             Buf layer(sb, 4);
@@ -551,7 +656,7 @@ public:
     int pad(Engine& e, double f) const {
         double r = std::max(0.0, params.num("defocus", f, 10)) * e.scale();
         double a = std::clamp(params.num("aspect", f, 1), 0.1, 10.0);
-        r *= std::max(a, 1 / a);
+        r *= std::max(a, 1 / a) * (1 + std::clamp(params.num("fringe", f, 0), 0.0, 0.5));
         int k = std::max(1, (int)std::ceil(r / std::clamp((int)params.num("quality", f, 12), 2, 64)));
         return (int)std::ceil(r) + 3 * k + 2;
     }
@@ -574,6 +679,7 @@ public:
         ImagePtr src = a.fetch(input(0), B);
         out.copyFrom(*src);
         Bokeh bk = Bokeh::from(params, f);
+        bk.setFrame(nodeFormat(a.engine, this, input(0), f));
         if (bk.shape == Bokeh::Picture) {
             if (!input(1)) bk.shape = Bokeh::Disc;
             else {

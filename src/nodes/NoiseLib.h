@@ -29,6 +29,9 @@ enum class Type {
     Crackle,     // thin cell borders (dried mud, crackle)
     Dents,       // rounded dents per cell (hammered metal)
     Dots,        // scattered round spots of random size (sparse convolution)
+    Bubbles,     // cells as round domes, each its own height (bubble wrap, foam)
+    Puffy,       // cells as soft pillows with flat tops and pinched seams
+    Bumpy,       // domes with smaller bumps on them (blistered paint, frogspawn)
     Random,      // white noise (blocks of `size`)
 };
 
