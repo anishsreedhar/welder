@@ -1,0 +1,97 @@
+// FractalFold (nodes/PsychicNodes.cpp) on the GPU: recursive polar folds around a centre or a
+// grid of tiles, mixed into the plate by detail, luminance or everywhere. Output pixel (i, j) is
+// image pixel (rx1 + i, ry1 + j); the source buffer starts at image (sx1, sy1).
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { float src[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Map { int chmap[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Prm { float prm[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Det { float det[]; };
+layout(std430, set = 0, binding = 4) readonly buffer Msk { float msk[]; };
+layout(std430, set = 0, binding = 5) buffer Dst { float dst[]; };
+
+layout(push_constant) uniform P {
+    int sw, sh, sn;
+    int ow, oh, on;
+    int rx1, ry1, sx1, sy1;
+    int iters, drive, view, kind;  // drive: 0 detail, 1 luminance, 2 everywhere
+    int iR, iG, iB;
+    int flags;                     // 1 tiled, 2 mask
+    int fbx1, fby1, fbx2, fby2;    // the format box within the source (image coords): mirror edges
+} p;
+// prm: 0 scale, 1 seg (2 pi / N), 2 tile, 3 cos rot, 4 sin rot, 5 cx, 6 cy, 7 fold scale k,
+// 8 offset, 9 back (1 / (k^(iters-1) zoom)), 10 threshold, 11 softness, 12 B, 13 C
+
+#include "psy_common.glsl"
+#include "psy_sample.glsl"
+
+float smoothstepf(float e0, float e1, float v) {
+    if (e1 <= e0) return v >= e0 ? 1.0 : 0.0;
+    float t = clamp((v - e0) / (e1 - e0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+float mirror(float v, float lo, float len) {
+    if (len <= 1.0) return lo + 0.5;
+    float t = v - lo, m = t - 2.0 * len * floor(t / (2.0 * len));
+    return lo + (m > len ? 2.0 * len - m : m);
+}
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x), j = int(gl_GlobalInvocationID.y);
+    if (i >= p.ow || j >= p.oh) return;
+    int o = (j * p.ow + i) * p.on;
+    int x = p.rx1 + i, y = p.ry1 + j;
+    int lx = x - p.sx1, ly = y - p.sy1;
+    bool inside = lx >= 0 && ly >= 0 && lx < p.sw && ly < p.sh;
+    float sc = prm[0];
+    float w;
+    if (p.drive == 0) w = det[j * p.ow + i];
+    else if (p.drive == 1 && inside && p.iR >= 0 && p.iG >= 0 && p.iB >= 0) {
+        int b = (ly * p.sw + lx) * p.sn;
+        float Yl = max(0.0, 0.2126 * src[b + p.iR] + 0.7152 * src[b + p.iG] + 0.0722 * src[b + p.iB]);
+        w = Yl / (1.0 + Yl) * 2.0;
+    } else w = p.drive == 2 ? 1.0 : 0.0;
+    if (p.drive != 2) w = smoothstepf(prm[10] - prm[11] / 2.0, prm[10] + prm[11] / 2.0, w);
+    if ((p.flags & 2) != 0) w *= msk[j * p.ow + i];
+    if (p.view == 1) {
+        for (int c = 0; c < p.on; ++c) dst[o + c] = w;
+        return;
+    }
+    for (int c = 0; c < p.on; ++c) dst[o + c] = inside && chmap[c] >= 0 ? src[(ly * p.sw + lx) * p.sn + chmap[c]] : 0.0;
+    if (w <= 0.0) return;
+    float X = (float(x) + 0.5) / sc, Y = (float(y) + 0.5) / sc;
+    float ox = prm[5], oy = prm[6], vx = X - ox, vy = Y - oy;
+    float tile = prm[2], cr = prm[3], sr = prm[4], seg = prm[1], k = prm[7], off = prm[8];
+    if ((p.flags & 1) != 0) {
+        float tx = round(vx / tile), ty = round(vy / tile);
+        vx -= tx * tile, vy -= ty * tile;
+        ox += tx * tile, oy += ty * tile;
+    }
+    float ux = cr * vx + sr * vy, uy = -sr * vx + cr * vy;
+    for (int it = 0; it < p.iters; ++it) {
+        float r = sqrt(ux * ux + uy * uy);
+        float t = atan(uy, ux);
+        t -= seg * floor(t / seg);
+        t = abs(t - seg / 2.0);
+        ux = r * cos(t), uy = r * sin(t);
+        if (it + 1 < p.iters) {
+            ux = abs(ux) * k - off, uy = abs(uy) * k - off;
+            float nx = cr * ux + sr * uy, ny = -sr * ux + cr * uy;
+            ux = nx, uy = ny;
+        }
+    }
+    ux *= prm[9], uy *= prm[9];
+    float sx = (ox + cr * ux - sr * uy) * sc, sy = (oy + sr * ux + cr * uy) * sc;
+    float W = float(p.fbx2 - p.fbx1), H = float(p.fby2 - p.fby1);
+    if (W > 0.0 && H > 0.0 && (sx < float(p.fbx1) || sx > float(p.fbx2) || sy < float(p.fby1) || sy > float(p.fby2))) {
+        sx = mirror(sx, float(p.fbx1), W);
+        sy = mirror(sy, float(p.fby1), H);
+    }
+    PsyTaps tp = psyTaps(sx - float(p.sx1), sy - float(p.sy1), p.sw, p.sh, p.kind, prm[12], prm[13], true);
+    for (int c = 0; c < p.on; ++c) {
+        float v = chmap[c] >= 0 ? psyGather(tp, p.sw, p.sh, p.sn, chmap[c], true) : 0.0;
+        dst[o + c] += (v - dst[o + c]) * w;
+    }
+}

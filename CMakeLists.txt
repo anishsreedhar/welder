@@ -184,6 +184,8 @@ if(STRATA_GPU AND GLSLANG_VALIDATOR)
   set(GPU_GEN ${CMAKE_BINARY_DIR}/gpu_gen)
   file(MAKE_DIRECTORY ${GPU_GEN})
   file(GLOB GPU_SHADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/gpu/shaders/*.comp)
+  # shared code the kernels #include: a change rebuilds every kernel
+  file(GLOB GPU_SHADER_LIBS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/gpu/shaders/*.glsl)
   set(GPU_HEADERS "")
   set(GPU_INCLUDES "")
   set(GPU_LIST "")
@@ -191,7 +193,7 @@ if(STRATA_GPU AND GLSLANG_VALIDATOR)
     get_filename_component(nm ${sh} NAME_WE)
     add_custom_command(OUTPUT ${GPU_GEN}/${nm}.spv.h
       COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 --vn spv_${nm} -o ${GPU_GEN}/${nm}.spv.h ${sh}
-      DEPENDS ${sh} COMMENT "SPIR-V: ${nm}" VERBATIM)
+      DEPENDS ${sh} ${GPU_SHADER_LIBS} COMMENT "SPIR-V: ${nm}" VERBATIM)
     list(APPEND GPU_HEADERS ${GPU_GEN}/${nm}.spv.h)
     string(APPEND GPU_INCLUDES "#include \"${nm}.spv.h\"\n")
     string(APPEND GPU_LIST "        {\"${nm}\", spv_${nm}, sizeof(spv_${nm}) / 4},\n")

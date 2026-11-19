@@ -1,0 +1,56 @@
+// TemporalTracer (nodes/PsychicNodes.cpp) on the GPU: the trail of one tile from all its earlier
+// frames at once. Each frame adds back weighted by its decay x its motion mask (speed vs the
+// threshold), hue-turned in OKLab and tinted, into the trail (r, g, b, a per pixel). The CPU then
+// normalises it and blends it over the current frame.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { float src[]; };  // n frames of rgba, ow x oh each
+layout(std430, set = 0, binding = 1) readonly buffer Spd { float spd[]; };  // n frames of speed (px / frame)
+layout(std430, set = 0, binding = 2) readonly buffer Prm { float prm[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer Dst { float dst[]; };  // the trail
+
+layout(push_constant) uniform P {
+    int ow, oh, n;
+    int flags;  // 1 speed (vectors connected), 2 turn the hue
+} p;
+// prm: 0 vth - vsoft / 2, 1 vth + vsoft / 2, 2..4 tint, then per frame (at 8 + 3 i): weight, cos turn,
+// sin turn
+
+#include "psy_common.glsl"
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x), j = int(gl_GlobalInvocationID.y);
+    if (i >= p.ow || j >= p.oh) return;
+    int q = j * p.ow + i, npx = p.ow * p.oh;
+    vec4 t = vec4(0);
+    vec3 tint = vec3(prm[2], prm[3], prm[4]);
+    for (int k = 0; k < p.n; ++k) {
+        float m = 1.0;
+        if ((p.flags & 1) != 0) {
+            float e0 = prm[0], e1 = prm[1], v = spd[k * npx + q];
+            if (e1 <= e0) m = v >= e0 ? 1.0 : 0.0;
+            else {
+                float s = clamp((v - e0) / (e1 - e0), 0.0, 1.0);
+                m = s * s * (3.0 - 2.0 * s);
+            }
+        }
+        if (m <= 0.0) continue;
+        int b = (k * npx + q) * 4;
+        vec3 rgb = vec3(src[b], src[b + 1], src[b + 2]);
+        float ct = prm[8 + 3 * k + 1], st = prm[8 + 3 * k + 2];
+        if ((p.flags & 2) != 0) {
+            vec3 lab = psyToOklab(rgb);
+            float a2 = lab.y * ct - lab.z * st, b2 = lab.y * st + lab.z * ct;
+            rgb = psyFromOklab(vec3(lab.x, a2, b2));
+        }
+        float w = prm[8 + 3 * k] * m;
+        t.rgb += rgb * tint * w;
+        t.a += src[b + 3] * w;
+    }
+    dst[q * 4] = t.r;
+    dst[q * 4 + 1] = t.g;
+    dst[q * 4 + 2] = t.b;
+    dst[q * 4 + 3] = t.a;
+}

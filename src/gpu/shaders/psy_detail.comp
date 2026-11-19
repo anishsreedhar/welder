@@ -1,0 +1,54 @@
+// DetailMask (nodes/DetailMask.cpp) on the GPU: Sobel gradient + local standard deviation of the
+// display-encoded luminance, 1 - exp(-gain * (edges * ew + contrast * cw)). Coordinates are the
+// source buffer's local pixels; reads clamp to the limit box (the input's dod).
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { float src[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Prm { float prm[]; };  // sc, gain, ew, cw
+layout(std430, set = 0, binding = 2) writeonly buffer Dst { float dst[]; };
+
+layout(push_constant) uniform P {
+    int sw, sh, sn;
+    int iR, iG, iB;      // channels (-1: none)
+    int ox, oy, ow, oh;  // the output region, in source pixels
+    int lx1, ly1, lx2, ly2;
+    int r;               // contrast window radius (render pixels)
+} p;
+
+#include "psy_common.glsl"
+
+float lum(int x, int y) {
+    x = clamp(x, p.lx1, p.lx2 - 1);
+    y = clamp(y, p.ly1, p.ly2 - 1);
+    int b = (y * p.sw + x) * p.sn;
+    float l;
+    if (p.iR >= 0 && p.iG < 0 && p.iB < 0) l = src[b + p.iR];
+    else l = (p.iR >= 0 ? 0.2126 * src[b + p.iR] : 0.0) + (p.iG >= 0 ? 0.7152 * src[b + p.iG] : 0.0) + (p.iB >= 0 ? 0.0722 * src[b + p.iB] : 0.0);
+    return psyDisplayEncode(l);
+}
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x), j = int(gl_GlobalInvocationID.y);
+    if (i >= p.ow || j >= p.oh) return;
+    int x = p.ox + i, y = p.oy + j;
+    float sc = prm[0], gain = prm[1], ew = prm[2], cw = prm[3];
+    float a = lum(x - 1, y - 1), bb = lum(x, y - 1), c = lum(x + 1, y - 1);
+    float d = lum(x - 1, y), f = lum(x + 1, y);
+    float g = lum(x - 1, y + 1), h = lum(x, y + 1), k = lum(x + 1, y + 1);
+    float gx = ((c + 2.0 * f + k) - (a + 2.0 * d + g)) / 8.0, gy = ((g + 2.0 * h + k) - (a + 2.0 * bb + c)) / 8.0;
+    float edge = sqrt(gx * gx + gy * gy) * sc;
+    float ref = lum(x, y), s1 = 0.0, s2 = 0.0;
+    for (int yy = -p.r; yy <= p.r; ++yy)
+        for (int xx = -p.r; xx <= p.r; ++xx) {
+            float l = lum(x + xx, y + yy) - ref;
+            s1 += l;
+            s2 += l * l;
+        }
+    float n = float((2 * p.r + 1) * (2 * p.r + 1));
+    float m = s1 / n, var = s2 / n - m * m;
+    if (var < 1e-12) var = 0.0;
+    float raw = ew * edge + cw * sqrt(var);
+    dst[j * p.ow + i] = 1.0 - exp(-max(0.0, gain) * max(0.0, raw));
+}

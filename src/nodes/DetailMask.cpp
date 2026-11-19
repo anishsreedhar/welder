@@ -3,9 +3,32 @@
 #include <algorithm>
 #include <cmath>
 
+#include "../gpu/Gpu.h"
 #include "Retime.h"
 
 namespace strata::fx {
+
+namespace {
+
+// The same mask on the GPU (psy_detail.comp): Sobel plus a direct (2r + 1)^2 window instead of
+// summed-area tables. False when there's no GPU or the call failed.
+bool detailMaskGpu(const Image& src, const Box& region, const DetailOptions& o, const Box& lim, std::vector<float>& out) {
+    const Box& sb = src.bounds;
+    if (src.nch() == 0 || (double)region.area() < 4096 || !gpu::available()) return false;
+    int r = src.ch("R"), g = src.ch("G"), b = src.ch("B");
+    if (r < 0 && g < 0 && b < 0) r = src.ch("A");
+    const double sc = std::max(1e-3, o.scale);
+    const int rad = std::max(1, (int)std::lround(std::max(0.0, o.radius) * sc));
+    struct Push {
+        int sw, sh, sn, iR, iG, iB, ox, oy, ow, oh, lx1, ly1, lx2, ly2, r;
+    } pc{sb.width(), sb.height(), src.nch(), r, g, b, region.x1 - sb.x1, region.y1 - sb.y1, region.width(), region.height(),
+         lim.x1 - sb.x1, lim.y1 - sb.y1, lim.x2 - sb.x1, lim.y2 - sb.y1, rad};
+    const float prm[4] = {(float)sc, (float)std::max(0.0, o.gain), (float)o.edgeWeight, (float)o.contrastWeight};
+    return gpu::run("psy_detail", {{src.data.data(), src.bytes()}, {prm, sizeof prm}}, {{out.data(), out.size() * sizeof(float)}},
+                    &pc, sizeof pc, (uint32_t)(pc.ow + 15) / 16, (uint32_t)(pc.oh + 15) / 16);
+}
+
+}  // namespace
 
 int detailPad(const DetailOptions& o) {
     return std::max(1, (int)std::lround(std::max(0.0, o.radius) * std::max(1e-3, o.scale))) + 1;
@@ -15,11 +38,12 @@ std::vector<float> detailMask(const Image& src, const Box& region, const DetailO
     const int RW = region.width(), RH = region.height();
     std::vector<float> out((size_t)std::max(0, RW) * std::max(0, RH), 0.0f);
     if (region.empty() || src.bounds.empty()) return out;
+    const Box& sb = src.bounds;
+    const Box lim = o.limit.empty() ? sb : o.limit.intersect(sb).empty() ? sb : o.limit.intersect(sb);
+    if (o.gpu && detailMaskGpu(src, region, o, lim, out)) return out;
     const float wts[3] = {0.2126f, 0.7152f, 0.0722f};
     const retime::Plane L = retime::luminance(src, wts);
-    const Box& sb = src.bounds;
     const int W = L.w, H = L.h;
-    const Box lim = o.limit.empty() ? sb : o.limit.intersect(sb).empty() ? sb : o.limit.intersect(sb);
     auto lum = [&](int x, int y) {  // x, y in image coordinates, clamped to the source (and the limit)
         x = std::clamp(x, lim.x1, lim.x2 - 1);
         y = std::clamp(y, lim.y1, lim.y2 - 1);
