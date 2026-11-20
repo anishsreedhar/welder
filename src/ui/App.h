@@ -11,6 +11,7 @@
 // knob is being dragged only the quick passes run, so the viewer keeps up.
 #pragma once
 
+#include "core/HalfImage.h"
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -184,6 +185,18 @@ public:
     std::function<void()> onResult;
     // Time of the last finished full-quality pass, for the status line.
     double lastRenderMs() const { return lastMs_; }
+    double viewScale() {
+        std::lock_guard<std::mutex> l(reqM_);
+        return viewScale_;
+    }
+    // A mouse gesture (a handle or knob drag, a pan) is under way: the viewer renders at the scale
+    // that keeps up (from what a full pass cost last time), with no refining pass to be thrown away
+    // at the next step. Letting go renders full quality. Set once per UI frame.
+    void setGesture(bool on);
+    bool gesture() const { return gesture_; }
+    // The scale a pass during a gesture renders at: the finest power-of-two step of `target` whose
+    // cost, scaled from `targetMs` by pixel count, fits `budgetMs` (1/16 at the coarsest).
+    static double gestureScale(double target, double targetMs, double budgetMs = 40);
     // The Performance panel: while on, the viewer's renders are timed per node.
     struct PerfSnapshot {
         std::string node;                    // what was rendered
@@ -460,7 +473,8 @@ private:
     std::vector<std::string> undo_, redo_;
 
     struct CachedFrame {
-        ViewResult r;
+        ViewResult r;  // without its images: they're kept below in half floats (twice the frames in the same RAM)
+        std::shared_ptr<const HalfImage> image, imageB;
         uint64_t gen = 0;
         double scale = 0;
         Box region;
@@ -469,6 +483,8 @@ private:
         uint64_t content = 0;  // ViewResult::content: an edit that leaves it the same keeps the frame
     };
     std::map<std::pair<std::string, int>, CachedFrame> frameCache_;  // (node, frame), guarded by resM_
+    std::vector<std::shared_ptr<Image>> unpackPool_;  // images cached frames were unpacked into, reused once nothing holds them (resM_)
+    ImagePtr unpackFrame(const HalfImage& h);  // with resM_ held
     std::deque<std::pair<std::string, int>> frameLru_;
     size_t frameBytes_ = 0;
     std::atomic<uint64_t> editGen_{0};
@@ -503,6 +519,8 @@ private:
     std::atomic<bool> busy_{false};
     std::atomic<bool> passIsRefine_{false};
     std::atomic<bool> passIsPreview_{false};
+    std::atomic<bool> gesture_{false};
+    std::atomic<double> shownScale_{0};  // the scale of the last image handed to the viewer
     std::atomic<bool> editsWaiting_{false};
     // A render thread's read lock on the comp. While edits are waiting it first gives way (up to a
     // quarter second), so a stream of renders (playback's read-ahead) can't keep an edit out:

@@ -36,6 +36,7 @@
 #include "nodes/Track.h"
 #include "nodes/Planar.h"
 #include "nodes/Retime.h"
+#include "core/HalfImage.h"
 #include "nodes/Rife.h"
 #include "nodes/CamExport.h"
 #include "nodes/Geo.h"
@@ -7522,6 +7523,113 @@ Connections:  {
                 }
             }
         std::printf("  fast vs sample(): worst %.2g\n", worst);
+        CHECK(worst < 1e-5);
+    });
+    test("HalfImage: packs to half floats and back (playback cache), within half precision", [] {
+        CHECK(halfbits::toFloat(halfbits::fromFloat(1.0f)) == 1.0f);
+        CHECK(halfbits::toFloat(halfbits::fromFloat(0.0f)) == 0.0f);
+        CHECK(halfbits::toFloat(halfbits::fromFloat(-2.5f)) == -2.5f);
+        CHECK(halfbits::toFloat(halfbits::fromFloat(65504.0f)) == 65504.0f);
+        CHECK(halfbits::toFloat(halfbits::fromFloat(1e9f)) == 65504.0f);  // clamps, no inf
+        CHECK(std::isnan(halfbits::toFloat(halfbits::fromFloat(std::nanf("")))));
+        CHECK(halfbits::toFloat(halfbits::fromFloat(5.960464e-8f)) == 5.960464477539063e-8f);  // smallest subnormal
+        auto im = std::make_shared<Image>(Box(-5, 3, 1200, 900), ChannelSet{"R", "G", "B", "A"});
+        uint32_t st = 3;
+        for (auto& v : im->data) {
+            st = st * 1664525u + 1013904223u;
+            v = ((float)((st >> 8) & 0xffffff) / 16777215.0f) * 8 - 2;
+        }
+        auto h = HalfImage::pack(im);
+        CHECK(h->bytes() * 2 == im->bytes());
+        auto back = h->unpack();
+        CHECK(back->bounds == im->bounds && back->channels == im->channels);
+        double worst = 0;
+        for (size_t i = 0; i < im->data.size(); ++i)
+            worst = std::max(worst, std::fabs(back->data[i] - im->data[i]) / std::max(1e-3, (double)std::fabs(im->data[i])));
+        std::printf("  worst relative error %.2g\n", worst);
+        CHECK(worst < 1.0 / 1024);
+    });
+    test("SharedCache: a waiter whose build was cancelled elsewhere builds it itself (playback stuck on a frame)", [] {
+        retime::SharedCache<int> cache(2);
+        std::atomic<bool> aThrew{false};
+        std::thread a([&] {
+            try {
+                cache.get(7, [] {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                    throw RenderCancelled();  // the read-ahead engine building it was cancelled
+                    return std::shared_ptr<const int>();
+                });
+            } catch (const RenderCancelled&) {
+                aThrew = true;
+            }
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        std::shared_ptr<const int> got;
+        bool bThrew = false;
+        try {
+            got = cache.get(7, [] { return std::make_shared<const int>(42); });
+        } catch (const RenderCancelled&) {
+            bThrew = true;
+        }
+        a.join();
+        CHECK(aThrew);
+        CHECK(!bThrew);
+        CHECK(got && *got == 42);
+        // a running build is never evicted by later finished ones
+        retime::SharedCache<int> small(1);
+        std::atomic<int> builds{0};
+        std::thread slow([&] {
+            small.get(1, [&] {
+                ++builds;
+                std::this_thread::sleep_for(std::chrono::milliseconds(120));
+                return std::make_shared<const int>(1);
+            });
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        small.get(2, [] { return std::make_shared<const int>(2); });
+        small.get(1, [&] {
+            ++builds;
+            return std::make_shared<const int>(1);
+        });
+        slow.join();
+        CHECK(builds == 1);
+    });
+    test("Sampling: the RGB / one- and two-channel fast path matches the general one (all filters)", [] {
+        double worst = 0;
+        for (int nc : {1, 2, 3}) {
+            ChannelSet chs;
+            for (int c = 0; c < nc; ++c) chs.push_back(std::string(1, "RGB"[c]));
+            Image im(Box(-3, 5, 37, 29), chs);
+            uint32_t st = 11 + nc;
+            for (auto& v : im.data) {
+                st = st * 1664525u + 1013904223u;
+                v = (float)((st >> 8) & 0xffff) / 65535.0f * 2 - 0.5f;
+            }
+            // the same pixels with a spare channel in front: the general path, the same taps
+            Image wide(im.bounds, [&] { ChannelSet w = {"X"}; for (auto& c : chs) w.push_back(c); return w; }());
+            for (int y = im.bounds.y1; y < im.bounds.y2; ++y)
+                for (int x = im.bounds.x1; x < im.bounds.x2; ++x)
+                    for (int c = 0; c < nc; ++c) wide.px(x, y)[c + 1] = im.px(x, y)[c];
+            std::vector<int> ident(nc), shifted(nc);
+            for (int c = 0; c < nc; ++c) ident[c] = c, shifted[c] = c + 1;
+            for (const char* fn : {"cubic", "keys", "bilinear", "lanczos6", "impulse"})
+                for (float foot : {1.0f, 2.5f}) {
+                    const Filter fl = parseFilter(fn);
+                    SampleOpts so;
+                    so.footX = so.footY = foot;
+                    for (int i = 0; i < 2000; ++i) {
+                        st = st * 1664525u + 1013904223u;
+                        const double x = -8 + (st >> 8) % 52000 / 1000.0;
+                        st = st * 1664525u + 1013904223u;
+                        const double y = 0 + (st >> 8) % 36000 / 1000.0;
+                        float a[3], b[3];
+                        sample(im, x, y, fl, a, ident, so);
+                        sample(wide, x, y, fl, b, shifted, so);
+                        for (int k = 0; k < nc; ++k) worst = std::max(worst, (double)std::fabs(a[k] - b[k]));
+                    }
+                }
+        }
+        std::printf("  fast vs general: worst %.2g\n", worst);
         CHECK(worst < 1e-5);
     });
     test("Write: a new Write's file defaults to the comp's name, and stays editable", [] {
