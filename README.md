@@ -43,10 +43,16 @@ updates per second.
 
 **Windows:** before unzipping, right-click the zip, Properties, tick **Unblock**, OK. The build
 isn't code-signed yet, so Windows may still say "Windows protected your PC": click **More info**,
-then **Run anyway**. Unzip every zip into the same folder and run `Welder.bat`.
+then **Run anyway**. Unzip it (any extra zips go into the same folder) and run `Welder.bat`.
 
 **Linux:** unpack and run `./Welder`; `./install-desktop-entry.sh` adds it to your
 applications menu.
+
+**Updates:** Welder checks GitHub for a newer version when it starts (at most every 12 hours) and
+shows **Update available** at the top right of the menu bar; **Help › Check for Updates** checks now.
+Unzip the new version anywhere: settings and the ML setup aren't kept in the Welder folder, so it
+picks them up (models you put in the old folder's `models\` by hand: move them across). Turn the
+check off in **Edit › Preferences › Updates**, or with `WELDER_NO_UPDATE_CHECK=1` on offline machines.
 
 It's a beta: save often (it autosaves every 30 seconds and offers to recover after a crash) and
 don't put it on a delivery you can't redo.
