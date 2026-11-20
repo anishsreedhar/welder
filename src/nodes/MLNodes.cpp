@@ -1253,7 +1253,7 @@ public:
         std::error_code ec;
         const auto t = std::filesystem::last_write_time(file, ec);
         if (ec) return nullptr;
-        const std::string key = file + "|" + std::to_string(t.time_since_epoch().count());
+        const std::string key = file + "|" + std::to_string(static_cast<long long>(t.time_since_epoch().count()));
         {
             std::lock_guard<std::mutex> l(m);
             for (auto it = lru.begin(); it != lru.end(); ++it)
