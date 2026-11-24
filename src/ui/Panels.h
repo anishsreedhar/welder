@@ -146,10 +146,12 @@ struct GraphState {
     bool needsFrame = true;
     enum class Drag { None, Move, Marquee, Pan, FromInput, FromOutput, Resize, Cut, Zoom } drag = Drag::None;
     ImVec2 zoomAnchor;  // Zoom drag: the screen point that stays put
+    bool comboZoom = false;  // the Zoom came from middle + left held together (back to a pan when left is let go)
     ImVec2 cutStart;    // Alt+drag: where the cutting line started (screen)
     std::string level;  // the group shown ("" = the top level)
     ImVec2 resizeOrig;  // backdrop size when a resize started
     ImVec2 dragStartScreen;
+    bool autoPanning = false;  // a drag is scrolling the graph at its edge (the UI keeps drawing frames)
     std::map<std::string, ImVec2> moveOrig;
     bool moved = false;
     // a pipe drag started from a node's top / bottom edge: until the mouse has moved a few
@@ -454,9 +456,12 @@ struct UiState {
     bool updateManual = false;  // Help > Check for Updates is running: say what it found
     bool showUpdate = false;    // the "Welder x.y.z is available" dialog
     bool resetWorkspace = false;  // Workspace > Reset Workspace: the default layout on the next frame
+    int loadWorkspace = 0;        // 1-6: switch to that saved workspace before the next frame (Shift+F1-F6, #103)
+    bool openSaveWorkspace = false;  // Workspace > Save Workspace...
     bool showPrefs = false;  // Edit > Preferences (Shift+S)
     std::string lastCrash;     // the report the previous run left when it crashed (shown once)
     bool showPerf = false;     // Viewer > Performance
+    bool showMetadata = false; // Viewer > Metadata: the viewed frame's metadata (#99)
     float frameMs[240] = {};   // the UI's work per frame, the last 240 frames (a ring)
     int frameIdx = 0;
     double frameStamp[240] = {};  // when each was drawn (s)
@@ -498,6 +503,12 @@ struct UiState {
 };
 
 void drawMenuBar(App& app, UiState& ui);
+// Saved workspaces (#103): six slots, switched with Shift+F1-F6. Slot 1 is "Compositing", the default
+// layout until a layout is saved over it. Each is a layout .ini in <config>/workspaces.
+constexpr int kWorkspaceSlots = 6;
+std::string workspaceName(int slot);  // "" = nothing saved there (slot 1: "Compositing")
+bool workspaceSaved(int slot);
+std::string workspaceLayout(int slot);  // the saved layout ("" = none)
 void drawToolbar(App& app, UiState& ui);
 void drawViewer(App& app, UiState& ui);
 void drawTimeline(App& app, UiState& ui);
