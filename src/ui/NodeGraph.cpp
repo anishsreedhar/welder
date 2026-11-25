@@ -2877,9 +2877,8 @@ void drawNodeGraph(App& app, UiState& ui) {
                 for (auto& n : comp.nodes) {
                     if (!vis(n.get())) continue;
                     ImVec2 p = pos(n.get()), s = size(n.get());
-                    bool touch = p.x + s.x >= glo.x && p.x <= ghi.x && p.y + s.y >= glo.y && p.y <= ghi.y;
-                    bool inside = p.x >= glo.x && p.x + s.x <= ghi.x && p.y >= glo.y && p.y + s.y <= ghi.y;
-                    if (isBackdrop(n.get()) ? inside : touch) app.selection.insert(n->name);
+                    if (p.x >= glo.x && p.y >= glo.y && p.x + s.x <= ghi.x && p.y + s.y <= ghi.y)
+                        app.selection.insert(n->name);
                 }
                 g.drag = GraphState::Drag::None;
             }

@@ -5,6 +5,7 @@
 // `channels` (which channels to affect) and `mix`.
 #include <cmath>
 
+#include "Curves.h"
 #include "NodeUtils.h"
 
 namespace strata {
@@ -24,17 +25,30 @@ class PixelOp : public Node {
 public:
     int maxInputs() const override { return 2; }
     std::string inputLabel(int i) const override { return i == 1 ? "mask" : ""; }
+    ChannelSet channels(Engine& e, double frame) override {
+        ChannelSet channels = Node::channels(e, frame);
+        if (injectMask() && std::find(channels.begin(), channels.end(), "mask.A") == channels.end())
+            channels.push_back("mask.A");
+        return channels;
+    }
     void render(RenderArgs& a, Image& out) override {
         ImagePtr src = a.fetch(input(0), a.region);
         out.copyFrom(*src);
-        ChannelSet sel = parseChannels(params, "channels", defaultChannels(), out.channels);
+        MaskMix mm = MaskMix::setup(a, this, 1);
+        const int maskTarget = injectMask() && mm.mask ? out.ch("mask.A") : -1;
+        ChannelSet sel = parseChannels(params, "channels", defaultChannels(), src->channels);
         std::vector<int> idx, comps;
         for (auto& c : sel) {
             int i = out.ch(c);
-            if (i >= 0) {
+            if (i >= 0 && i != maskTarget) {
                 idx.push_back(i);
                 comps.push_back(comp4(c));
             }
+        }
+        if (maskTarget >= 0) {
+            for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
+                for (int x = out.bounds.x1; x < out.bounds.x2; ++x)
+                    out.px(x, y)[maskTarget] = mm.mask->at(x, y, mm.maskCh);
         }
         if (idx.empty()) return;
         // the classic "(un)premult by": divide the colour by alpha before, multiply after
@@ -64,7 +78,6 @@ public:
             }
         }
 
-        MaskMix mm = MaskMix::setup(a, this, 1);
         if (!mm.active()) return;
         for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
             for (int x = out.bounds.x1; x < out.bounds.x2; ++x) {
@@ -76,6 +89,7 @@ public:
     }
 
 protected:
+    bool injectMask() const { return input(1) && params.flag("inject", false) && (type == "Grade" || type == "ColorCorrect"); }
     virtual std::string defaultChannels() const { return "rgb"; }
     // Modify `out` in place for the selected channel indices.
     virtual void apply(RenderArgs& a, Image& out, const std::vector<int>& idx, const std::vector<int>& comps) = 0;
@@ -259,19 +273,44 @@ class ColorCorrectNode : public PixelOp {
         float t = std::clamp((x - e0) / (e1 - e0), 0.0f, 1.0f);
         return t * t * (3 - 2 * t);
     }
-    void apply(RenderArgs& a, Image& out, const std::vector<int>&, const std::vector<int>&) override {
+    void apply(RenderArgs& a, Image& out, const std::vector<int>& selected, const std::vector<int>&) override {
         Range M = range("", a.frame), S = range("shadows", a.frame), Mi = range("midtones", a.frame),
               H = range("highlights", a.frame);
         int r = out.ch("R"), g = out.ch("G"), b = out.ch("B");
         if (r < 0 || g < 0 || b < 0) return;
         const bool idM = M.identity(), idS = S.identity(), idMi = Mi.identity(), idH = H.identity();
+        const json ranges = params.data.value("tonal_ranges", json());
+        auto curve = [&](const char* name) {
+            auto result = LookupCurve::fromJson(ranges.is_object() ? ranges.value(name, json()) : json());
+            result.flatEnds = true;
+            return result;
+        };
+        const auto shadows = curve("shadows"), highlights = curve("highlights");
+        const bool test = params.flag("range_preview", false);
+        if (!test && idM && idS && idMi && idH) return;
+        const float preserve = std::clamp((float)params.num("mix_luminance", a.frame, 0), 0.0f, 1.0f);
+        const int indices[] = {r, g, b};
+        const auto enabled = [&](int channel) { return std::find(selected.begin(), selected.end(), channel) != selected.end(); };
+        const bool use[] = {enabled(r), enabled(g), enabled(b)};
+        const float selectedWeight = luma709(use[0], use[1], use[2]);
+        if (selectedWeight == 0) return;
         for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
             for (int x = out.bounds.x1; x < out.bounds.x2; ++x) {
                 float* p = out.px(x, y);
                 float l = luma709(p[r], p[g], p[b]);
-                float ws = 1.0f - smooth(0.0f, 0.09f, l);
-                float wh = smooth(0.5f, 1.0f, l);
-                float wm = std::max(0.0f, 1.0f - ws - wh);
+                float ws = shadows.pts.empty() ? 1.0f - smooth(0.0f, 0.09f, l) : std::clamp((float)shadows.eval(l), 0.0f, 1.0f);
+                float wh = highlights.pts.empty() ? smooth(0.5f, 1.0f, l) : std::clamp((float)highlights.eval(l), 0.0f, 1.0f);
+                const float sum = ws + wh;
+                if (sum > 1.0f) { ws /= sum; wh /= sum; }
+                const float wm = std::max(0.0f, 1.0f - ws - wh);
+                if (test) {
+                    const float gray = wh + 0.5f * wm;
+                    const float shadowOverlap = std::min(ws, wm);
+                    const float highlightOverlap = std::min(wh, wm);
+                    const float preview[] = {gray + highlightOverlap, gray + shadowOverlap, gray + highlightOverlap};
+                    for (int i = 0; i < 3; ++i) if (use[i]) p[indices[i]] = std::clamp(preview[i], 0.0f, 1.0f);
+                    continue;
+                }
                 float base[3] = {p[r], p[g], p[b]};
                 if (!idM) applyRange(M, base);
                 float s[3] = {base[0], base[1], base[2]}, m[3] = {base[0], base[1], base[2]},
@@ -279,9 +318,11 @@ class ColorCorrectNode : public PixelOp {
                 if (!idS) applyRange(S, s);
                 if (!idMi) applyRange(Mi, m);
                 if (!idH) applyRange(H, h);
-                p[r] = ws * s[0] + wm * m[0] + wh * h[0];
-                p[g] = ws * s[1] + wm * m[1] + wh * h[1];
-                p[b] = ws * s[2] + wm * m[2] + wh * h[2];
+                for (int i = 0; i < 3; ++i) if (use[i]) p[indices[i]] = ws * s[i] + wm * m[i] + wh * h[i];
+                if (preserve > 0) {
+                    const float correction = preserve * (l - luma709(p[r], p[g], p[b])) / selectedWeight;
+                    for (int i = 0; i < 3; ++i) if (use[i]) p[indices[i]] += correction;
+                }
             }
     }
 };

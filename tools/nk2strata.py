@@ -2402,6 +2402,8 @@ class Translator:
             stype = color_simple[klass]
             if "channels" in k:
                 params["channels"] = channel_set(k["channels"])
+            if klass in ("Grade", "ColorCorrect") and flag("inject"):
+                params["inject"] = True
             if klass == "Grade":
                 for nk, st in (("blackpoint", "blackpoint"), ("whitepoint", "whitepoint"), ("black", "lift"),
                                ("white", "gain"), ("multiply", "multiply"), ("add", "offset"), ("gamma", "gamma")):
@@ -2413,6 +2415,10 @@ class Translator:
                 if flag("reverse"):
                     params["reverse"] = True
             elif klass == "ColorCorrect":
+                if flag("enable_mix_luminance", True):
+                    num("mix_luminance", dest="mix_luminance")
+                if flag("test"):
+                    params["range_preview"] = True
                 for rng in ("", "shadows.", "midtones.", "highlights."):
                     for knob in ("saturation", "contrast", "gamma", "gain", "offset"):
                         num(rng + knob, dest=rng + knob)

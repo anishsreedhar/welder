@@ -797,8 +797,10 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
     }
     if (active && pk.active) {
         ImVec2 mi = toImage(io.MousePos);
+        const Node* pickNode = pk.mode == "color" ? app.node(pk.node) : nullptr;
+        const bool gradeInput = pickNode && pickNode->type == "Grade" && io.KeyCtrl && io.KeyAlt;
         if (v.hovered && ImGui::IsKeyPressed(ImGuiKey_Escape)) pk.active = false;
-        if (v.hovered && !io.KeyAlt && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (v.hovered && (!io.KeyAlt || gradeInput) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             pk.dragging = true;
             pk.startImg = mi;
         }
@@ -833,7 +835,7 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
                 pk.active = false;
             } else if (pk.mode != "color") {
                 pickSpecial(app, pk, (int)std::floor(mi.x), (int)std::floor(mi.y));
-            } else if (pk.fromInput) {
+            } else if (pk.fromInput || gradeInput) {
                 ok = app.samplePixels(pk.node, 0, Box(x1, y1, x2, y2), app.frame, rgba);
             } else if (res.image) {
                 // What the viewer shows, at the scale it was rendered.
@@ -872,7 +874,7 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
                            : pk.mode == "crypto remove" ? "PICK MATTES: click objects to remove them   Esc: stop"
                            : pk.mode == "focus"         ? "PICK FOCUS: click what should be sharp   Esc: stop"
                            : pk.mode == "point"         ? "PICK POINT: click to place it   Esc: stop"
-                           : pk.fromInput ? "PICK (input): click or drag over the screen   Esc: stop" : "PICK: click or drag   Esc: stop";
+                           : pk.fromInput || gradeInput ? "PICK (input): click or drag over the screen   Esc: stop" : "PICK: click or drag   Esc: stop";
         dl->AddText(ImVec2(p0.x + 10, p1.y - 22), IM_COL32(255, 210, 120, 255), hint);
     }
 
