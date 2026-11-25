@@ -6,6 +6,7 @@
 // comp locked, so the panels never see the comp half changed. A run is one undo step.
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
