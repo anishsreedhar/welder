@@ -2390,8 +2390,8 @@ std::vector<NodeDef> build() {
                              "Copy the current key into the key folder now (frames already there are skipped)")}),
                  "CorridorKey 2.0 by Corridor Digital: AI green / blue screen keying that looks at the whole clip, for a steady matte "
                  "and real colour in hair, motion blur and glass. Optional hint input: a rough matte. Downloaded from Corridor Digital "
-                 "under its own licence (CorridorKey is free to use on commercial work; not for resale). Needs an NVIDIA RTX 30-series "
-                 "or newer. Runs on the ML worker."});
+                 "under its own licence (CorridorKey is free to use on commercial work; not for resale). Needs a GPU: an NVIDIA RTX 30-series "
+                 "or newer works best; AMD Radeon (DirectML on Windows, ROCm on Linux) and Intel Arc run it too. Runs on the ML worker."});
     d.push_back({"TrackMask", "AI",
                  frames({InfoRow("trackmask", ""),
                          Btn("trackmask_clear_frame", "Clear this frame", "Remove the active object's clicks and box on this frame"),
