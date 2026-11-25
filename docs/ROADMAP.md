@@ -39,6 +39,7 @@
 ## Phase 3 — production
 - [x] Keyers: ScreenKeyer (Keylight-style), IBKColour + IBKGimme, ChromaKeyer, Keyer, HueKeyer, Difference, Despill; viewer colour picker
 - [x] Tracker: point tracks (NCC, sub-pixel), background tracking, match-move / stabilise, exports to Transform / CornerPin2D / roto shapes, CornerPin2D node
+- [x] Tracker corner pin and gap filling: a live corner pin from 4 or more tracks (least squares, a bad track dropped, carries on from 3 / 2 / 1 when corners are lost, lost corners shown where they're solved), CornerPin2D export through it; Fill gaps for lost frames from the tracks still tracking (or interpolated), filled frames marked and clearable, in Python and MCP too
 - [x] PlanarTracker: robust homography alignment (pyramid Lucas-Kanade, gain/bias, outlier rejection), region drawn or taken from a roto shape, surface corner pin, match-move / stabilise, exports to CornerPin2D and roto shapes, advanced-edition import
 - [ ] Tracking next: affine pattern warping, tracking roto shapes directly; HueKeyer / HueCorrect curves; Primatte-style 3D keyer
 - [x] Retiming: OFlow (variational optical flow, occlusion-aware interpolation, speed / frame curves, shutter motion blur, OFlow2 / Kronos import) and RIFE (neural frame interpolation through ncnn, Vulkan GPU or CPU)
@@ -59,7 +60,8 @@
 - [x] BlenderRender: Cycles / EEVEE renders through the Welder camera with Welder geometry (visible, shadow catcher, holdout; textures and Project3D projections), cached frames, passes as channels
 - [ ] Blender next: lights and cameras from Welder 3D lights, Alembic / USD exchange, render on another machine
 - [ ] AI next: LTX text / image to video, splats in ScanlineRender (with geometry), splat editing (crop boxes), remote workers
-- [ ] Deep compositing
+- [x] Deep compositing, part 1: deep samples through the graph (any flat node sees them flattened), DeepRead (deep scanline / tiled EXR), DeepToImage, DeepWrite
+- [ ] Deep next: DeepMerge (volumes split where they overlap), DeepHoldout, DeepFromImage, DeepRecolor, deep colour and transform nodes, ScanlineRender deep output, deep sample readout, GPU flatten / merge
 - [ ] OFX: overlays/interacts, parametric params, 8/16-bit plugins
 - [ ] .nk importer: more nodes, TCL beyond [frame] / [value]; pixel-diff test suite against the original renders
 - [ ] Windows/macOS builds and CI

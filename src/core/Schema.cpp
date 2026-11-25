@@ -1961,6 +1961,39 @@ std::vector<NodeDef> build() {
                  "Warps the picture so the source grid lands on the destination grid. Drag the grid points in the viewer "
                  "(the grid chosen in 'edit in the viewer'; shift-drag moves a point of the other one)."});
     const std::vector<std::string> rotOrders = {"XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"};
+    // ---------------------------------------------------------------- Deep
+    d.push_back({"DeepRead", "Deep",
+                 {File("file", "File"),
+                  InfoRow("read_format", "Format"),
+                  Field(I("first", "Frame Range", 1, -100000, 100000), 64),
+                  Same(Width(C("before", "", "hold", {"hold", "loop", "bounce", "black", "error"}), 74), true),
+                  Same(Field(I("last", "", 1, -100000, 100000), 64), true),
+                  Same(Width(C("after", "", "hold", {"hold", "loop", "bounce", "black", "error"}), 74), true),
+                  Width(C("frame_mode", "Frame", "expression", {"expression", "start at", "offset"}), 110),
+                  Same(Tip(Width(S("frame", "", ""), 0), "expression: the file frame for each frame (empty = the same frame); "
+                                                         "start at: the frame the clip starts at; offset: frames to shift by"), true),
+                  Field(I("origfirst", "Original Range", 1, -100000, 100000), 64),
+                  Same(Field(I("origlast", "", 1, -100000, 100000), 64), true),
+                  Width(C("missing_frames", "Missing Frames", "error", {"error", "black", "nearest frame"}), 130),
+                  Same(Btn("read_reload", "reload", "read the files again"), true),
+                  Width(CS("colorspace", "Input Transform", "default", {"default", "working"}), 200),
+                  Same(B("raw", "Raw Data", false)),
+                  Tip(S("part", "Part", ""), "the deep part to read, by name (empty: the first deep part in the file)"),
+                  OnTab(InfoRow("metadata", ""), "Metadata")},
+                 "Reads deep EXR files (scanline or tiled) as samples: colour, alpha and depth per sample. "
+                 "Deep nodes take them as they are; any other node sees them flattened."});
+    d.push_back({"DeepToImage", "Deep",
+                 {Tip(Width(C("depth", "depth", "1/z", {"1/z", "z", "none"}), 90),
+                      "depth.Z of the nearest visible sample: 1/z (what ScanlineRender and ZDefocus use), z (the distance) or none")},
+                 "Flattens deep samples front to back into an ordinary image."});
+    d.push_back({"DeepWrite", "Deep",
+                 {Width(C("channels", "channels", "all", {"all", "rgba"}), 90), File("file", "file"),
+                  Width(CS("colorspace", "Output Transform", "default", {"default", "working"}), 200),
+                  Tip(Width(C("datatype", "datatype", "half", {"half", "float"}), 90), "colour and alpha; depths are always float"),
+                  Width(C("compression", "compression", "zips", {"none", "rle", "zips"}), 90),
+                  B("use_limit", "limit to range", false), Same(EnableIf(Field(I("first", "", 1, -100000, 100000), 64), "use_limit=true"), true),
+                  Same(EnableIf(Field(I("last", "", 100, -100000, 100000), 64), "use_limit=true"), true)},
+                 "Writes deep samples as a deep scanline EXR (the data window is the input's bbox)."});
     d.push_back({"Camera", "3D",
                  {XYZ("translate", "translate", json::array({0, 0, 0}), -100, 100), XYZ("rotate", "rotate", json::array({0, 0, 0}), -180, 180),
                   C("rot_order", "rotation order", "ZXY", rotOrders), Div("Projection"),
@@ -2147,7 +2180,11 @@ std::vector<NodeDef> build() {
                       S_(Tip(Field(I("max_number_of_keyframe_tracks_to_display", "on_screen key-track limit", 3, 0, 20), 70),
                              "Most tracks whose keyframe snapshots show in the viewer (0: the selected ones)")),
                       // ---- Transform
-                      X_(Width(C("transform", "transform", "none", {"none", "stabilize", "stabilize 1pt", "match-move", "match-move 1pt", "remove jitter", "add jitter"}), 140)),
+                      X_(Tip(Width(C("transform", "transform", "none", {"none", "stabilize", "stabilize 1pt", "match-move", "match-move 1pt", "remove jitter", "add jitter",
+                                                                     "corner pin match-move", "corner pin stabilize"}), 170),
+                             "corner pin: the perspective of a flat surface from its tracks (the enabled tracks with T on: 4 for a "
+                             "corner pin, more to average out noise). Where some are lost it carries on with the rest (3: affine, "
+                             "2: scale and rotation, 1: position). Smooth t averages the track positions")),
                       X_(ref), X_(Same(Btn("tracker_ref_here", "set to current frame", "Make the frame you're on the reference frame"), true)),
                       X_(Tip(F("jitter_period", "jitter period", 10, 1, 100), "Frames averaged to find the steady motion (remove / add jitter)")),
                       X_(Tip(smooth, "Frames averaged to smooth the translation, rotation and scale")),
@@ -2159,7 +2196,8 @@ std::vector<NodeDef> build() {
                       X_(Log(F("motionblur", "motionblur", 0, 0, 4))), X_(F("shutter", "Shutter Length", 0.5, 0, 2)),
                       X_(Width(C("shutteroffset", "Shutter Offset", "start", {"centred", "start", "end", "custom"}), 100)),
                       X_(Same(EnableIf(F("shuttercustomoffset", "", 0, -1, 1), "shutteroffset=custom"), true))},
-                     "2D point tracks: tracking, keyframe tracking and offsets in the viewer; stabilize, match-move and jitter on the Transform tab."});
+                     "2D point tracks: tracking, keyframe tracking and offsets in the viewer; Fill gaps for frames where a track lost its "
+                     "feature; stabilize, match-move, jitter and a live corner pin on the Transform tab."});
     }
     d.push_back({"PlanarTracker", "Transform", {}, "Tracks a flat surface (perspective, rotation, scale) from a region drawn in the viewer."});
     {
@@ -2390,8 +2428,8 @@ std::vector<NodeDef> build() {
                              "Copy the current key into the key folder now (frames already there are skipped)")}),
                  "CorridorKey 2.0 by Corridor Digital: AI green / blue screen keying that looks at the whole clip, for a steady matte "
                  "and real colour in hair, motion blur and glass. Optional hint input: a rough matte. Downloaded from Corridor Digital "
-                 "under its own licence (CorridorKey is free to use on commercial work; not for resale). Needs an NVIDIA RTX 30-series "
-                 "or newer. Runs on the ML worker."});
+                 "under its own licence (CorridorKey is free to use on commercial work; not for resale). Needs a GPU: an NVIDIA RTX 30-series "
+                 "or newer works best; AMD Radeon (DirectML on Windows, ROCm on Linux) and Intel Arc run it too. Runs on the ML worker."});
     d.push_back({"TrackMask", "AI",
                  frames({InfoRow("trackmask", ""),
                          Btn("trackmask_clear_frame", "Clear this frame", "Remove the active object's clicks and box on this frame"),
@@ -2550,7 +2588,7 @@ const NodeDef* nodeDef(const std::string& type) {
 }
 
 const std::vector<std::string>& categories() {
-    static std::vector<std::string> c = {"Image", "Draw", "Time", "Channel", "Color", "Filter", "Keyer", "Merge", "Transform", "Stylize", "MoGraph", "3D", "Value", "AI", "Other", "OFX"};
+    static std::vector<std::string> c = {"Image", "Draw", "Time", "Channel", "Color", "Filter", "Keyer", "Merge", "Transform", "Stylize", "MoGraph", "3D", "Deep", "Value", "AI", "Other", "OFX"};
     return c;
 }
 
@@ -2563,7 +2601,7 @@ std::string categoryOf(const std::string& type) {
 unsigned int categoryColor(const std::string& c) {
     static const std::map<std::string, unsigned int> m = {
         {"Image", 0xFF8C8C8C}, {"Draw", 0xFF7C8FD8}, {"Keyer", 0xFF62B35E}, {"Time", 0xFF7FB89C}, {"Channel", 0xFFB8A15E}, {"Color", 0xFF6FA88A},
-        {"Filter", 0xFF5E8FC9}, {"Merge", 0xFFC98A4E}, {"Transform", 0xFFB97AA7}, {"3D", 0xFFC2B04A}, {"AI", 0xFF8A6AD8}, {"Other", 0xFF9A9A9A},
+        {"Filter", 0xFF5E8FC9}, {"Merge", 0xFFC98A4E}, {"Transform", 0xFFB97AA7}, {"3D", 0xFFC2B04A}, {"Deep", 0xFF5A7FB0}, {"AI", 0xFF8A6AD8}, {"Other", 0xFF9A9A9A},
         {"OFX", 0xFF4FA3C4}, {"Stylize", 0xFF5AB3D6}, {"Value", 0xFFE66E78}, {"MoGraph", 0xFFA86AE8}};
     auto it = m.find(c);
     return it == m.end() ? 0xFF4A4AB8 : it->second;  // unknown: red

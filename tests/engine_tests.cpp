@@ -22,6 +22,8 @@
 #include "core/ThreadBudget.h"
 #include "core/NetPath.h"
 #include "core/Update.h"
+#include "core/Deep.h"
+#include "io/ExrIO.h"
 #include "io/ImageIO.h"
 #include "io/PsdIO.h"
 #include "io/MovieIO.h"
@@ -3624,6 +3626,209 @@ int main(int argc, char** argv) {
         auto cp = render(*c, "CP");
         CHECK_NEAR(px(cp, 30, 10, "R"), 27, 1e-3);  // shifted 3 px right
         CHECK_NEAR(px(cp, 30, 10, "G"), 8, 1e-3);   // and 2 px up
+    });
+
+    test("tracking: corner pin from tracks (least squares, lost corners) and gap filling", [] {
+        // A flat surface moving in perspective: frame f maps the reference (frame 1) by H(f).
+        const double ref[8] = {10, 10, 54, 10, 54, 40, 10, 40};
+        auto Hof = [&](double f, double H[9]) {
+            const double t = f - 1;
+            double dst[8] = {10 + 0.8 * t, 10 + 0.3 * t, 54 + 0.5 * t, 10 - 0.2 * t, 54 + 0.9 * t, 40 + 0.6 * t, 10 + 0.2 * t, 40 + 0.1 * t};
+            CHECK(track::homography(ref, dst, H));
+        };
+        auto mapH = [](const double H[9], double x, double y, double& u, double& v) {
+            const double w = H[6] * x + H[7] * y + H[8];
+            u = (H[0] * x + H[1] * y + H[2]) / w;
+            v = (H[3] * x + H[4] * y + H[5]) / w;
+        };
+        const std::vector<std::pair<double, double>> pts = {{10, 10}, {54, 10}, {54, 40}, {10, 40}, {30, 20}, {20, 32}};
+        auto truth = [&](int i, double f, double& u, double& v) {
+            double H[9];
+            Hof(f, H);
+            mapH(H, pts[i].first, pts[i].second, u, v);
+        };
+        auto makeTracks = [&](int n, int last) {
+            json tracks = json::array();
+            for (int i = 0; i < n; ++i) {
+                json t = {{"name", "p" + std::to_string(i + 1)}, {"enabled", true}, {"T", true}};
+                for (int f = 1; f <= last; ++f) {
+                    double u, v;
+                    truth(i, f, u, v);
+                    track::setKey(t, {(double)f, u, v, 0.99, f == 1});
+                }
+                tracks.push_back(t);
+            }
+            return tracks;
+        };
+
+        // fitPoints: exact from 4, robust to a bad 6th point, lower models from fewer / collinear points
+        {
+            double H[9];
+            Hof(9, H);
+            std::vector<track::PointPair> pp;
+            for (auto [x, y] : pts) {
+                double u, v;
+                mapH(H, x, y, u, v);
+                pp.push_back({x, y, u, v});
+            }
+            std::vector<track::PointPair> four(pp.begin(), pp.begin() + 4);
+            track::Fit f4 = track::fitPoints(four);
+            CHECK(f4.ok && f4.model == 4 && f4.rms < 1e-6);
+            double u, v, eu, ev;
+            f4.H.apply(30, 20, u, v);
+            mapH(H, 30, 20, eu, ev);
+            CHECK_NEAR(u, eu, 1e-6);
+            CHECK_NEAR(v, ev, 1e-6);
+            std::vector<track::PointPair> bad = pp;
+            bad.push_back({40, 25, 0, 0});
+            mapH(H, 40, 25, bad.back().cx, bad.back().cy);
+            bad.back().cx += 15;  // a slipped track
+            track::Fit fr = track::fitPoints(bad);
+            CHECK(fr.ok && fr.model == 4 && fr.used == 6);
+            fr.H.apply(20, 32, u, v);
+            mapH(H, 20, 32, eu, ev);
+            CHECK_NEAR(u, eu, 1e-4);
+            CHECK_NEAR(v, ev, 1e-4);
+            track::Fit f3 = track::fitPoints({pp[0], pp[1], pp[2]});
+            CHECK(f3.ok && f3.model == 3);
+            CHECK(f3.H.m[6] == 0 && f3.H.m[7] == 0);
+            f3.H.apply(pp[1].rx, pp[1].ry, u, v);
+            CHECK_NEAR(u, pp[1].cx, 1e-6);  // three points: an exact affine
+            track::Fit fl = track::fitPoints({{0, 0, 1, 1}, {10, 0, 11, 1}, {20, 0, 21, 1}, {30, 0, 31, 1}});
+            CHECK(fl.ok && fl.model == 2);  // on a line: no perspective / affine
+            track::H9 hi = f4.H * f4.H.inverse();  // the identity, up to scale
+            CHECK_NEAR(hi.m[0] / hi.m[8], 1, 1e-9);
+            CHECK_NEAR(hi.m[4] / hi.m[8], 1, 1e-9);
+            CHECK_NEAR(hi.m[1] / hi.m[8], 0, 1e-9);
+            CHECK_NEAR(hi.m[5] / hi.m[8], 0, 1e-9);
+        }
+
+        // the Tracker's corner pin = a CornerPin2D from the reference corners to the frame's
+        json tracks = makeTracks(4, 20);
+        double c5[8];
+        for (int i = 0; i < 4; ++i) truth(i, 5, c5[2 * i], c5[2 * i + 1]);
+        auto c = comp(json::array({
+            {{"name", "P"}, {"type", "TestPattern"}},
+            {{"name", "Trk"}, {"type", "Tracker"}, {"inputs", {"P"}},
+             {"params", {{"tracks", tracks}, {"transform", "corner pin match-move"}, {"reference_frame", 1}}}},
+            {{"name", "Stab"}, {"type", "Tracker"}, {"inputs", {"Trk"}},
+             {"params", {{"tracks", tracks}, {"transform", "corner pin stabilize"}, {"reference_frame", 1}}}},
+            {{"name", "CP"}, {"type", "CornerPin2D"}, {"inputs", {"P"}},
+             {"params", {{"from1", {10, 10}}, {"from2", {54, 10}}, {"from3", {54, 40}}, {"from4", {10, 40}},
+                         {"to1", {c5[0], c5[1]}}, {"to2", {c5[2], c5[3]}}, {"to3", {c5[4], c5[5]}}, {"to4", {c5[6], c5[7]}}}}},
+            {{"name", "RL"}, {"type", "ReferenceLink"}, {"inputs", {"P", "Trk"}}, {"params", {{"reference_frame", 1}}}},
+        }));
+        auto a = render(*c, "Trk", 5), b = render(*c, "CP", 5), rl = render(*c, "RL", 5), back = render(*c, "Stab", 5);
+        for (auto [x, y] : std::vector<std::pair<int, int>>{{30, 20}, {15, 12}, {50, 38}, {25, 30}}) {
+            CHECK_NEAR(px(a, x, y, "R"), px(b, x, y, "R"), 0.02);
+            CHECK_NEAR(px(a, x, y, "G"), px(b, x, y, "G"), 0.02);
+            CHECK_NEAR(px(rl, x, y, "R"), px(b, x, y, "R"), 0.02);
+            CHECK_NEAR(px(back, x, y, "R"), x, 0.1);  // pin then un-pin: back where it was (one resample: concatenated)
+        }
+        // a lost corner: the pin carries on from the other three (affine)
+        {
+            json lost = tracks;
+            track::clearKeys(lost[3], 4, 1);
+            track::Fit f = track::pinSolve(lost, 1, 5);
+            CHECK(f.ok && f.model == 3 && f.used == 3);
+            CHECK(!track::trackedAt(lost[3], 5));
+            json p = {{"tracks", lost}, {"transform", "corner pin match-move"}, {"reference_frame", 1}};
+            track::H9 M = track::trackerMatrix(p, 5);
+            CHECK(M.m[6] == 0 && M.m[7] == 0);
+            double u, v;
+            M.apply(10, 10, u, v);
+            CHECK_NEAR(u, c5[0], 1e-2);  // the three it has still land on their tracks
+            CHECK_NEAR(v, c5[1], 1e-2);
+            // a gap inside a track isn't a position (interpolating across it is a guess)
+            json gap = tracks;
+            for (int f = 6; f <= 12; ++f) track::deleteKey(gap[0], f);
+            CHECK(!track::trackedAt(gap[0], 9));
+            CHECK(track::positionAt(gap[0], 9).has_value());
+        }
+
+        // gap filling from the other tracks: a gap inside and a lost end, back on the surface
+        {
+            json t6 = makeTracks(6, 20);
+            for (int f = 6; f <= 12; ++f) track::deleteKey(t6[0], f);
+            track::clearKeys(t6[0], 15, 1);  // stopped at 15
+            track::FillOptions o;
+            o.after = true;
+            o.first = 1;
+            o.last = 20;
+            track::FillReport r = track::fillGaps(t6, {0}, o);
+            CHECK(r.frames == 7 + 5 && r.fromTracks == 12 && r.interpolated == 0 && r.skipped == 0);
+            for (int f : {6, 9, 12, 16, 20}) {
+                auto k = track::keyAt(t6[0], f);
+                CHECK(k && k->filled && !k->user);
+                double u, v;
+                truth(0, f, u, v);
+                CHECK_NEAR(k->x, u, 0.01);
+                CHECK_NEAR(k->y, v, 0.01);
+            }
+            CHECK(t6[0]["keys"][6][4] == 2);  // stored as 2: filled
+            CHECK(!track::keyAt(t6[0], 3)->filled);
+            // filling again redoes the filled frames (no doubles); clear removes them
+            track::FillReport r2 = track::fillGaps(t6, {0}, o);
+            CHECK(r2.frames == 12);
+            CHECK(track::keysOf(t6[0]).size() == 20);
+            CHECK(track::clearFilled(t6, {0}) == 12);
+            CHECK(track::keysOf(t6[0]).size() == 8);
+            // a slipped stretch: keys with a high error count as lost with redo_above
+            json t7 = makeTracks(6, 20);
+            for (int f = 8; f <= 9; ++f) {
+                auto k = *track::keyAt(t7[1], f);
+                k.x += 4;
+                k.score = 0.6;
+                track::setKey(t7[1], k);
+            }
+            o.redoAbove = 0.2;
+            o.after = false;
+            track::FillReport r3 = track::fillGaps(t7, {1}, o);
+            CHECK(r3.frames == 2);
+            double u, v;
+            truth(1, 8, u, v);
+            CHECK_NEAR(track::keyAt(t7[1], 8)->x, u, 0.01);
+            // the corner pin uses filled corners like tracked ones
+            json t4 = makeTracks(4, 20);
+            track::clearKeys(t4[2], 10, 1);
+            track::FillOptions oa;
+            oa.after = true;
+            oa.last = 20;
+            CHECK(track::fillGaps(t4, {2}, oa).fromTracks == 10);  // from the other three: affine
+            CHECK(track::pinSolve(t4, 1, 15).model == 4);
+        }
+        // nothing else tracking: smooth / linear interpolation of the track's own keys
+        {
+            json t = {{"name", "solo"}, {"T", true}};
+            for (int f = 1; f <= 30; ++f) {
+                if (f > 10 && f < 20) continue;
+                track::setKey(t, {(double)f, 5.0 + 2 * f, 0.05 * f * f, 1, false});
+            }
+            json ts = json::array({t});
+            track::FillOptions o;
+            o.method = "auto";
+            track::FillReport r = track::fillGaps(ts, {0}, o);
+            CHECK(r.frames == 9 && r.interpolated == 9);
+            auto k = track::keyAt(ts[0], 15);
+            CHECK_NEAR(k->x, 35, 0.01);              // a straight line stays straight
+            CHECK_NEAR(k->y, 0.05 * 225, 0.3);       // and the curve keeps curving (linear is 1.25 px off here)
+            json tl = json::array({t});
+            o.method = "linear";
+            track::fillGaps(tl, {0}, o);
+            CHECK_NEAR(track::keyAt(tl[0], 15)->y, (0.05 * 100 + 0.05 * 400) / 2, 1e-3);
+            o.method = "from other tracks";  // nothing to carry it: left alone
+            json tn = json::array({t});
+            track::FillReport rn = track::fillGaps(tn, {0}, o);
+            CHECK(rn.frames == 0 && rn.skipped == 9);
+            // past the end: on at its last speed
+            o.method = "smooth";
+            o.inside = false;
+            o.after = true;
+            o.last = 32;
+            json te = json::array({t});
+            track::fillGaps(te, {0}, o);
+            CHECK_NEAR(track::keyAt(te[0], 32)->x, 5 + 2 * 32, 1e-3);
+        }
     });
 
     test("Precomp: renders once, copies, reads local in the editor and network in renders, Clear goes live", [] {
@@ -9603,6 +9808,188 @@ Connections:  {
             CHECK(eg / n < 0.4);
             CHECK(eg / n < ec / n + 0.02);
         }
+    });
+    // ---------------------------------------------------------------- deep
+    // A deep image with empty pixels, hard surfaces, a volume, samples given out of order, and an
+    // extra channel; its bbox starts away from the origin.
+    auto makeDeep = [] {
+        DeepImage d(Box(3, 2, 40, 30), {"R", "G", "B", "A", "id"});
+        const int nc = d.nch();
+        for (int y = d.bounds.y1; y < d.bounds.y2; ++y)
+            for (int x = d.bounds.x1; x < d.bounds.x2; ++x) {
+                const int n = (x * 7 + y * 3) % 4;  // 0..3 samples
+                float* s = d.newPixel(n);
+                for (int k = 0; k < n; ++k, s += nc) {
+                    const float a = 0.25f + 0.2f * k;
+                    s[d.ch("R")] = a * (x / 40.0f);
+                    s[d.ch("G")] = a * (y / 30.0f);
+                    s[d.ch("B")] = a * 0.5f;
+                    s[d.ai] = a;
+                    s[d.ch("id")] = (float)k;
+                    s[d.zi] = 10.0f - 3.0f * k + x * 0.01f;  // back to front: sorted on the way in
+                    s[d.zbi] = s[d.zi] + (k == 1 ? 2.0f : 0.0f);
+                }
+                d.sortPixel(d.pixelIndex(x, y));
+            }
+        d.finish();
+        return d;
+    };
+    auto sameDeep = [](const DeepImage& a, const DeepImage& b, double eps) {
+        if (a.bounds != b.bounds) return false;
+        for (int y = a.bounds.y1; y < a.bounds.y2; ++y)
+            for (int x = a.bounds.x1; x < a.bounds.x2; ++x) {
+                if (a.count(x, y) != b.count(x, y)) return false;
+                for (int k = 0; k < a.count(x, y); ++k)
+                    for (int c = 0; c < a.nch(); ++c) {
+                        const int bc = b.ch(a.channels[c]);
+                        if (bc < 0) return false;
+                        if (std::fabs(a.sample(x, y)[k * a.nch() + c] - b.sample(x, y)[k * b.nch() + bc]) > eps) return false;
+                    }
+            }
+        return true;
+    };
+    const auto deepDir = std::filesystem::temp_directory_path() / "welder_deep_test";
+    std::filesystem::create_directories(deepDir);
+
+    test("deep: samples are sorted front to back", [&] {
+        DeepImage d = makeDeep();
+        bool sorted = true;
+        for (int y = d.bounds.y1; y < d.bounds.y2; ++y)
+            for (int x = d.bounds.x1; x < d.bounds.x2; ++x)
+                for (int k = 1; k < d.count(x, y); ++k) sorted = sorted && d.sample(x, y)[(k - 1) * d.nch() + d.zi] <= d.sample(x, y)[k * d.nch() + d.zi];
+        CHECK(sorted);
+        CHECK(d.finished());
+        CHECK(d.channels.back() == "ZBack");
+    });
+
+    test("deep EXR round trip: every sample, every compression", [&] {
+        DeepImage d = makeDeep();
+        Format f;
+        f.width = 48;
+        f.height = 36;
+        for (const std::string comp : {"none", "rle", "zips"}) {
+            const std::string p = (deepDir / ("rt_" + comp + ".exr")).string();
+            DeepExrWriteOptions o;
+            o.type = ExrPixelType::Float;
+            o.compression = comp;
+            writeDeepExr(p, d, f, o);
+            DeepExrFile r = readDeepExr(p);
+            CHECK(r.header.format.width == 48 && r.header.format.height == 36);
+            CHECK(r.header.bounds == d.bounds);
+            CHECK(r.image->total() == d.total());
+            CHECK(sameDeep(d, *r.image, 0));
+            CHECK(r.header.compression == comp);
+        }
+        // half colour: close, depths exact
+        const std::string p = (deepDir / "rt_half.exr").string();
+        writeDeepExr(p, d, f, DeepExrWriteOptions{});
+        DeepExrFile r = readDeepExr(p);
+        CHECK(sameDeep(d, *r.image, 2e-3));
+        bool zExact = true;
+        for (size_t i = 0; i < d.total(); ++i) zExact = zExact && d.samples[i * d.nch() + d.zi] == r.image->samples[i * r.image->nch() + r.image->zi];
+        CHECK(zExact);
+        bool threw = false;
+        try {
+            DeepExrWriteOptions bad;
+            bad.compression = "dwaa";
+            writeDeepExr(p, d, f, bad);
+        } catch (const RenderError&) {
+            threw = true;
+        }
+        CHECK(threw);
+        threw = false;
+        try {
+            readDeepExr(p, "nope");
+        } catch (const RenderError&) {
+            threw = true;
+        }
+        CHECK(threw);
+    });
+
+    test("deep: DeepRead flattened matches Read's flattening", [&] {
+        DeepImage d = makeDeep();
+        Format f;
+        f.width = 48;
+        f.height = 36;
+        const std::string p = (deepDir / "flat_match.exr").string();
+        DeepExrWriteOptions o;
+        o.type = ExrPixelType::Float;
+        writeDeepExr(p, d, f, o);
+        auto c = comp(json::array({json{{"name", "R"}, {"type", "Read"}, {"params", {{"file", p}}}},
+                                   json{{"name", "D"}, {"type", "DeepRead"}, {"params", {{"file", p}}}},
+                                   json{{"name", "F"}, {"type", "DeepToImage"}, {"inputs", {"D"}}, {"params", {{"depth", "z"}}}},
+                                   json{{"name", "G"}, {"type", "Grade"}, {"inputs", {"D"}}, {"params", {{"multiply", 2}}}}}),
+                      48, 36);
+        ImagePtr a = render(*c, "R"), b = render(*c, "F", 1, 16), v = render(*c, "D", 1, 32), g = render(*c, "G");
+        double worst = 0, worstZ = 0, worstV = 0, worstG = 0;
+        for (int y = 0; y < 36; ++y)
+            for (int x = 0; x < 48; ++x) {
+                for (const char* ch : {"R", "G", "B", "A"}) {
+                    worst = std::max(worst, (double)std::fabs(px(a, x, y, ch) - px(b, x, y, ch)));
+                    worstV = std::max(worstV, (double)std::fabs(px(v, x, y, ch) - px(b, x, y, ch)));
+                    if (std::string(ch) != "A") worstG = std::max(worstG, (double)std::fabs(px(g, x, y, ch) - 2 * px(b, x, y, ch)));
+                }
+                worstZ = std::max(worstZ, (double)std::fabs(px(a, x, y, "depth.Z") - px(b, x, y, "depth.Z")));
+                // the viewer's flat answer is 1/z
+                const float z = px(b, x, y, "depth.Z");
+                if (z > 0) worstV = std::max(worstV, (double)std::fabs(px(v, x, y, "depth.Z") - 1 / z));
+            }
+        std::printf("  |Read - DeepRead flattened| rgba %.2g, z %.2g; auto-flatten %.2g; Grade on deep %.2g\n", worst, worstZ, worstV, worstG);
+        CHECK(worst < 1e-6);
+        CHECK(worstZ < 1e-6);
+        CHECK(worstV < 1e-6);
+        CHECK(worstG < 1e-5);
+        CHECK(px(b, 10, 10, "id") == px(a, 10, 10, "id"));
+    });
+
+    test("deep: DeepRead -> DeepWrite keeps every sample (tiles assembled)", [&] {
+        DeepImage d = makeDeep();
+        Format f;
+        f.width = 48;
+        f.height = 36;
+        const std::string p = (deepDir / "in.exr").string(), q = (deepDir / "out.####.exr").string();
+        DeepExrWriteOptions o;
+        o.type = ExrPixelType::Float;
+        writeDeepExr(p, d, f, o);
+        auto c = comp(json::array({json{{"name", "D"}, {"type", "DeepRead"}, {"params", {{"file", p}}}},
+                                   json{{"name", "W"}, {"type", "DeepWrite"}, {"inputs", {"D"}}, {"params", {{"file", q}, {"datatype", "float"}}}}}),
+                      48, 36);
+        EngineOptions eo;
+        eo.tileSize = 16;  // many tiles: the write assembles them
+        Engine e(eo);
+        c->find("W")->execute(e, 7);
+        DeepExrFile r = readDeepExr((deepDir / "out.0007.exr").string());
+        CHECK(sameDeep(d, *r.image, 0));
+        CHECK(r.header.compression == "zips");
+        // a request across tile edges is the same as the file
+        DeepPtr part = e.requestDeep(c->find("D"), 1, Box(5, 4, 37, 29));
+        CHECK(sameDeep(*DeepImage::crop(d, Box(5, 4, 37, 29), d.channels), *part, 0));
+        // a disabled DeepRead gives nothing; DeepWrite passes its input through to the viewer
+        CHECK(e.deepChannels(c->find("W"), 1) == d.channels);
+    });
+
+    test("deep: proxy scale and flat inputs", [&] {
+        DeepImage d = makeDeep();
+        Format f;
+        f.width = 48;
+        f.height = 36;
+        const std::string p = (deepDir / "proxy.exr").string();
+        writeDeepExr(p, d, f, DeepExrWriteOptions{});
+        auto c = comp(json::array({json{{"name", "D"}, {"type", "DeepRead"}, {"params", {{"file", p}}}},
+                                   json{{"name", "K"}, {"type", "Constant"}, {"params", {{"color", {0.2, 0.4, 0.6, 1}}}}},
+                                   json{{"name", "KF"}, {"type", "DeepToImage"}, {"inputs", {"K"}}, {"params", {{"depth", "none"}}}}}),
+                      48, 36);
+        Engine e;
+        e.setScale(0.5);
+        CHECK(c->find("D")->format(e, 1).width == 24);
+        ImagePtr half = renderScaled(*c, "D", 0.5);
+        CHECK(half->bounds.width() <= 24);
+        ImagePtr k = render(*c, "KF");
+        CHECK(k->ch("depth.Z") < 0);
+        CHECK(std::fabs(px(k, 5, 5, "G") - 0.4f) < 1e-6 && std::fabs(px(k, 5, 5, "A") - 1) < 1e-6);
+        Engine e2;
+        DeepPtr kd = e2.requestDeep(c->find("K"), 1, Box(0, 0, 4, 4));
+        CHECK(kd->count(1, 1) == 1 && std::isinf(kd->sample(1, 1)[kd->zi]));
     });
     std::printf("\n%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
