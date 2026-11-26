@@ -520,7 +520,7 @@ int main(int argc, char** argv) {
         // when something must advance every frame.
         // Keys pressed faster than frames are trickled in one per frame by ImGui; keep
         // polling while any are queued so a burst of hotkeys is never held back.
-        if (app.playing || app.editsPending() || ui::ScriptRunner::instance().running() || ui::ScriptRunner::callbacks().needsFrames() || ui::McpService::instance().busy() || ui.graph.autoPanning || !opt.screenshot.empty() || smoke::active() || GImGui->InputEventsQueue.Size > 0)
+        if (app.playing || ui.flipbook.playing || ui.flipbook.loading || ui.viewerCapture.running || app.editsPending() || ui::ScriptRunner::instance().running() || ui::ScriptRunner::callbacks().needsFrames() || ui::McpService::instance().busy() || ui.graph.autoPanning || !opt.screenshot.empty() || smoke::active() || GImGui->InputEventsQueue.Size > 0)
             glfwPollEvents();
         else glfwWaitEventsTimeout(app.rendering() ? 0.05 : 0.5);
         const auto frameWorkStart = std::chrono::steady_clock::now();  // (WELDER_DEBUG_FRAMES)
@@ -1187,10 +1187,10 @@ int main(int argc, char** argv) {
                 v.fstop = j.value("stops", 0.f); v.gamma = j.value("gamma", 1.f);
                 v.saturation = j.value("saturation", 1.f); v.displayTransfer = j.value("transfer", 0);
                 v.channel = j.value("channel", 0); v.safeZone = j.value("safe", false);
-                v.cropToFormat = j.value("crop", false); v.fullBuffer = j.value("full", false);
-                v.proxy = j.value("proxy", false); v.resolution = j.value("resolution", 1);
+                v.cropFormat = j.value("crop", false); v.fullBuffer = j.value("full", false);
+                v.proxy = j.value("proxy", false); v.resolutionDivisor = j.value("proxy",false) ? j.value("resolution",1) : 0;
                 v.alphaChannel = j.value("alpha", std::string("A")); v.dirtyTexture = true;
-                if (j.contains("roi")) { auto r=j["roi"]; v.roi=true; v.roiBox=Box(r[0],r[1],r[2],r[3]); }
+                if (j.contains("roi")) { auto r=j["roi"]; v.roiEnabled=true; v.roi=Box(r[0],r[1],r[2],r[3]); }
                 v.reqScale=0;
             }
         }
@@ -1813,10 +1813,10 @@ int main(int argc, char** argv) {
                 static int secShown = 0, sec = 0;
                 if (const char* fr = std::getenv("STRATA_TEST_PLAY_FULLRES"); fr && onAt < 0) std::sscanf(fr, "%lf,%lf", &onAt, &offAt);
                 const double el = glfwGetTime() - t0;
-                if (onAt >= 0 && el >= onAt && el < offAt) ui.viewer.fullRes = true;
-                if (offAt >= 0 && el >= offAt) ui.viewer.fullRes = false;
+                if (onAt >= 0 && el >= onAt && el < offAt) ui.viewer.resolutionDivisor = 1;
+                if (offAt >= 0 && el >= offAt) ui.viewer.resolutionDivisor = 0;
                 if ((int)el > sec) {
-                    std::printf("PLAYSEC %d: %d fps (full res %s, scale %g), frame %g, showing %g, rendering %d, edits pending %d\n", sec, secShown, ui.viewer.fullRes ? "on" : "off", ui.viewer.reqScale, app.frame, r.frame, (int)app.rendering(), (int)app.editsPending());
+                    std::printf("PLAYSEC %d: %d fps (full res %s, scale %g), frame %g, showing %g, rendering %d, edits pending %d\n", sec, secShown, ui.viewer.resolutionDivisor == 1 ? "on" : "off", ui.viewer.reqScale, app.frame, r.frame, (int)app.rendering(), (int)app.editsPending());
                     std::fflush(stdout);
                     sec = (int)el, secShown = 0;
                 }
@@ -1832,7 +1832,7 @@ int main(int argc, char** argv) {
                         rng = rng * 1664525u + 1013904223u;
                         const int what = (int)((rng >> 16) % 4);
                         Node* vn = app.comp->find("Viewer1");
-                        if (what == 0) ui.viewer.fullRes = !ui.viewer.fullRes;
+                        if (what == 0) ui.viewer.resolutionDivisor = ui.viewer.resolutionDivisor == 1 ? 0 : 1;
                         else if (what == 1) {
                             auto [a, b] = app.playRange();
                             app.frame = std::floor(a + ((rng >> 8) % 1000) / 1000.0 * (b - a));
@@ -1843,7 +1843,7 @@ int main(int argc, char** argv) {
                             const int cur = vn->params.data.value("a_pipe", 1);
                             app.setViewerParam("Viewer1", "a_pipe", cur == 1 ? 2 : 1);
                         }
-                        std::printf("STRESS %.1fs: %s\n", el, what == 0 ? (ui.viewer.fullRes ? "full res on" : "full res off") : what == 1 ? "jump" : what == 2 ? "zoom" : "switch input");
+                        std::printf("STRESS %.1fs: %s\n", el, what == 0 ? (ui.viewer.resolutionDivisor == 1 ? "full res on" : "full res off") : what == 1 ? "jump" : what == 2 ? "zoom" : "switch input");
                         ++acts;
                     }
                     if (lastNew >= 0) stall = std::max(stall, el - lastNew);

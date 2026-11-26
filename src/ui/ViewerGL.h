@@ -23,6 +23,8 @@ struct DisplayParams {
     int raw = 0;         // 1: the RGB is data (a matte): no display transform, like the alpha channel always
     // OCIO display transform (working space -> display / view); null: plain sRGB encode
     std::shared_ptr<const color::GpuShader> ocio;
+    bool checkerboard = false;
+    bool clippingWarning = false;
 };
 
 // Load the GL entry points the shader needs. Call once with a current context.

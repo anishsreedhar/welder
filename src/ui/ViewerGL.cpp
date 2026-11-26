@@ -92,6 +92,7 @@ struct Program {
     GLuint prog = 0;
     bool failed = false;
     GLint uProj = -1, uTex = -1, uGain = -1, uGamma = -1, uSaturation = -1, uTransfer = -1, uChannel = -1, uMatte = -1, uRaw = -1;
+    GLint uChecker=-1,uClipping=-1;
     std::vector<std::pair<GLuint, GLenum>> luts;  // texture, target (units 1..n)
     std::vector<GLint> lutSamplers;
 };
@@ -126,6 +127,8 @@ uniform float Saturation;
 uniform int Transfer;
 uniform int Channel;
 uniform int Matte;
+uniform int Checker;
+uniform int Clipping;
 uniform int Raw;
 out vec4 Out_Color;
 )";
@@ -140,7 +143,8 @@ vec4 OCIODisplay(vec4 c) {
 const char* kFSMain = R"(
 void main() {
     vec4 c = texture(Texture, Frag_UV);
-    vec3 rgb = c.rgb;
+    float alpha = clamp(c.a, 0.0, 1.0);
+    vec3 rgb = Checker != 0 && Channel == 0 ? (alpha > 1e-6 ? c.rgb / alpha : vec3(0.0)) : c.rgb;
     rgb = mix(vec3(dot(rgb, vec3(0.2126, 0.7152, 0.0722))), rgb, Saturation);
     if (Channel == 1) rgb = vec3(c.r);
     else if (Channel == 2) rgb = vec3(c.g);
@@ -148,6 +152,7 @@ void main() {
     else if (Channel == 4) rgb = vec3(c.a);
     else if (Channel == 5) rgb = vec3(dot(c.rgb, vec3(0.2126, 0.7152, 0.0722)));
     rgb *= Gain;
+    bool clipped = any(lessThan(rgb, vec3(0.0))) || any(greaterThan(rgb, vec3(1.0)));
     if (Gamma != 1.0) rgb = pow(max(rgb, vec3(0.0)), vec3(1.0 / Gamma));
     // a matte is data: 1 is white, not what the view transform makes of scene white (ACES: ~0.8 grey)
     vec3 outc = (Channel == 4 || Raw != 0) ? clamp(rgb, 0.0, 1.0) : clamp(OCIODisplay(vec4(rgb, 1.0)).rgb, 0.0, 1.0);
@@ -158,6 +163,12 @@ void main() {
         else outc = pow(t, vec3(1.0 / 2.4));
         outc = clamp(outc, 0.0, 1.0);
     }
+    if (Checker != 0 && Channel == 0) {
+        float checker = mod(floor(gl_FragCoord.x / 12.0) + floor(gl_FragCoord.y / 12.0), 2.0);
+        outc = mix(vec3(mix(0.23, 0.39, checker)), outc, alpha);
+    }
+    if (Clipping != 0 && clipped && mod(gl_FragCoord.x + gl_FragCoord.y, 10.0) < 4.0)
+        outc = mix(outc, vec3(1.0, 0.45, 0.08), 0.85);
     if (Matte != 0) outc = mix(outc, vec3(1.0, 0.25, 0.25), clamp(c.a, 0.0, 1.0) * 0.5);  // M: alpha as a red overlay
     Out_Color = vec4(outc, Frag_A);
 }
@@ -245,6 +256,8 @@ Program* program(const std::shared_ptr<const color::GpuShader>& ocio) {
     P.uTransfer = pGetUniformLocation(p, "Transfer");
     P.uChannel = pGetUniformLocation(p, "Channel");
     P.uMatte = pGetUniformLocation(p, "Matte");
+    P.uChecker = pGetUniformLocation(p, "Checker");
+    P.uClipping = pGetUniformLocation(p, "Clipping");
     P.uRaw = pGetUniformLocation(p, "Raw");
     if (ocio) {
         GLint prevTex = 0;
@@ -280,6 +293,8 @@ void bindDisplayProgram(const ImDrawList*, const ImDrawCmd* cmd) {
     pUniform1i(P->uTransfer, g_params.transfer);
     pUniform1i(P->uChannel, g_params.channel);
     pUniform1i(P->uMatte, g_params.matte);
+    pUniform1i(P->uChecker, g_params.checkerboard);
+    pUniform1i(P->uClipping, g_params.clippingWarning);
     pUniform1i(P->uRaw, g_params.raw);
     if (!P->luts.empty()) {
         for (size_t i = 0; i < P->luts.size(); ++i) {

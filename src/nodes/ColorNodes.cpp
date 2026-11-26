@@ -43,8 +43,9 @@ public:
         }
         if (idx.empty()) return;
         // the classic "(un)premult by": divide the colour by alpha before, multiply after
-        const std::string up = params.str("unpremult", "none");
-        const int ua = up == "none" || up.empty() ? -1 : out.ch(up);
+        const std::string up = resolveChannelName(params.str("unpremult", "none"));
+        const int sourceAlpha = up == "none" || up.empty() ? -1 : src->ch(up);
+        const int ua = sourceAlpha >= 0 ? out.ch(up) : -1;
         const bool invUp = params.flag("invert_unpremult", false);
         std::vector<int> uidx;
         if (ua >= 0)

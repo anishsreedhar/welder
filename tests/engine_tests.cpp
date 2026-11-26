@@ -559,6 +559,28 @@ int main(int argc, char** argv) {
         CHECK_NEAR(px(img, 0, 0, "A"), 1.0, 1e-6);  // default channels = rgb
     });
 
+    test("Grade and ColorCorrect unpremult use the source mask after reconnecting", [] {
+        for (const char* type : {"Grade", "ColorCorrect"}) {
+            auto c = comp(json::array({
+                {{"name", "Source"}, {"type", "Constant"}, {"params", {{"color", {0.2, 0.2, 0.2, 1}}}}},
+                {{"name", "SourceMask"}, {"type", "Constant"}, {"params", {{"color", {0, 0, 0, 0.4}}}}},
+                {{"name", "EffectMask"}, {"type", "Constant"}, {"params", {{"color", {0, 0, 0, 0.25}}}}},
+                {{"name", "WithMask"}, {"type", "Grade"}, {"inputs", {"Source", "SourceMask"}},
+                 {"params", {{"inject", true}}}},
+                {{"name", "Correction"}, {"type", type}, {"inputs", {"WithMask", "EffectMask"}},
+                 {"params", {{"inject", true}, {"unpremult", "mask.a"}, {"offset", 0.4}}}},
+            }), 8, 8);
+            auto masked = render(*c, "Correction");
+            CHECK_NEAR(px(masked, 0, 0, "R"), 0.24, 1e-6);  // 0.2 + offset * source alpha * effect mask
+            CHECK_NEAR(px(masked, 0, 0, "mask.a"), 0.25, 1e-6);
+
+            CHECK(c->setInput(c->find("Correction"), 0, c->find("Source")));
+            auto reconnected = render(*c, "Correction");
+            CHECK_NEAR(px(reconnected, 0, 0, "R"), 0.30, 1e-6);  // missing source channel: just the effect mask
+            CHECK_NEAR(px(reconnected, 0, 0, "mask.a"), 0.25, 1e-6);
+        }
+    });
+
     test("integer translate is exact and moves the bbox", [] {
         auto c = comp(json::array({
             {{"name", "P"}, {"type", "TestPattern"}},

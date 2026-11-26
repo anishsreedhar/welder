@@ -35,7 +35,7 @@ const std::vector<Shortcut>& shortcuts() {
         {"Global", "F5", "render all Write nodes", true},
         {"Global", "F7", "render selected Write nodes", true},
         {"Global", "Ctrl+P", "toggle proxy mode", true},
-        {"Global", "Ctrl+Shift+P", "toggle pixel aspect ratio", false},
+        {"Global", "Ctrl+Shift+P", "toggle pixel aspect ratio", true},
         {"Global", "F12", "clear cached images (buffers)", true},
         {"Global", "Shift+F12", "reset the workspace (every panel back in its default place)", true},
         {"Global", "Shift+F1-F6", "switch to a saved workspace (Workspace > Save Workspace; Shift+F1: Compositing)", true},
@@ -56,7 +56,7 @@ const std::vector<Shortcut>& shortcuts() {
         {"Node Graph", "Ctrl+G", "group the selected nodes", true},
         {"Node Graph", "Ctrl+Alt+G", "expand the selected group", true},
         {"Node Graph", "Ctrl+Enter", "open the selected group (nothing selected: up a level)", true},
-        {"Node Graph", "Ctrl+V", "paste nodes (also nodes copied in another .nk app)", true},
+        {"Node Graph", "Ctrl+V", "paste nodes (including .nk nodes) or a footage path", true},
         {"Node Graph", "I", "info about the selected node", true},
         {"Node Graph", "S", "project settings", true},
         {"Node Graph", "F", "fit selected nodes (or all) in the panel", true},
@@ -110,7 +110,7 @@ const std::vector<Shortcut>& shortcuts() {
         {"Viewer", "I / O", "in / out point at this frame (again on the same frame: off)", true},
         {"Viewer", "Alt+drag, middle-drag", "pan", true},
         {"Viewer", "W / Shift+0-9", "wipe / reference inputs", false},
-        {"Viewer", "Alt+W", "region of interest", false},
+        {"Viewer", "Alt+W", "draw a region of interest", true},
         {"Viewer", "Ctrl+click", "sample a pixel (the readout follows the mouse already)", false},
         // ---- Roto (over the viewer while a Roto node's properties are open)
         {"Roto", "V", "draw tools: Bezier, B-spline, Ellipse, Rectangle (cycle)", true},
@@ -210,6 +210,10 @@ std::vector<double> keyTimes(App& app) {
 
 void setFrame(App& app, double f) {
     auto [first, last] = app.visibleRange();
+    if (auto range = app.markedRange()) {
+        first = std::min(first, range->first);
+        last = std::max(last, range->second);
+    }
     f = std::clamp(std::round(f), first, last);
     if (f != app.frame) {
         app.frame = f;
@@ -259,27 +263,18 @@ void openRender(App& app, UiState& ui, bool selectedOnly) { openRenderDialog(app
 void toggleInOut(App& app, bool in) {
     const double fr = std::round(app.frame);
     const auto vis = app.visibleRange();
-    const auto& pr = app.comp->project;
-    const bool clear = pr.hasInOut && (in ? pr.inPoint == fr && fr != vis.first : pr.outPoint == fr && fr != vis.second);
-    app.edit([fr, in, vis, clear](Comp& c) {
-        auto& p = c.project;
-        if (!p.hasInOut) {
-            p.inPoint = vis.first;
-            p.outPoint = vis.second;
-        }
-        if (clear) {
-            if (in) p.inPoint = vis.first;
-            else p.outPoint = vis.second;
-        } else if (in) {
-            p.inPoint = fr;
-            if (p.outPoint < fr) p.outPoint = vis.second;  // an in point after the out point: the out point goes
-        } else {
-            p.outPoint = fr;
-            if (p.inPoint > fr) p.inPoint = vis.first;
-        }
-        // neither set any more: no in / out at all
-        p.hasInOut = !(p.inPoint <= vis.first && p.outPoint >= vis.second);
-    });
+    auto marked = app.markedRange();
+    auto [first, last] = marked.value_or(vis);
+    const bool clear = in ? first == fr && fr != vis.first : last == fr && fr != vis.second;
+    if (in) {
+        first = clear ? vis.first : fr;
+        if (last < first) last = std::max(first, vis.second);
+    } else {
+        last = clear ? vis.second : fr;
+        if (first > last) first = std::min(last, vis.first);
+    }
+    if (first == vis.first && last == vis.second) app.setMarkedRange(std::nullopt);
+    else app.setMarkedRange(App::FrameRange{first, last});
     app.message(std::string(in ? "in point " : "out point ") + (clear ? "off" : std::to_string((int)fr)));
 }
 
@@ -315,6 +310,11 @@ void handleHotkeys(App& app, UiState& ui) {
     if (key(ImGuiKey_G, false, false, true)) { ui.openGotoFrame = true; return; }
     if (key(ImGuiKey_F5)) { openRender(app, ui, false); return; }
     if (key(ImGuiKey_F7)) { openRender(app, ui, true); return; }
+    if (key(ImGuiKey_P, true, true)) {
+        ui.viewer.correctPixelAspect = !ui.viewer.correctPixelAspect;
+        ui.viewer.fitPending = true;
+        return;
+    }
     if (key(ImGuiKey_P, true)) {
         bool pm = !app.comp->project.proxyMode;
         app.edit([pm](Comp& c) { c.project.proxyMode = pm; });
@@ -452,7 +452,11 @@ void handleHotkeys(App& app, UiState& ui) {
             }
             return;
         }
-        if (key(ImGuiKey_W, false, false, true)) { unavailable(app, "Region of interest"); return; }
+        if (key(ImGuiKey_W, false, false, true)) {
+            v.roiDraw = !v.roiDraw;
+            v.roiDragging = false;
+            return;
+        }
         return;
     }
 
