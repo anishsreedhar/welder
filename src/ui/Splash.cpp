@@ -7,9 +7,12 @@
 #include <vector>
 
 #include "stb_image.h"
+#include "stb_image_write.h"
 
 extern const unsigned char welder_splash_png[];
 extern const unsigned welder_splash_png_size;
+extern const unsigned char welder_splash_background[];
+extern const unsigned welder_splash_background_size;
 extern const unsigned char welder_icon_png[];
 extern const unsigned welder_icon_png_size;
 
@@ -49,6 +52,37 @@ Image decode(const unsigned char* data, unsigned size) {
         stbi_image_free(p);
     }
     return im;
+}
+
+// Render the supplied photograph behind the existing brand artwork. The
+// photograph covers the splash without stretching; logo geometry stays intact.
+Image artwork() {
+    Image logo = decode(welder_splash_png, welder_splash_png_size);
+    const Image photo = decode(welder_splash_background, welder_splash_background_size);
+    if (logo.rgba.empty() || photo.rgba.empty()) return logo;
+    const double scale = std::max(double(logo.w) / photo.w, double(logo.h) / photo.h);
+    const float base[] = {float(logo.rgba[0]),float(logo.rgba[1]),float(logo.rgba[2])};
+    const float baseMax = std::max({base[0],base[1],base[2]});
+    for (int y = 0; y < logo.h; ++y) {
+        const double sy = std::clamp((y+.5-logo.h*.5)/scale+photo.h*.5-.5,0.0,double(photo.h-1));
+        const int y0 = int(sy), y1 = std::min(y0+1,photo.h-1);
+        const double fy = sy-y0;
+        for (int x = 0; x < logo.w; ++x) {
+            const double sx = std::clamp((x+.5-logo.w*.5)/scale+photo.w*.5-.5,0.0,double(photo.w-1));
+            const int x0 = int(sx), x1 = std::min(x0+1,photo.w-1);
+            const double fx = sx-x0;
+            auto* p = logo.rgba.data()+((size_t)y*logo.w+x)*4;
+            const float coverage = std::clamp((std::max({p[0],p[1],p[2]})-baseMax)/(255-baseMax),0.f,1.f);
+            for (int c = 0; c < 3; ++c) {
+                const double top = photo.rgba[((size_t)y0*photo.w+x0)*4+c]*(1-fx)+photo.rgba[((size_t)y0*photo.w+x1)*4+c]*fx;
+                const double bottom = photo.rgba[((size_t)y1*photo.w+x0)*4+c]*(1-fx)+photo.rgba[((size_t)y1*photo.w+x1)*4+c]*fx;
+                const double background = (top*(1-fy)+bottom*fy)*.78; // keep white/gold lettering legible
+                p[c] = (unsigned char)std::clamp(std::lround(p[c]+(background-base[c])*(1-coverage)),0l,255l);
+            }
+            p[3] = 255;
+        }
+    }
+    return logo;
 }
 
 // A smaller copy (box filter): the splash is drawn at its window's exact pixel size.
@@ -103,7 +137,7 @@ void draw() {
 }  // namespace
 
 bool show() {
-    Image im = decode(welder_splash_png, welder_splash_png_size);
+    Image im = artwork();
     if (im.rgba.empty()) return false;
     GLFWmonitor* mon = glfwGetPrimaryMonitor();
     const GLFWvidmode* mode = mon ? glfwGetVideoMode(mon) : nullptr;
@@ -167,6 +201,14 @@ bool show() {
     draw();
     gShownAt = glfwGetTime();
     return true;
+}
+
+bool preview(const char* path) {
+    const Image image = artwork();
+    if (image.rgba.empty()) return false;
+    const int width = std::min(825,image.w), height = int(std::lround(double(width)*image.h/image.w));
+    const Image fit = shrink(image,width,height);
+    return stbi_write_png(path,fit.w,fit.h,4,fit.rgba.data(),fit.w*4) != 0;
 }
 
 void pump() {

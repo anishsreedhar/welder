@@ -11091,7 +11091,12 @@ bool    ImGui::TabItemEx(ImGuiTabBar* tab_bar, const char* label, bool* p_open, 
         const ImGuiID close_button_id = p_open ? GetIDWithSeed("#CLOSE", NULL, docked_window ? docked_window->ID : id) : 0;
         bool just_closed;
         bool text_clipped;
+        // Welder's workspace uses the theme accent for the visible dock tab.
+        // Inner property tabs retain their normal text colour.
+        const bool accent_dock_label = docked_window != NULL && tab_contents_visible;
+        if (accent_dock_label) PushStyleColor(ImGuiCol_Text, GetStyleColorVec4(ImGuiCol_CheckMark));
         TabItemLabelAndCloseButton(display_draw_list, bb, tab_just_unsaved ? (flags & ~ImGuiTabItemFlags_UnsavedDocument) : flags, tab_bar->FramePadding, label, id, close_button_id, tab_contents_visible, &just_closed, &text_clipped);
+        if (accent_dock_label) PopStyleColor();
         if (just_closed && p_open != NULL)
         {
             *p_open = false;

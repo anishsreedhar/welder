@@ -599,6 +599,8 @@ void drawDopeSheet(App& app, UiState& ui);
 void tickPlayback(App& app, UiState& ui);
 void drawNodeGraph(App& app, UiState& ui);
 void drawProperties(App& app, UiState& ui);
+void drawBackgroundRenders(App& app, UiState& ui);
+void drawSceneGraph(App& app, UiState& ui);
 void openFloatPanel(App& app, UiState& ui, const std::string& name);  // issue #25
 void drawMessages(App& app, UiState& ui);
 void drawDialogs(App& app, UiState& ui);

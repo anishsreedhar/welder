@@ -446,8 +446,9 @@ if(STRATA_BUILD_UI)
 
   include(cmake/embed.cmake)
   embed_file(${CMAKE_SOURCE_DIR}/assets/brand/welder-splash.png welder_splash_png splash_src)
+  embed_file(${CMAKE_SOURCE_DIR}/assets/brand/welder-splash-background.jpg welder_splash_background background_src)
   embed_file(${CMAKE_SOURCE_DIR}/assets/brand/welder-icon-64.png welder_icon_png icon_src)
-  set(WELDER_EMBEDDED ${splash_src} ${icon_src})
+  set(WELDER_EMBEDDED ${splash_src} ${background_src} ${icon_src})
   add_executable(welder_ui WIN32
     src/ui/main.cpp
     src/ui/SmokeTest.cpp
