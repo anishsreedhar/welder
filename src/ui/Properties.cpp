@@ -627,6 +627,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
     auto startGesture = [&]() {
         if (ImGui::IsItemActivated()) c.app.checkpoint();
     };
+    bool showInlinePicker = false;
 
     const ImGuiSliderFlags sflags = k.logSlider ? ImGuiSliderFlags_Logarithmic : 0;
     // a value field, then (unless noSlider) a slider filling the row
@@ -731,10 +732,12 @@ void numericKnob(Ctx& c, const KnobDef& k) {
         }
     } else if (k.type == Knob::Color) {
         // classic: one slider drives all channels; expand for per-channel values.
-        static std::set<std::string> expanded;
-        std::string ek = c.node->name + "/" + k.name;
-        bool split = expanded.count(ek) || !(cur[0] == cur[1] && cur[1] == cur[2] && cur[2] == cur[3]);
+        ImGuiStorage* state = ImGui::GetStateStorage();
+        const ImGuiID splitId = ImGui::GetID("##colorSplit");
+        const bool uniform = cur[0] == cur[1] && cur[1] == cur[2] && cur[2] == cur[3];
+        const bool split = state->GetBool(splitId, !uniform);
         float col[4] = {(float)cur[0], (float)cur[1], (float)cur[2], (float)cur[3]};
+        const bool inlinePicker = c.node->type == "ColorCorrect" || c.node->type == "Grade";
         if (ImGui::ColorEdit4("##sw", col, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR |
                                                ImGuiColorEditFlags_AlphaPreviewHalf | ImGuiColorEditFlags_NoLabel)) {
             for (int i = 0; i < 4; ++i)
@@ -744,8 +747,19 @@ void numericKnob(Ctx& c, const KnobDef& k) {
         startGesture();
         ImGui::SameLine();
         float rest = avail - ImGui::GetFrameHeight() * 2 - 30 - ImGui::GetStyle().ItemSpacing.x * 2;  // room for "1|4" and the pipette
+        if (inlinePicker) {
+            const ImGuiID pickerId = ImGui::GetID("##inlinePickerOpen");
+            showInlinePicker = state->GetBool(pickerId);
+            if (kit::iconButton("##wheel", kit::Icon::ColorWheel, showInlinePicker,
+                                showInlinePicker ? "Hide color wheel" : "Show color wheel")) {
+                showInlinePicker = !showInlinePicker;
+                state->SetBool(pickerId, showInlinePicker);
+            }
+            ImGui::SameLine();
+            rest -= ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.x;
+        }
         if (split) {
-            ImGui::SetNextItemWidth(rest);
+            ImGui::SetNextItemWidth(std::max(40.0f, rest));
             float fv[4] = {col[0], col[1], col[2], col[3]};
             if (ImGui::DragFloat4("##v", fv, 0.005f, 0, 0, "%.3f") && !ImGui::GetIO().KeyAlt)
                 for (int i = 0; i < 4; ++i)
@@ -763,11 +777,18 @@ void numericKnob(Ctx& c, const KnobDef& k) {
             startGesture();
         }
         ImGui::SameLine();
-        if (ImGui::SmallButton(split ? "1" : "4")) {
-            if (split) expanded.erase(ek);
-            else expanded.insert(ek);
+        const bool resetOnCollapse = split && c.node->type == "ColorCorrect";
+        if (ImGui::SmallButton(split ? "1###colorMode" : "4###colorMode")) {
+            state->SetBool(splitId, !split);
+            if (resetOnCollapse && cur != defs) {
+                c.app.checkpoint();
+                change(c, k.name, [n, frame, defs](json& j) {
+                    for (int i = 0; i < n; ++i) setComp(j, n, i, defs[i], frame, defs);
+                });
+            }
         }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(split ? "single value" : "per-channel values");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(resetOnCollapse ? "Switch to one value and reset to the default."
+            : split ? "Show one value. Editing it sets all channels." : "Show per-channel values.");
         // Colour picker: pick, then click or drag a box in the viewer.
         ImGui::SameLine();
         PickerState& pk = c.ui.picker;
@@ -786,7 +807,8 @@ void numericKnob(Ctx& c, const KnobDef& k) {
             }
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(k.pickInput ? "Pick from the viewer: click or drag a box over the screen (samples this node's input).\nEsc or pick again to stop."
+            ImGui::SetTooltip(c.node->type == "Grade" ? "Click or drag in the Viewer. Hold Ctrl+Alt to sample Grade's input.\nEsc or pick again to stop."
+                                          : k.pickInput ? "Pick from the viewer: click or drag a box over the screen (samples this node's input).\nEsc or pick again to stop."
                                           : "Pick from the viewer: click or drag a box (samples what the viewer shows).\nEsc or pick again to stop.");
     }
     if (hasX || anim) ImGui::PopStyleColor();
@@ -825,6 +847,70 @@ void numericKnob(Ctx& c, const KnobDef& k) {
         // the classic "=": the expression editor for the knob under the mouse
         if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Equal, false) && !ImGui::GetIO().KeyCtrl)
             openExprEditor(c, k, n, cur, defs);
+    }
+    if (showInlinePicker) {
+        const ImGuiID splitId = ImGui::GetID("##colorSplit");
+        ImGui::Indent(kit::labelWidth());
+        const float font = ImGui::GetFontSize();
+        const float space = ImGui::GetStyle().ItemSpacing.x;
+        const float sliderWidth = ImGui::GetFrameHeight();
+        const float slidersWidth = 3 * (sliderWidth + space);
+        const float room = ImGui::GetContentRegionAvail().x;
+        const bool sideBySide = room >= slidersWidth + font * 8.0f;
+        const float wheelWidth = std::clamp(room - (sideBySide ? slidersWidth : 0.0f), 1.0f, font * 13.0f);
+        ImGui::SetNextItemWidth(wheelWidth);
+        float rgb[3] = {(float)cur[0], (float)cur[1], (float)cur[2]};
+        const bool edited = ImGui::ColorPicker3("##inlinePicker", rgb, ImGuiColorEditFlags_PickerHueWheel |
+            ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR | ImGuiColorEditFlags_NoInputs |
+            ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_NoLabel);
+        startGesture();
+        if (edited) {
+            if (c.node->type == "ColorCorrect") ImGui::GetStateStorage()->SetBool(splitId, true);
+            for (int i = 0; i < 3; ++i)
+                if (rgb[i] != (float)cur[i]) commit(i, rgb[i]);
+        }
+        if (sideBySide) ImGui::SameLine();
+        ImGui::BeginGroup();
+        const char* names[] = {"Temperature", "Magenta / Green", "Intensity"};
+        const ImVec4 accents[] = {ImVec4(0.47f, 0.68f, 0.94f, 1), ImVec4(0.79f, 0.47f, 0.78f, 1),
+                                  ImVec4(0.85f, 0.76f, 0.55f, 1)};
+        // Temperature and tint keep the RGB mean fixed. Intensity moves all three by the same amount.
+        const float directions[][3] = {{-1, 0, 1}, {0.5f, -1, 0.5f}, {1, 1, 1}};
+        const float span = (float)(k.hi - k.lo);
+        const float sliderHeight = sideBySide ? std::max(font * 5.0f, wheelWidth - ImGui::GetTextLineHeightWithSpacing()) : font * 6.0f;
+        for (int i = 0; i < 3; ++i) {
+            if (i) ImGui::SameLine();
+            ImGui::PushID(i);
+            ImGui::BeginGroup();
+            ImGui::PushStyleColor(ImGuiCol_SliderGrab, accents[i]);
+            ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, accents[i]);
+            const float base = i == 0 ? (rgb[2] - rgb[0]) * 0.5f
+                : i == 1 ? (rgb[0] + rgb[2] - 2 * rgb[1]) / 3.0f
+                         : (rgb[0] + rgb[1] + rgb[2]) / 3.0f;
+            float value = base;
+            const bool changed = ImGui::VSliderFloat("##balance", ImVec2(sliderWidth, sliderHeight), &value,
+                i == 2 ? (float)k.lo : -span * 0.5f, i == 2 ? (float)k.hi : span * 0.5f, "");
+            ImGui::PopStyleColor(2);
+            startGesture();
+            if (changed) {
+                ImGui::GetStateStorage()->SetBool(splitId, true);
+                for (int channel = 0; channel < 3; ++channel) {
+                    const float delta = (value - base) * directions[i][channel];
+                    if (delta != 0) {
+                        rgb[channel] += delta;
+                        commit(channel, rgb[channel]);
+                    }
+                }
+            }
+            if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetTooltip("%s: %.4g", names[i], value);
+            const char label[] = {names[i][0], '\0'};
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (sliderWidth - ImGui::CalcTextSize(label).x) * 0.5f);
+            ImGui::TextColored(accents[i], "%s", label);
+            ImGui::EndGroup();
+            ImGui::PopID();
+        }
+        ImGui::EndGroup();
+        ImGui::Unindent(kit::labelWidth());
     }
     ImGui::PopID();
 }
@@ -1125,6 +1211,7 @@ bool condOk(const Node* n, const std::string& cond);
 // Named lookup curves (ColorLookup, HueCorrect, AddMix...): a list of the curves to pick from, and a
 // graph: click on the curve to add a point, drag points, double-click a point to delete it.
 void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
+    const bool tonalRanges = c.node->type == "ColorCorrect" && k.name == "tonal_ranges";
     struct State {
         std::string sel;
         int drag = -1;
@@ -1176,9 +1263,9 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
     if (ImGui::SmallButton("reset")) {
         c.app.checkpoint();
         std::string s = stt.sel;
-        json d = k.def.is_object() && k.def.contains(s) ? k.def[s] : json();
-        change(c, k.name, [s, d, def = k.def](json& j) {
-            if (!j.is_object()) j = def.is_object() ? def : json::object();
+        json d = !tonalRanges && k.def.is_object() && k.def.contains(s) ? k.def[s] : json();
+        change(c, k.name, [s, d, tonalRanges, def = k.def](json& j) {
+            if (!j.is_object()) j = !tonalRanges && def.is_object() ? def : json::object();
             if (d.is_null()) j.erase(s);
             else j[s] = d;
         });
@@ -1270,8 +1357,8 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
         std::string s = stt.sel;
         json def = k.def;
         val[s] = np;
-        change(c, k.name, [s, np, def](json& j) {
-            if (!j.is_object()) j = def.is_object() ? def : json::object();
+        change(c, k.name, [s, np, def, tonalRanges](json& j) {
+            if (!j.is_object()) j = !tonalRanges && def.is_object() ? def : json::object();
             j[s] = np;
         });
     };
@@ -1633,7 +1720,12 @@ void knobBody(Ctx& c, const KnobDef& k) {
             size_t idx = (size_t)std::atof(cur.c_str());
             if (idx < k.options.size()) cur = k.options[idx];
         }
-        const std::vector<std::string> opts = k.options.empty() ? c.node->knobChoices(k.name) : k.options;
+        std::vector<std::string> opts = k.options.empty() ? c.node->knobChoices(k.name) : k.options;
+        if (k.name == "unpremult" && (c.node->type == "Grade" || c.node->type == "ColorCorrect")) {
+            if (Node* input = c.node->input(0))
+                for (const auto& ch : c.app.nodeInfo(input->name).channels)
+                    if (std::find(opts.begin(), opts.end(), ch) == opts.end()) opts.push_back(ch);
+        }
         if (kit::beginCombo("##c", cur.c_str(), k.width > 0 ? k.width : std::min(avail, 220.0f))) {
             for (auto& o : opts)
                 if (ImGui::Selectable(o.c_str(), o == cur)) {

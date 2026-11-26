@@ -165,13 +165,14 @@ std::vector<KnobDef> maskKnobs() {
             Same(B("fringe", "fringe", false)), F("mix", "mix", 1.0, 0, 1)};
 }
 // colour nodes also have "(un)premult by"
-std::vector<KnobDef> colorMask(std::vector<KnobDef> k) {
+std::vector<KnobDef> colorMask(std::vector<KnobDef> k, bool inject = false) {
     k.push_back(Div(""));
     k.push_back(Width(C("unpremult", "(un)premult by", "none", {"none", "A"}), 110));
     k.push_back(Same(B("invert_unpremult", "invert", false)));
     k.push_back(Width(S("mask_channel", "mask", "A"), 110));
     k.push_back(Same(B("invert_mask", "invert", false)));
     k.push_back(Same(B("fringe", "fringe", false)));
+    if (inject) k.push_back(Same(B("inject", "inject mask", false)));
     k.push_back(F("mix", "mix", 1.0, 0, 1));
     return k;
 }
@@ -1518,15 +1519,24 @@ std::vector<NodeDef> build() {
                             Col("whitepoint", "whitepoint", 1), Col("lift", "lift", 0, -1, 1), Col("gain", "gain", 1),
                             Col("multiply", "multiply", 1), Col("offset", "offset", 0, -1, 1), Col("gamma", "gamma", 1, 0.2, 5),
                             B("reverse", "reverse", false), B("black_clamp", "black clamp", true),
-                            Same(B("white_clamp", "white clamp", false))}),
+                            Same(B("white_clamp", "white clamp", false))}, true),
                  ""});
     {
-        std::vector<KnobDef> k = ccRange("");
+        std::vector<KnobDef> k = {Ch("channels", "channels", "rgb")};
+        auto master = ccRange("");
+        k.insert(k.end(), master.begin(), master.end());
         for (const char* r : {"shadows", "midtones", "highlights"}) {
             auto rr = ccRange(r);
             k.insert(k.end(), rr.begin(), rr.end());
         }
-        d.push_back({"ColorCorrect", "Color", colorMask(k), ""});
+        k.push_back(Div("tonal ranges"));
+        k.push_back(B("range_preview", "preview ranges", false));
+        k.push_back({"tonal_ranges", "range curves", Knob::Curves,
+                     json::object({{"shadows", {{0, 1}, {0.045, 0.5}, {0.09, 0}, {1, 0}}},
+                                   {"highlights", {{0, 0}, {0.5, 0}, {0.75, 0.5}, {1, 1}}}}),
+                     0, 1, {"shadows", "highlights"}, "Midtone weight follows from the shadow and highlight curves."});
+        k.push_back(F("mix_luminance", "preserve luminance", 0, 0, 1));
+        d.push_back({"ColorCorrect", "Color", colorMask(k, true), ""});
     }
     d.push_back({"Saturation", "Color",
                  colorMask({Ch("channels", "channels", "rgb"), F("saturation", "saturation", 1, 0, 4),

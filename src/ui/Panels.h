@@ -62,11 +62,16 @@ struct ViewerState {
     ViewResult res;
     bool dirtyTexture = false;
     std::string layer = "rgba";
+    std::string alphaChannel;
     std::vector<std::string> layers = {"rgba"};
-    bool fullRes = false;
+    int resolutionDivisor = 0;  // 0 uses the existing zoom-based render scale
     Box reqRegion;        // last region requested from the renderer (full-res pixels)
     double reqScale = 0;
+    bool reqRoi = false;
     float zoom = 1.0f;
+    std::optional<double> timelineFrame;
+    std::optional<App::FrameRange> timelinePin;
+    std::optional<App::FrameRange> timelineWindow;
     ImVec2 pan = {0, 0};  // image coordinate at the viewport centre
     bool fitPending = true;
     bool checkOnScreen = false;  // a new node is shown: fit only if it would be off screen
@@ -75,6 +80,19 @@ struct ViewerState {
     float gamma = 1.0f;
     bool hovered = false;
     bool matte = false;      // M
+    bool checkerboard = false, clippingWarning = false;
+    bool showFormat = true, showBounds = true, cropFormat = false, correctPixelAspect = false;
+    int guides = 0, maskMode = 0, maskAspect = 0;
+    bool roiEnabled = false, roiDraw = false, roiDragging = false;
+    int roiDragEdges = 0;
+    Box roi;
+    ImVec2 roiStart, roiEnd;
+    bool sampleArmed = false, sampleDragging = false;
+    bool sampleInput = false;
+    ImVec2 sampleStart, sampleEnd;
+    Box sampleBox;
+    std::array<float, 4> pickedColor{};
+    int sampleDisplay = 0;
     bool overlays = true;    // Q: shapes, handles, trackers, format / bbox lines
     bool openSettings = false;  // S: viewer settings popup
     ImVec2 viewSize = {800, 450};
@@ -411,6 +429,29 @@ struct FloatPanel {
     bool focus = true;
 };
 
+struct FlipbookState {
+    bool open = false, playing = false, loading = false;
+    std::string node, layer, error;
+    uint64_t generation = 0;
+    uint64_t lastSerial = 0;
+    int first = 0, last = 0, index = 0, uploaded = -1;
+    double fps = 24, scale = 1, started = 0;
+    size_t bytes = 0;
+    float fstop = 0, gamma = 1;
+    int channel = 0;
+    bool matte = false;
+    std::vector<ViewResult> frames;
+    ViewerState display;
+};
+
+struct ViewerCaptureState {
+    bool configure = false, sequence = true, running = false, wroteFrame = false, failed = false;
+    int first = 0, last = 0, next = 0;
+    double originalFrame = 0;
+    uint64_t generation = 0;
+    std::string viewer, node, destination, framePath;
+};
+
 struct UiState {
     std::vector<FloatPanel> floatPanels;
     // ImageGen's contact sheet: Space over it toggles the 1:1 view of the selected take (not maximize)
@@ -498,6 +539,13 @@ struct UiState {
     // playback rate (shown in the fps box while playing).
     int playMode = 0;
     int timeFormat = 0;
+    bool linkViewerPlayback = true;
+    const Comp* timelineComp = nullptr;
+    int timelineDrag = 0;
+    int timelineDragFrame = 0;
+    ViewerCaptureState viewerCapture;
+    FlipbookState flipbook;
+    std::optional<std::pair<int, int>> flipbookSetup;
     int frameIncrement = 10;
     double measuredFps = 0, lastAdvance = 0;
     // Window name for a panel. A maximized panel is drawn as a separate floating
@@ -527,6 +575,10 @@ std::string workspaceLayout(int slot);  // the saved layout ("" = none)
 void drawToolbar(App& app, UiState& ui);
 void drawViewer(App& app, UiState& ui);
 void drawTimeline(App& app, UiState& ui);
+void openViewerCapture(App& app, UiState& ui);
+void drawViewerCaptureControls(App& app, UiState& ui);
+void openFlipbook(App& app, UiState& ui);
+void drawFlipbook(App& app, UiState& ui);
 // The timeline's fixed height (it never resizes vertically) and keeping its dock node at it.
 float timelineHeight();
 void lockTimelineHeight();
@@ -593,10 +645,11 @@ void drawProjectPanel(App& app, UiState& ui, bool* keepOpen);
 struct ViewXf {
     ImVec2 center, pan;
     float zoom = 1;
+    float pixelAspect = 1;
     ImVec2 toScreen(double x, double y) const {
-        return ImVec2(center.x + (float)((x - pan.x) * zoom), center.y - (float)((y - pan.y) * zoom));
+        return ImVec2(center.x + (float)((x - pan.x) * zoom * pixelAspect), center.y - (float)((y - pan.y) * zoom));
     }
-    ImVec2 toImage(ImVec2 s) const { return ImVec2(pan.x + (s.x - center.x) / zoom, pan.y - (s.y - center.y) / zoom); }
+    ImVec2 toImage(ImVec2 s) const { return ImVec2(pan.x + (s.x - center.x) / (zoom * pixelAspect), pan.y - (s.y - center.y) / zoom); }
 };
 // A node's format at full resolution (the UI's engine; the project's format if it can't be read).
 Format nodeFormatUI(App& app, Node* n, double f);

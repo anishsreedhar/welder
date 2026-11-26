@@ -7,6 +7,7 @@
 #include <cstring>
 #include <optional>
 
+#include "Curves.h"
 #include "NodeUtils.h"
 #include "gpu/Gpu.h"
 
@@ -27,40 +28,54 @@ class PixelOp : public Node {
 public:
     int maxInputs() const override { return 2; }
     std::string inputLabel(int i) const override { return i == 1 ? "mask" : ""; }
+    ChannelSet channels(Engine& e, double frame) override {
+        ChannelSet channels = Node::channels(e, frame);
+        if (injectMask() && std::find(channels.begin(), channels.end(), "mask.A") == channels.end())
+            channels.push_back("mask.A");
+        return channels;
+    }
     void render(RenderArgs& a, Image& out) override {
         ImagePtr src = a.fetch(input(0), a.region);
         out.copyFrom(*src);
-        ChannelSet sel = parseChannels(params, "channels", defaultChannels(), out.channels);
+        MaskMix mm = MaskMix::setup(a, this, 1);
+        const int maskTarget = injectMask() && mm.mask ? out.ch("mask.A") : -1;
+        ChannelSet sel = parseChannels(params, "channels", defaultChannels(), src->channels);
         std::vector<int> idx, comps;
         for (auto& c : sel) {
             int i = out.ch(c);
-            if (i >= 0) {
+            if (i >= 0 && i != maskTarget) {
                 idx.push_back(i);
                 comps.push_back(comp4(c));
             }
         }
+        if (maskTarget >= 0) {
+            for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
+                for (int x = out.bounds.x1; x < out.bounds.x2; ++x)
+                    out.px(x, y)[maskTarget] = mm.mask->at(x, y, mm.maskCh);
+        }
         if (idx.empty()) return;
         // the classic "(un)premult by": divide the colour by alpha before, multiply after
         const std::string up = params.str("unpremult", "none");
-        const int ua = up == "none" || up.empty() ? -1 : out.ch(up);
+        // The source can lack a channel that exists in the output after mask injection.
+        const int sourceAlpha = up == "none" || up.empty() ? -1 : src->ch(up);
+        const int outputAlpha = sourceAlpha >= 0 ? out.ch(up) : -1;
         const bool invUp = params.flag("invert_unpremult", false);
         std::vector<int> uidx;
-        if (ua >= 0)
+        if (sourceAlpha >= 0)
             for (int i : idx)
-                if (i != ua) uidx.push_back(i);
+                if (i != outputAlpha) uidx.push_back(i);
         // on the GPU (gpu/shaders/pixel_op.comp) when the router finds it pays there
         GpuOp g;
-        const bool canGpu = idx.size() <= 16 && gpuOp(a, out, g);
+        const bool canGpu = (maskTarget < 0 || maskTarget != outputAlpha) && idx.size() <= 16 && gpuOp(a, out, g);
         std::optional<gpu::Routed> rt;
         if (canGpu) rt.emplace(g.name, (uint64_t)g.op * 16 + g.variant, (size_t)out.bounds.area() * idx.size());
-        if (rt && rt->gpu() && runGpu(out, idx, comps, ua, invUp, g)) {
+        if (rt && rt->gpu() && runGpu(out, idx, comps, outputAlpha, invUp, g)) {
             rt->done(true);
         } else {
-            cpuApply(a, out, *src, idx, comps, ua, invUp, uidx, up);
+            cpuApply(a, out, *src, idx, comps, sourceAlpha, invUp, uidx);
             if (rt) rt->done(false);
         }
 
-        MaskMix mm = MaskMix::setup(a, this, 1);
         if (!mm.active()) return;
         for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
             for (int x = out.bounds.x1; x < out.bounds.x2; ++x) {
@@ -105,29 +120,27 @@ protected:
         return gpu::runSequence("pixel_op", {{out.data.data(), out.data.data(), bytes}, {prm, nullptr, sizeof prm}}, {d});
     }
 
-    void cpuApply(RenderArgs& a, Image& out, const Image& srcImg, const std::vector<int>& idx, const std::vector<int>& comps, int ua,
-                  bool invUp, const std::vector<int>& uidx, const std::string& up) {
-        const Image* src = &srcImg;
-        auto alphaAt = [&](const float* p) { return invUp ? 1.0f - p[ua] : p[ua]; };
-        if (ua >= 0)
-            for (size_t k = 0; k < (size_t)out.bounds.width() * out.bounds.height(); ++k) {
-                float* p = out.data.data() + k * out.nch();
-                float al = alphaAt(p);
-                if (al > 1e-8f)
-                    for (int i : uidx) p[i] /= al;
-            }
+    void cpuApply(RenderArgs& a, Image& out, const Image& src, const std::vector<int>& idx,
+                  const std::vector<int>& comps, int sourceAlpha, bool invUp, const std::vector<int>& uidx) {
+        auto applyAlpha = [&](bool divide) {
+            for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
+                for (int x = out.bounds.x1; x < out.bounds.x2; ++x) {
+                    const float alpha = src.at(x, y, sourceAlpha);
+                    const float factor = invUp ? 1.0f - alpha : alpha;
+                    if (!(factor > 1e-8f)) continue;
+                    float* p = out.px(x, y);
+                    for (int i : uidx) {
+                        if (divide) p[i] /= factor;
+                        else p[i] *= factor;
+                    }
+                }
+        };
+        if (!uidx.empty()) applyAlpha(true);
         apply(a, out, idx, comps);
-        if (ua >= 0) {  // premultiply again, by the input's alpha
-            const float* sp = src->data.data();
-            for (size_t k = 0; k < (size_t)out.bounds.width() * out.bounds.height(); ++k) {
-                float* p = out.data.data() + k * out.nch();
-                float al = invUp ? 1.0f - sp[k * src->nch() + src->ch(up)] : sp[k * src->nch() + src->ch(up)];
-                if (al > 1e-8f)
-                    for (int i : uidx) p[i] *= al;
-            }
-        }
+        if (!uidx.empty()) applyAlpha(false);
     }
 
+    bool injectMask() const { return input(1) && params.flag("inject", false) && (type == "Grade" || type == "ColorCorrect"); }
     virtual std::string defaultChannels() const { return "rgb"; }
     // Modify `out` in place for the selected channel indices.
     virtual void apply(RenderArgs& a, Image& out, const std::vector<int>& idx, const std::vector<int>& comps) = 0;
@@ -361,6 +374,13 @@ class SaturationNode : public PixelOp {
 // smooth falloffs similar to the .nk default lookup curves.
 class ColorCorrectNode : public PixelOp {
     bool gpuOp(RenderArgs& a, const Image& out, GpuOp& g) override {
+        // The shared shader implements the default RGB ranges and writes all three components.
+        const auto selected = parseChannels(params, "channels", defaultChannels(), out.channels);
+        if (params.has("tonal_ranges") || params.flag("range_preview", false)
+            || params.num("mix_luminance", a.frame, 0) != 0
+            || selected.size() != 3 || channelIndex(selected, "R") < 0
+            || channelIndex(selected, "G") < 0 || channelIndex(selected, "B") < 0)
+            return false;
         g.r = out.ch("R"), g.g = out.ch("G"), g.b = out.ch("B");
         if (g.r < 0 || g.g < 0 || g.b < 0) return false;
         const Range rs[4] = {range("", a.frame), range("shadows", a.frame), range("midtones", a.frame), range("highlights", a.frame)};
@@ -408,19 +428,44 @@ class ColorCorrectNode : public PixelOp {
         float t = std::clamp((x - e0) / (e1 - e0), 0.0f, 1.0f);
         return t * t * (3 - 2 * t);
     }
-    void apply(RenderArgs& a, Image& out, const std::vector<int>&, const std::vector<int>&) override {
+    void apply(RenderArgs& a, Image& out, const std::vector<int>& selected, const std::vector<int>&) override {
         Range M = range("", a.frame), S = range("shadows", a.frame), Mi = range("midtones", a.frame),
               H = range("highlights", a.frame);
         int r = out.ch("R"), g = out.ch("G"), b = out.ch("B");
         if (r < 0 || g < 0 || b < 0) return;
         const bool idM = M.identity(), idS = S.identity(), idMi = Mi.identity(), idH = H.identity();
+        const json ranges = params.data.value("tonal_ranges", json());
+        auto curve = [&](const char* name) {
+            auto result = LookupCurve::fromJson(ranges.is_object() ? ranges.value(name, json()) : json());
+            result.flatEnds = true;
+            return result;
+        };
+        const auto shadows = curve("shadows"), highlights = curve("highlights");
+        const bool test = params.flag("range_preview", false);
+        if (!test && idM && idS && idMi && idH) return;
+        const float preserve = std::clamp((float)params.num("mix_luminance", a.frame, 0), 0.0f, 1.0f);
+        const int indices[] = {r, g, b};
+        const auto enabled = [&](int channel) { return std::find(selected.begin(), selected.end(), channel) != selected.end(); };
+        const bool use[] = {enabled(r), enabled(g), enabled(b)};
+        const float selectedWeight = luma709(use[0], use[1], use[2]);
+        if (selectedWeight == 0) return;
         for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
             for (int x = out.bounds.x1; x < out.bounds.x2; ++x) {
                 float* p = out.px(x, y);
                 float l = luma709(p[r], p[g], p[b]);
-                float ws = 1.0f - smooth(0.0f, 0.09f, l);
-                float wh = smooth(0.5f, 1.0f, l);
-                float wm = std::max(0.0f, 1.0f - ws - wh);
+                float ws = shadows.pts.empty() ? 1.0f - smooth(0.0f, 0.09f, l) : std::clamp((float)shadows.eval(l), 0.0f, 1.0f);
+                float wh = highlights.pts.empty() ? smooth(0.5f, 1.0f, l) : std::clamp((float)highlights.eval(l), 0.0f, 1.0f);
+                const float sum = ws + wh;
+                if (sum > 1.0f) { ws /= sum; wh /= sum; }
+                const float wm = std::max(0.0f, 1.0f - ws - wh);
+                if (test) {
+                    const float gray = wh + 0.5f * wm;
+                    const float shadowOverlap = std::min(ws, wm);
+                    const float highlightOverlap = std::min(wh, wm);
+                    const float preview[] = {gray + highlightOverlap, gray + shadowOverlap, gray + highlightOverlap};
+                    for (int i = 0; i < 3; ++i) if (use[i]) p[indices[i]] = std::clamp(preview[i], 0.0f, 1.0f);
+                    continue;
+                }
                 float base[3] = {p[r], p[g], p[b]};
                 if (!idM) applyRange(M, base);
                 float s[3] = {base[0], base[1], base[2]}, m[3] = {base[0], base[1], base[2]},
@@ -428,9 +473,11 @@ class ColorCorrectNode : public PixelOp {
                 if (!idS) applyRange(S, s);
                 if (!idMi) applyRange(Mi, m);
                 if (!idH) applyRange(H, h);
-                p[r] = ws * s[0] + wm * m[0] + wh * h[0];
-                p[g] = ws * s[1] + wm * m[1] + wh * h[1];
-                p[b] = ws * s[2] + wm * m[2] + wh * h[2];
+                for (int i = 0; i < 3; ++i) if (use[i]) p[indices[i]] = ws * s[i] + wm * m[i] + wh * h[i];
+                if (preserve > 0) {
+                    const float correction = preserve * (l - luma709(p[r], p[g], p[b])) / selectedWeight;
+                    for (int i = 0; i < 3; ++i) if (use[i]) p[indices[i]] += correction;
+                }
             }
     }
 };

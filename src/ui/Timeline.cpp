@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <set>
 
 #include "Panels.h"
@@ -36,17 +37,19 @@ std::string timecode(int frame, double fps) {
 
 // "hh:mm:ss:ff" (or fewer fields) or a frame number.
 bool parseTime(const char* s, double fps, int& out) {
-    int a[4] = {0, 0, 0, 0}, k = 0;
+    int64_t a[4] = {0, 0, 0, 0};
+    int k = 0;
     const char* p = s;
     bool neg = false;
     while (*p == ' ') ++p;
     if (*p == '-') { neg = true; ++p; }
     if (!*p) return false;
-    int cur = 0;
+    int64_t cur = 0;
     bool any = false;
     for (; *p; ++p) {
         if (*p >= '0' && *p <= '9') {
             cur = cur * 10 + (*p - '0');
+            if (cur > std::numeric_limits<int>::max()) return false;
             any = true;
         } else if (*p == ':' || *p == ';' || *p == '.') {
             if (k >= 3) return false;
@@ -58,14 +61,35 @@ bool parseTime(const char* s, double fps, int& out) {
     if (!any) return false;
     a[k++] = cur;
     const int n = std::max(1, (int)std::lround(fps));
-    long v = 0;
+    int64_t v = 0;
     for (int i = 0; i < k; ++i) {  // the last field is frames, then seconds, minutes, hours
         static const int mult[4] = {1, 1, 60, 3600};
         int idx = k - 1 - i;
-        v += (long)a[idx] * (i == 0 ? 1 : (long)mult[i] * n);
+        v += a[idx] * (i == 0 ? 1 : (int64_t)mult[i] * n);
     }
+    if (v > std::numeric_limits<int>::max()) return false;
     out = (int)(neg ? -v : v);
     return true;
+}
+
+bool frameEntry(const char* id, int value, bool tc, double fps, int& result) {
+    char buf[48];
+    const std::string initial = tc ? timecode(value, fps) : std::to_string(value);
+    std::snprintf(buf, sizeof buf, "%s", initial.c_str());
+    if (!ImGui::InputText(id, buf, sizeof buf, ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll))
+        return false;
+    const char* p = buf;
+    while (*p == ' ') ++p;
+    const bool relative = (*p == '+' || *p == '-') && p[1] == '=';
+    if (relative) {
+        int delta = 0;
+        if (!parseTime(p + 2, fps, delta)) return false;
+        const int64_t target = (int64_t)value + (*p == '-' ? -(int64_t)delta : delta);
+        result = (int)std::clamp<int64_t>(target, -std::numeric_limits<int>::max(), std::numeric_limits<int>::max());
+        return true;
+    }
+    if (*p == '+') ++p;
+    return parseTime(p, fps, result);
 }
 
 enum class Icon { First, Last, StepBack, StepFwd, PlayBack, PlayFwd, Stop, KeyBack, KeyFwd, IncBack, IncFwd, Repeat, Bounce, Once, Cache, Lock, Unlock };
@@ -304,21 +328,49 @@ void drawTimeline(App& app, UiState& ui) {
     auto label = [&](int fr) { return tc ? timecode(fr, c.fps) : std::to_string(fr); };
 
     auto [visA, visB] = app.visibleRange();
-    const int first = (int)std::floor(visA), last = (int)std::ceil(visB), f = (int)std::lround(app.frame);
+    auto marked = app.markedRange();
+    const auto [markIn, markOut] = marked.value_or(App::FrameRange{visA, visB});
+    const double navFirst = std::min(visA, markIn), navLast = std::max(visB, markOut);
+    auto [rulerA, rulerB] = ui.viewer.timelineWindow.value_or(App::FrameRange{navFirst, navLast});
+    const int first = (int)std::floor(rulerA), last = (int)std::ceil(rulerB), f = (int)std::lround(app.frame);
     auto [inD, outD] = app.playRange();
     const int inF = (int)inD, outF = (int)outD;
-    auto setFrame = [&](int nf) {
-        nf = std::clamp(nf, first, last);
+    auto setFrame = [&](int64_t nf) {
+        nf = std::clamp(nf, (int64_t)std::floor(navFirst), (int64_t)std::ceil(navLast));
         if (nf != (int)app.frame) {
             app.frame = nf;
             app.requestView();
         }
     };
     const std::vector<double> keys = openKeys(app);
+    const auto goToKey = [&](bool forward) {
+        if (forward) {
+            auto it = std::upper_bound(keys.begin(), keys.end(), (double)f);
+            if (it != keys.end()) setFrame(std::llround(*it));
+        } else {
+            auto it = std::lower_bound(keys.begin(), keys.end(), (double)f);
+            if (it != keys.begin()) setFrame(std::llround(*std::prev(it)));
+        }
+    };
 
     const int mode = c.project.timelineRange == "input" ? 1 : c.project.timelineRange == "custom" ? 2 : 0;
     const bool inputMode = mode == 1, customMode = mode == 2;
     const bool inputFound = inputMode && nodeFrameRange(app.node(app.viewed)).has_value();
+    const char* rangeLabels[] = {"Global", "Input", "Custom"};
+    const auto chooseSource = [&](int source) {
+        const char* names[] = {"global", "input", "custom"};
+        std::string name = names[source];
+        ui.viewer.timelineWindow.reset();
+        app.edit([&app, name, visA, visB](Comp& cc) {
+            if (name == "custom" && cc.project.timelineRange != "custom") {
+                cc.project.customFirst = visA;
+                cc.project.customLast = visB;
+            }
+            cc.project.timelineRange = name;
+            auto [firstFrame, lastFrame] = app.visibleRange();
+            if (app.frame < firstFrame || app.frame > lastFrame) app.frame = firstFrame;
+        });
+    };
 
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const float W = ImGui::GetContentRegionAvail().x;
@@ -332,16 +384,9 @@ void drawTimeline(App& app, UiState& ui) {
         ImGui::SetCursorScreenPos(ImVec2(x, origin.y + RH - ImGui::GetFrameHeight()));
         ImGui::SetNextItemWidth(fieldW);
         ImGui::BeginDisabled(inputMode || (!customMode && c.project.lockRange));
-        bool done = false;
         int v = value;
-        if (tc) {
-            std::string s = timecode(value, c.fps);
-            char buf[32];
-            std::snprintf(buf, sizeof buf, "%s", s.c_str());
-            if (ImGui::InputText(id, buf, sizeof buf, ImGuiInputTextFlags_EnterReturnsTrue)) done = parseTime(buf, c.fps, v);
-        } else
-            done = ImGui::InputInt(id, &v, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue);
-        if (done) {
+        if (frameEntry(id, value, tc, c.fps, v)) {
+            ui.viewer.timelineWindow.reset();
             if (customMode) {
                 app.edit([v, isFirst](Comp& cc) {
                     if (isFirst) cc.project.customFirst = std::min<double>(v, cc.project.customLast);
@@ -367,15 +412,15 @@ void drawTimeline(App& app, UiState& ui) {
                                   isFirst ? "first" : "last");
         }
     };
-    rangeField("##first", first, true, origin.x);
-    rangeField("##last", last, false, origin.x + W - fieldW);
+    rangeField("##first", (int)std::floor(visA), true, origin.x);
+    rangeField("##last", (int)std::ceil(visB), false, origin.x + W - fieldW);
 
     // the ruler
     const float gap = st.ItemSpacing.x;
     const ImVec2 r0(origin.x + fieldW + gap, origin.y), r1(origin.x + W - fieldW - gap, origin.y + RH);
     const float rw = std::max(20.0f, r1.x - r0.x);
-    const float margin = std::max(6.0f, ImGui::CalcTextSize(label(last).c_str()).x * 0.5f * sf / ImGui::GetFontSize() + 2);
-    const double span = std::max(1, last - first);
+    const float margin = std::min(rw * 0.35f, std::max(6.0f, ImGui::CalcTextSize(label(last).c_str()).x * 0.5f * sf / ImGui::GetFontSize() + 2));
+    const double span = std::max(1.0, (double)last - first);
     const float ppf = (float)((rw - 2 * margin) / span);  // pixels per frame
     auto xOf = [&](double fr) { return r0.x + margin + (float)(fr - first) * ppf; };
     auto frameAt = [&](float x) { return (int)std::lround(first + (x - r0.x - margin) / std::max(1e-6f, ppf)); };
@@ -388,12 +433,15 @@ void drawTimeline(App& app, UiState& ui) {
 
     dl->AddRectFilled(r0, ImVec2(r0.x + rw, r1.y), IM_COL32(40, 40, 40, 255), 2);
     // outside in/out: darker; in/out: orange brackets
-    if (c.project.hasInOut) {
-        if (inF > first) dl->AddRectFilled(ImVec2(xOf(first), markTop), ImVec2(xOf(inF), tickBase), IM_COL32(0, 0, 0, 70));
-        if (outF < last) dl->AddRectFilled(ImVec2(xOf(outF), markTop), ImVec2(xOf(last), tickBase), IM_COL32(0, 0, 0, 70));
-        for (int e : {inF, outF}) {
+    if (marked) {
+        const double a = ui.timelineDrag == 1 ? ui.timelineDragFrame : markIn;
+        const double b = ui.timelineDrag == 2 ? ui.timelineDragFrame : markOut;
+        if (a > first) dl->AddRectFilled(ImVec2(xOf(first), markTop), ImVec2(xOf(std::min<double>(a, last)), tickBase), IM_COL32(0, 0, 0, 70));
+        if (b < last) dl->AddRectFilled(ImVec2(xOf(std::max<double>(b, first)), markTop), ImVec2(xOf(last), tickBase), IM_COL32(0, 0, 0, 70));
+        for (bool isIn : {true, false}) {
+            const double e = isIn ? a : b;
             if (e < first || e > last) continue;
-            const float x = xOf(e), d = e == inF ? 5.0f : -5.0f;
+            const float x = xOf(e), d = isIn ? 5.0f : -5.0f;
             dl->AddLine(ImVec2(x, markTop + 2), ImVec2(x, tickBase), kAccent, 2);
             dl->AddLine(ImVec2(x, tickBase), ImVec2(x + d, tickBase), kAccent, 2);
             dl->AddLine(ImVec2(x, markTop + 2), ImVec2(x + d, markTop + 2), kAccent, 2);
@@ -412,8 +460,8 @@ void drawTimeline(App& app, UiState& ui) {
     const int major = std::max(minor, niceStep((labelW * 2 + 30) / std::max(1e-6f, ppf)));  // roomy, as is standard
     const int mid = major % 5 == 0 && major / 5 >= minor && (major / 5) % minor == 0 ? major / 5 : (major % 2 == 0 && major / 2 >= minor ? major / 2 : major);
     const ImU32 tickCol = IM_COL32(150, 150, 150, 255), labelCol = IM_COL32(170, 170, 170, 255);
-    auto floorTo = [](int v, int s) { return (int)std::floor((double)v / s) * s; };
-    for (int fr = floorTo(first, minor); fr <= last; fr += minor) {
+    auto floorTo = [](int v, int s) { return (int64_t)std::floor((double)v / s) * s; };
+    for (int64_t fr = floorTo(first, minor); fr <= last; fr += minor) {
         if (fr < first) continue;
         const float x = std::round(xOf(fr)) + 0.5f;
         const bool isMajor = fr % major == 0, isMid = fr % mid == 0;
@@ -425,7 +473,7 @@ void drawTimeline(App& app, UiState& ui) {
     auto putLabel = [&](int fr, bool force) {
         std::string s = label(fr);
         float tw = font->CalcTextSizeA(sf, FLT_MAX, 0, s.c_str()).x;
-        float x = std::clamp(xOf(fr) - tw * 0.5f, r0.x + 1, r0.x + rw - tw - 1);
+        float x = std::clamp(xOf(fr) - tw * 0.5f, r0.x + 1, std::max(r0.x + 1, r0.x + rw - tw - 1));
         for (auto& [a, b] : taken)
             if (!force && x < b + 8 && x + tw > a - 8) return;
         taken.push_back({x, x + tw});
@@ -433,7 +481,7 @@ void drawTimeline(App& app, UiState& ui) {
     };
     putLabel(first, true);
     putLabel(last, true);
-    for (int fr = floorTo(first, major); fr <= last; fr += major)
+    for (int64_t fr = floorTo(first, major); fr <= last; fr += major)
         if (fr > first && fr < last) putLabel(fr, false);
     // keys of the open panels' nodes
     for (double k : keys)
@@ -444,9 +492,56 @@ void drawTimeline(App& app, UiState& ui) {
 
     // scrubbing
     ImGui::SetCursorScreenPos(r0);
-    ImGui::InvisibleButton("##ruler", ImVec2(rw, RH));
+    ImGui::InvisibleButton("##ruler", ImVec2(rw, RH), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
     const bool hov = ImGui::IsItemHovered(), active = ImGui::IsItemActive();
-    if (active) setFrame(frameAt(ImGui::GetIO().MousePos.x));
+    const auto& io = ImGui::GetIO();
+    const float mouseX = io.MousePos.x;
+    const auto setMarker = [&](bool in, int frame) {
+        const double a = in ? std::clamp<double>(frame, navFirst, markOut) : markIn;
+        const double b = in ? markOut : std::clamp<double>(frame, markIn, navLast);
+        app.setMarkedRange(App::FrameRange{a, b});
+    };
+    const auto setWindow = [&](double a, double width) {
+        if (width >= navLast - navFirst) {
+            ui.viewer.timelineWindow.reset();
+            return;
+        }
+        a = std::clamp(a, navFirst, navLast - width);
+        ui.viewer.timelineWindow = App::FrameRange{a, a + width};
+    };
+    const auto zoomRuler = [&](double delta) {
+        const double anchor = std::clamp<double>((mouseX - xOf(first)) / (rw - 2 * margin), 0, 1);
+        const double oldWidth = rulerB - rulerA;
+        const double width = std::max(2.0, oldWidth * std::pow(0.8, delta));
+        setWindow(rulerA + anchor * (oldWidth - width), width);
+    };
+    if (hov && !active && io.MouseWheel != 0) zoomRuler(io.MouseWheel);
+    if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
+        zoomRuler(io.MouseDelta.x * 0.035);
+    if (ImGui::IsItemDeactivated() && ImGui::IsMouseReleased(ImGuiMouseButton_Middle) &&
+        io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Middle] < 4)
+        ui.viewer.timelineWindow.reset();
+    if (active && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        ui.timelineDrag = io.KeyAlt ? 3 : 0;
+        if (!ui.timelineDrag && marked && io.MousePos.y >= markTop) {
+            const float toIn = std::fabs(mouseX - xOf(markIn)), toOut = std::fabs(mouseX - xOf(markOut));
+            if (std::min(toIn, toOut) <= 6) {
+                ui.timelineDrag = toIn <= toOut ? 1 : 2;
+                ui.timelineDragFrame = (int)(ui.timelineDrag == 1 ? markIn : markOut);
+            }
+        }
+    }
+    if (active && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const int mouseFrame = frameAt(mouseX);
+        if (ui.timelineDrag == 1) ui.timelineDragFrame = std::clamp(mouseFrame, first, std::min(last, (int)markOut));
+        else if (ui.timelineDrag == 2) ui.timelineDragFrame = std::clamp(mouseFrame, std::max(first, (int)markIn), last);
+        else if (ui.timelineDrag == 3) setWindow(rulerA - io.MouseDelta.x / std::max(1e-6f, ppf), rulerB - rulerA);
+        else setFrame(std::clamp(mouseFrame, first, last));
+    } else if (ui.timelineDrag) {
+        if (ui.timelineDrag <= 2 && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+            setMarker(ui.timelineDrag == 1, ui.timelineDragFrame);
+        ui.timelineDrag = 0;
+    }
     if (hov && !active) {  // where a click would go
         int hf = std::clamp(frameAt(ImGui::GetIO().MousePos.x), first, last);
         const float x = std::round(xOf(hf)) + 0.5f;
@@ -461,7 +556,7 @@ void drawTimeline(App& app, UiState& ui) {
         dl->AddLine(ImVec2(x, markTop + ms), ImVec2(x, tickBase), kAccent, 1.5f);
         std::string s = label(f);
         float tw = font->CalcTextSizeA(sf, FLT_MAX, 0, s.c_str()).x;
-        float tx = std::clamp(x - tw * 0.5f, r0.x + 1, r0.x + rw - tw - 1);
+        float tx = std::clamp(x - tw * 0.5f, r0.x + 1, std::max(r0.x + 1, r0.x + rw - tw - 1));
         dl->AddText(font, sf, ImVec2(tx, curTop), kAccent, s.c_str());
     }
 
@@ -475,18 +570,20 @@ void drawTimeline(App& app, UiState& ui) {
     const float modeW = ImGui::CalcTextSize("Custom").x + ImGui::GetFrameHeight() + 10;
     const float incW = ImGui::CalcTextSize("000").x + 8;
     const float countW = ImGui::CalcTextSize("000000").x + 10;
+    const float flipW = ImGui::CalcTextSize("Flipbook").x + st.FramePadding.x * 2;
+    const float captureW = ImGui::CalcTextSize("Capture").x + st.FramePadding.x * 2;
 
     // What fits: the less-used parts drop out as the panel narrows.
-    struct Show { bool tf = true, inc = true, loop = true, keys = true, io = true, ends = true, right = true, steps = true; } show;
+    struct Show { bool tf = true, inc = true, loop = true, keys = true, io = true, ends = true, actions = true, duration = true, steps = true; } show;
     auto widths = [&](float& left, float& mid, float& right) {
         left = fpsW + (show.tf ? gap + tfW : 0) + gap + modeW;
         int nb = 2 /*play*/ + (show.steps ? 2 : 0) + (show.keys ? 2 : 0) + (show.ends ? 2 : 0) + (show.io ? 2 : 0) + (show.loop ? 1 : 0) +
                  (show.inc ? 2 : 0);
         mid = nb * (bw + sp) + frameW + sp + (show.inc ? incW + sp : 0) + (show.inc ? 8 : 0) + (show.loop ? 6 : 0);
-        right = show.right ? (bw + sp) * 2 + countW : 0;
+        right = bw + (show.actions ? flipW + captureW + sp * 2 : 0) + (show.duration ? countW + sp : 0);
     };
     float lw, mw, rwid;
-    bool* drops[] = {&show.inc, &show.loop, &show.tf, &show.keys, &show.right, &show.io, &show.ends, &show.steps};
+    bool* drops[] = {&show.actions, &show.inc, &show.loop, &show.tf, &show.keys, &show.duration, &show.io, &show.ends, &show.steps};
     for (bool* d : drops) {
         widths(lw, mw, rwid);
         if (lw + mw + rwid + gap * 4 <= W) break;
@@ -496,7 +593,7 @@ void drawTimeline(App& app, UiState& ui) {
     const bool leftFits = lw + mw + rwid + gap * 4 <= W || lw + mw + gap * 2 <= W;
     float midX = origin.x + (W - mw) * 0.5f;  // centred, as is standard
     if (leftFits) midX = std::clamp(midX, origin.x + lw + gap * 2, std::max(origin.x + lw + gap * 2, origin.x + W - rwid - gap * 2 - mw));
-    else midX = origin.x;  // very narrow: the transport alone
+    else midX = origin.x;  // very narrow: transport and overflow
 
     if (leftFits) {
         ImGui::SetCursorScreenPos(ImVec2(origin.x, y2));
@@ -534,25 +631,10 @@ void drawTimeline(App& app, UiState& ui) {
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("time format: frame numbers or timecode");
         }
         // Range menu (the classic Global / Input / Custom).
-        static const char* kModes[] = {"global", "input", "custom"};
-        static const char* kModeLabels[] = {"Global", "Input", "Custom"};
         ImGui::SameLine(0, gap);
         ImGui::SetNextItemWidth(modeW);
         int m = mode;
-        if (ImGui::Combo("##rangemode", &m, kModeLabels, 3)) {
-            std::string ms = kModes[m];
-            double a = visA, b = visB;
-            bool firstCustom = ms == "custom" && c.project.timelineRange != "custom";
-            app.edit([&app, ms, a, b, firstCustom](Comp& cc) {
-                cc.project.timelineRange = ms;
-                if (firstCustom) {  // start the custom range from what was on screen
-                    cc.project.customFirst = a;
-                    cc.project.customLast = b;
-                }
-                auto r = app.visibleRange();  // keep the current frame inside the new range
-                if (app.frame < r.first || app.frame > r.second) app.frame = r.first;
-            });
-        }
+        if (ImGui::Combo("##rangemode", &m, rangeLabels, 3)) chooseSource(m);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Global: the project frame range\nInput: the frame range of the viewed node's input (its Read nodes)\n"
                               "Custom: a range of your own; doesn't change the project");
@@ -561,17 +643,20 @@ void drawTimeline(App& app, UiState& ui) {
     // transport, the classic order
     ImGui::SetCursorScreenPos(ImVec2(midX, y2));
     auto next = [&](float s = 2) { ImGui::SameLine(0, s); };
+    const auto setPlayMode = [&](int mode) {
+        ui.playMode = mode;
+        app.playWholeRange = mode == 3;
+    };
+    static const char* kPlayback[] = {"Loop", "Bounce", "Play once (in/out)", "Play once (full range)"};
     if (show.loop) {
-        static const Icon kLoop[] = {Icon::Repeat, Icon::Bounce, Icon::Once};
-        static const char* kLoopTip[] = {"playback: repeat (click: bounce)", "playback: bounce (click: play once)",
-                                         "playback: play once, stop at the end (click: repeat)"};
-        if (iconButton("##loop", kLoop[ui.playMode], bw, false, kLoopTip[ui.playMode])) ui.playMode = (ui.playMode + 1) % 3;
+        static const Icon kLoop[] = {Icon::Repeat, Icon::Bounce, Icon::Once, Icon::Once};
+        if (iconButton("##loop", kLoop[ui.playMode], bw, false, kPlayback[ui.playMode])) setPlayMode((ui.playMode + 1) % 4);
         next(6);
     }
     auto setInOut = [&](bool in) { toggleInOut(app, in); };  // (as the I / O keys)
-    auto clearInOut = [&] { app.edit([](Comp& cc) { cc.project.hasInOut = false; }); };
+    auto clearInOut = [&] { app.setMarkedRange(std::nullopt); };
     if (show.io) {
-        if (textButton("I##in", bw, c.project.hasInOut, "set the in point here (I); again on it: off\nright-click: clear in / out")) setInOut(true);
+        if (textButton("I##in", bw, marked.has_value(), "Set in point (I)\nRight-click to clear in and out")) setInOut(true);
         if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) clearInOut();
         next();
     }
@@ -580,14 +665,11 @@ void drawTimeline(App& app, UiState& ui) {
         next();
     }
     if (show.keys) {
-        if (iconButton("##pkey", Icon::KeyBack, bw, false, "previous keyframe (Alt+Left)")) {
-            auto it = std::lower_bound(keys.begin(), keys.end(), (double)f);
-            if (it != keys.begin()) setFrame((int)std::lround(*std::prev(it)));
-        }
+        if (iconButton("##pkey", Icon::KeyBack, bw, false, "previous keyframe (Alt+Left)")) goToKey(false);
         next();
     }
     if (show.steps) {
-        if (iconButton("##pf", Icon::StepBack, bw, false, "previous frame (Left)")) setFrame(f - 1);
+        if (iconButton("##pf", Icon::StepBack, bw, false, "previous frame (Left)")) setFrame((int64_t)f - 1);
         next();
     }
     const bool back = app.playing && app.playDir < 0, fwd = app.playing && app.playDir > 0;
@@ -599,17 +681,10 @@ void drawTimeline(App& app, UiState& ui) {
     // the current frame
     ImGui::SetNextItemWidth(frameW);
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(kAccent));
-    if (tc) {
-        char buf[32];
-        std::snprintf(buf, sizeof buf, "%s", timecode(f, c.fps).c_str());
-        int nf = f;
-        if (ImGui::InputText("##frame", buf, sizeof buf, ImGuiInputTextFlags_EnterReturnsTrue) && parseTime(buf, c.fps, nf)) setFrame(nf);
-    } else {
-        int nf = f;
-        if (ImGui::InputInt("##frame", &nf, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue)) setFrame(nf);
-    }
+    int nf = f;
+    if (frameEntry("##frame", f, tc, c.fps, nf)) setFrame(nf);
     ImGui::PopStyleColor();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("current frame (Alt+G)");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Current frame (Alt+G). Use += or -= to jump by an offset.");
     next();
     if (iconButton("##playf", fwd ? Icon::Stop : Icon::PlayFwd, bw, fwd, fwd ? "stop (K)" : "play forward (L)")) {
         app.playDir = 1;
@@ -617,14 +692,11 @@ void drawTimeline(App& app, UiState& ui) {
     }
     if (show.steps) {
         next();
-        if (iconButton("##nf", Icon::StepFwd, bw, false, "next frame (Right)")) setFrame(f + 1);
+        if (iconButton("##nf", Icon::StepFwd, bw, false, "next frame (Right)")) setFrame((int64_t)f + 1);
     }
     if (show.keys) {
         next();
-        if (iconButton("##nkey", Icon::KeyFwd, bw, false, "next keyframe (Alt+Right)")) {
-            auto it = std::upper_bound(keys.begin(), keys.end(), (double)f);
-            if (it != keys.end()) setFrame((int)std::lround(*it));
-        }
+        if (iconButton("##nkey", Icon::KeyFwd, bw, false, "next keyframe (Alt+Right)")) goToKey(true);
     }
     if (show.ends) {
         next();
@@ -632,44 +704,111 @@ void drawTimeline(App& app, UiState& ui) {
     }
     if (show.io) {
         next();
-        if (textButton("O##out", bw, c.project.hasInOut, "set the out point here (O); again on it: off\nright-click: clear in / out")) setInOut(false);
+        if (textButton("O##out", bw, marked.has_value(), "Set out point (O)\nRight-click to clear in and out")) setInOut(false);
         if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) clearInOut();
     }
     if (show.inc) {
         next(8);
-        if (iconButton("##incb", Icon::IncBack, bw, false, "back by the increment (Shift+Left)")) setFrame(f - ui.frameIncrement);
+        if (iconButton("##incb", Icon::IncBack, bw, false, "back by the increment (Shift+Left)")) setFrame((int64_t)f - ui.frameIncrement);
         next();
         ImGui::SetNextItemWidth(incW);
         int inc = ui.frameIncrement;
         if (ImGui::InputInt("##inc", &inc, 0, 0)) ui.frameIncrement = std::clamp(inc, 1, 100000);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("frame increment for the << >> buttons");
         next();
-        if (iconButton("##incf", Icon::IncFwd, bw, false, "forward by the increment (Shift+Right)")) setFrame(f + ui.frameIncrement);
+        if (iconButton("##incf", Icon::IncFwd, bw, false, "forward by the increment (Shift+Right)")) setFrame((int64_t)f + ui.frameIncrement);
     }
 
-    // right: cache, lock range, the range length
-    if (show.right && leftFits) {
-        ImGui::SetCursorScreenPos(ImVec2(origin.x + W - rwid, y2));
-        const bool pc = app.precaching();
-        if (iconButton("##cache", Icon::Cache, bw, pc,
-                       "Render the play range into RAM for real-time playback (the green line).\n"
-                       "Frames played are cached too; any edit makes them stale."))
-            app.setPrecache(!pc);
+    // The overflow keeps secondary actions available at every panel width.
+    ImGui::SetCursorScreenPos(ImVec2(origin.x + W - rwid, y2));
+    if (show.actions && leftFits) {
+        if (textButton("Flipbook", flipW, false, "Render a preview of the current Viewer input over the playback range"))
+            openFlipbook(app, ui);
         next();
-        const bool locked = c.project.lockRange;
-        if (iconButton("##lock", locked ? Icon::Lock : Icon::Unlock, bw, locked,
-                       locked ? "frame range locked: the range fields don't change the project (click to unlock)"
-                              : "lock the frame range"))
-            app.edit([locked](Comp& cc) { cc.project.lockRange = !locked; });
+        if (textButton("Capture", captureW, false, "Save the visible Viewer image area as a PNG"))
+            openViewerCapture(app, ui);
         next();
+    }
+    if (show.duration && leftFits) {
         ImGui::SetNextItemWidth(countW);
         char cnt[32];
-        std::snprintf(cnt, sizeof cnt, "%d", last - first + 1);
+        std::snprintf(cnt, sizeof cnt, "%lld", (long long)visB - (long long)visA + 1);
         ImGui::BeginDisabled();
         ImGui::InputText("##count", cnt, sizeof cnt, ImGuiInputTextFlags_ReadOnly);
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip(c.project.hasInOut ? "%d frames (in / out: %d)" : "%d frames", last - first + 1, outF - inF + 1);
+            ImGui::SetTooltip("Sequence duration: %s frames\nPlayback: %lld frames", cnt, (long long)outF - inF + 1);
+        next();
+    }
+    if (textButton("...##timeline_options", bw, false, "Timeline options")) ImGui::OpenPopup("timeline_options");
+    if (ImGui::BeginPopup("timeline_options")) {
+        if (ImGui::MenuItem("Flipbook")) openFlipbook(app, ui);
+        if (ImGui::MenuItem("Capture Viewer")) openViewerCapture(app, ui);
+        if (ImGui::MenuItem("Cache playback range", nullptr, app.precaching())) app.setPrecache(!app.precaching());
+        ImGui::Separator();
+        if (ImGui::BeginMenu("Playback mode")) {
+            for (int m = 0; m < IM_ARRAYSIZE(kPlayback); ++m)
+                if (ImGui::MenuItem(kPlayback[m], nullptr, ui.playMode == m)) setPlayMode(m);
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Frame range source")) {
+            for (int m = 0; m < IM_ARRAYSIZE(rangeLabels); ++m)
+                if (ImGui::MenuItem(rangeLabels[m], nullptr, m == mode)) chooseSource(m);
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Playback rate")) {
+            double fps = c.fps;
+            ImGui::SetNextItemWidth(90);
+            if (ImGui::InputDouble("fps", &fps, 0, 0, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue) &&
+                std::isfinite(fps) && fps >= 1 && fps <= 1000) {
+                app.checkpoint();
+                app.edit([fps](Comp& cc) { cc.fps = fps; });
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::MenuItem("Display timecode", nullptr, tc)) ui.timeFormat = tc ? 0 : 1;
+        if (ImGui::MenuItem("Reset timeline zoom", "Middle click", false, ui.viewer.timelineWindow.has_value()))
+            ui.viewer.timelineWindow.reset();
+        if (ImGui::MenuItem("Synchronize Viewer playheads", nullptr, ui.linkViewerPlayback)) {
+            ui.linkViewerPlayback = !ui.linkViewerPlayback;
+            for (auto& [name, viewer] : ui.otherViewers) viewer.timelineFrame = app.frame;
+        }
+        const bool pinned = app.pinnedRange().has_value();
+        if (ImGui::MenuItem("Lock this Viewer's playback range", nullptr, pinned)) {
+            if (pinned) app.pinRange(std::nullopt);
+            else app.pinRange(App::FrameRange{markIn, markOut});
+        }
+        const bool locked = c.project.lockRange;
+        if (ImGui::MenuItem("Lock project frame edits", nullptr, locked))
+            app.edit([locked](Comp& cc) { cc.project.lockRange = !locked; });
+        if (ImGui::BeginMenu("In / Out")) {
+            ImGui::SetNextItemWidth(100);
+            int in = (int)markIn, out = (int)markOut;
+            if (frameEntry("In", in, tc, c.fps, in)) setMarker(true, in);
+            ImGui::SetNextItemWidth(100);
+            if (frameEntry("Out", out, tc, c.fps, out)) setMarker(false, out);
+            if (ImGui::MenuItem("Set in at playhead", "I")) setInOut(true);
+            if (ImGui::MenuItem("Set out at playhead", "O")) setInOut(false);
+            if (ImGui::MenuItem("Clear in / out")) clearInOut();
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Navigation")) {
+            if (ImGui::MenuItem("First playback frame", "Home")) setFrame(inF);
+            if (ImGui::MenuItem("Last playback frame", "End")) setFrame(outF);
+            if (ImGui::MenuItem("Previous frame", "Left")) setFrame((int64_t)f - 1);
+            if (ImGui::MenuItem("Next frame", "Right")) setFrame((int64_t)f + 1);
+            if (ImGui::MenuItem("Previous keyframe", "Alt+Left")) goToKey(false);
+            if (ImGui::MenuItem("Next keyframe", "Alt+Right")) goToKey(true);
+            if (ImGui::MenuItem("Back by increment", "Shift+Left")) setFrame((int64_t)f - ui.frameIncrement);
+            if (ImGui::MenuItem("Forward by increment", "Shift+Right")) setFrame((int64_t)f + ui.frameIncrement);
+            ImGui::SetNextItemWidth(75);
+            int inc = ui.frameIncrement;
+            if (ImGui::InputInt("Frame increment", &inc, 0, 0)) ui.frameIncrement = std::clamp(inc, 1, 100000);
+            ImGui::EndMenu();
+        }
+        ImGui::Separator();
+        ImGui::TextDisabled("%lld frames", (long long)visB - (long long)visA + 1);
+        ImGui::EndPopup();
     }
     ImGui::End();
 }
