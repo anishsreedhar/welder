@@ -559,6 +559,28 @@ int main(int argc, char** argv) {
         CHECK_NEAR(px(img, 0, 0, "A"), 1.0, 1e-6);  // default channels = rgb
     });
 
+    test("Grade and ColorCorrect unpremult use the source mask after reconnecting", [] {
+        for (const char* type : {"Grade", "ColorCorrect"}) {
+            auto c = comp(json::array({
+                {{"name", "Source"}, {"type", "Constant"}, {"params", {{"color", {0.2, 0.2, 0.2, 1}}}}},
+                {{"name", "SourceMask"}, {"type", "Constant"}, {"params", {{"color", {0, 0, 0, 0.4}}}}},
+                {{"name", "EffectMask"}, {"type", "Constant"}, {"params", {{"color", {0, 0, 0, 0.25}}}}},
+                {{"name", "WithMask"}, {"type", "Grade"}, {"inputs", {"Source", "SourceMask"}},
+                 {"params", {{"inject", true}}}},
+                {{"name", "Correction"}, {"type", type}, {"inputs", {"WithMask", "EffectMask"}},
+                 {"params", {{"inject", true}, {"unpremult", "mask.a"}, {"offset", 0.4}}}},
+            }), 8, 8);
+            auto masked = render(*c, "Correction");
+            CHECK_NEAR(px(masked, 0, 0, "R"), 0.24, 1e-6);  // 0.2 + offset * source alpha * effect mask
+            CHECK_NEAR(px(masked, 0, 0, "mask.a"), 0.25, 1e-6);
+
+            CHECK(c->setInput(c->find("Correction"), 0, c->find("Source")));
+            auto reconnected = render(*c, "Correction");
+            CHECK_NEAR(px(reconnected, 0, 0, "R"), 0.30, 1e-6);  // missing source channel: just the effect mask
+            CHECK_NEAR(px(reconnected, 0, 0, "mask.a"), 0.25, 1e-6);
+        }
+    });
+
     test("integer translate is exact and moves the bbox", [] {
         auto c = comp(json::array({
             {{"name", "P"}, {"type", "TestPattern"}},
@@ -1620,6 +1642,33 @@ int main(int argc, char** argv) {
             for(const char* ch:{"R","G","B","A"}){CHECK_NEAR(px(g,3,3,ch),px(cc,3,3,ch),1e-5);CHECK_NEAR(px(gu,3,3,ch),px(cu,3,3,ch),1e-5);}
             CHECK_NEAR(px(render(*c,"Off"),3,3,"R"),.24,1e-5);
             auto mask=render(*c,"Injected");CHECK(mask->ch("mask.a")>=0);CHECK_NEAR(px(mask,3,3,"mask.a"),.4,1e-5);CHECK_NEAR(px(mask,3,3,"R"),.168,1e-5);
+        }
+        gpu::setRoute(gpu::RouteMode::Auto);
+    });
+
+    test("Merge: RGB none preserves the selected matte just like disabled RGB boxes", [] {
+        auto c = comp(json::array({
+            {{"name","S"},{"type","Constant"},{"params",{{"color",{.1,.2,.3,.75}}}}},
+            {{"name","Other"},{"type","Constant"},{"params",{{"color",{.4,.5,.6,.25}}}}},
+            {{"name","Beauty"},{"type","Copy"},{"inputs",{"S","Other"}},
+             {"params",{{"from",{"R","G","B","A"}},{"to",{"beauty.R","beauty.G","beauty.B","beauty.A"}}}}},
+            {{"name","Clear"},{"type","Constant"},{"params",{{"color",{0,0,0,0}}}}},
+            {{"name","NoneA"},{"type","Merge"},{"inputs",{"Clear","Beauty"}},
+             {"params",{{"Achannels","none"},{"Achannels_alpha","A"}}}},
+            {{"name","OffA"},{"type","Merge"},{"inputs",{"Clear","Beauty"}},
+             {"params",{{"Achannels","beauty"},{"Achannels_alpha","A"},{"Achannels_off",{"R","G","B"}}}}},
+            {{"name","NoneB"},{"type","Merge"},{"inputs",{"Beauty","Clear"}},
+             {"params",{{"Bchannels","none"},{"Bchannels_alpha","A"}}}},
+            {{"name","OffB"},{"type","Merge"},{"inputs",{"Beauty","Clear"}},
+             {"params",{{"Bchannels","beauty"},{"Bchannels_alpha","A"},{"Bchannels_off",{"R","G","B"}}}}}
+        }), 8, 8);
+        for (auto route : {gpu::RouteMode::Cpu, gpu::RouteMode::Gpu}) {
+            gpu::setRoute(route);
+            for (const char* name : {"NoneA","OffA","NoneB","OffB"}) {
+                auto image = render(*c, name);
+                CHECK_NEAR(px(image,3,3,"A"), .75, 1e-6);
+                for (const char* channel : {"R","G","B"}) CHECK_NEAR(px(image,3,3,channel), 0, 1e-6);
+            }
         }
         gpu::setRoute(gpu::RouteMode::Auto);
     });

@@ -251,8 +251,9 @@ public:
         };
         const std::set<std::string> aOff = offSet("Achannels_off"), bOff = offSet("Bchannels_off");
         auto layerCh = [](const Image& im, const std::string& layer, const std::string& c, const std::set<std::string>& off, const std::string& alpha=std::string()) {
-            if (off.count(c) || layer=="none") return -1;
+            if (off.count(c)) return -1;
             if(c=="A" && !alpha.empty())return im.ch(alpha);
+            if(layer=="none")return c=="A"?im.ch("A"):-1;
             if (layer.empty() || layer == "rgba" || layer == "rgb" || layer=="all") return im.ch(c);
             int i = im.ch(layer + "." + c);
             if (i < 0 && c == "A") i = im.ch("A");
