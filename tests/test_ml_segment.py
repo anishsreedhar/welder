@@ -168,6 +168,63 @@ class SegmentTask(unittest.TestCase):
         m = self.matte(jd, 1001)
         self.assertGreater(m[25, 32], 0.99)
 
+    def test_logits_written_with_the_matte(self):
+        """"logit" (what Welder cuts sharp at the plate's size) is written next to "matte", the same edge."""
+        frames = [1, 2, 3]
+        jd, r = self.run_task("lg", frames, {"max_size": 200, "prompts": [{"frame": 2, "points": [[100, 50, 1]]}]})
+        self.assertEqual(r["outputs"]["logit"]["frames"], frames)
+        self.assertEqual(r["outputs"]["logit"]["channels"], ["1"])
+        L = np.load(os.path.join(jd, "out", "logit.2.npy")).astype(np.float32)[..., 0]
+        m = self.matte(jd, 2)
+        self.assertGreater(L[25, 50], 15)  # sure: clipped at +16
+        self.assertLess(L[25, 150], -15)
+        self.assertAlmostEqual(float(L[25, 60]), 10.0, delta=0.1)  # the disc's own logit (20 - distance)
+        self.assertTrue(np.array_equal(L > 0, m > 0.5))
+
+    def test_unsure_leaks_are_dropped(self):
+        seg = self.seg
+        L = np.full((60, 80), -8.0, np.float32)
+        L[10:40, 10:30] = 9.0     # the object: sure
+        L[10:30, 50:70] = 0.8     # a faint leak beside it: never sure
+        L[50, 75] = 6.0           # a sure speck: too small
+        out, k = seg.clean_logits(L, 2.0, min_area=0.001)
+        self.assertEqual(k, 2)
+        self.assertTrue((out[10:40, 10:30] == 9.0).all())
+        self.assertTrue((out[10:30, 50:70] < 0).all())
+        self.assertLess(out[50, 75], 0)
+        same, k = seg.clean_logits(L, 0, min_area=0)  # off
+        self.assertEqual(k, 0)
+        self.assertTrue(np.array_equal(same, L))
+        # a sure part keeps its unsure edge (it's one part)
+        L2 = L.copy()
+        L2[10:30, 30:50] = 0.5
+        out2, _ = seg.clean_logits(L2, 2.0, min_area=0)
+        self.assertTrue((out2[10:30, 50:70] == 0.8).all())
+        # to and from mattes
+        self.assertAlmostEqual(float(seg.matte_logits(np.array([0.5]))[0]), 0.0, places=5)
+        self.assertAlmostEqual(float(seg.matte_logits(np.array([1 / (1 + np.exp(-3.0))]))[0]), 3.0, places=3)
+        self.assertGreater(float(seg.matte_logits(np.array([1.0]))[0]), 15.9)
+
+    def test_frames_written_smaller_than_the_plate(self):
+        """Welder writes TrackMask's plate at most max_size: the clicks stay in the plate's pixels."""
+        from strata_ml.util import JobContext
+        frames = [1, 2, 3]
+        arrays = [np.dstack([np.full((100, 200), 0.2, np.float32)] * 3 + [np.ones((100, 200), np.float32)])
+                  for _ in frames]
+        params = {"model": "large", "max_size": 200, "prompts": [{"frame": 2, "points": [[1000, 500, 1]]}]}
+        jd = write_job(self.home, "small", frames, arrays, params)
+        job = json.load(open(os.path.join(jd, "job.json")))
+        job["inputs"]["src"].update({"plate_width": 2000, "plate_height": 1000})  # the plate: 2000 x 1000
+        json.dump(job, open(os.path.join(jd, "job.json"), "w"))
+        ctx = JobContext(self.home, jd)
+        try:
+            r = self.seg.run(ctx, params)
+        finally:
+            ctx.close()
+        self.assertEqual(self.fake.calls[0], ("init", 3, (200, 100)))
+        self.assertIn(("add", 1, 1, 100.0, 50.0), self.adds())  # (1000, 500) of 2000 x 1000 -> the middle
+        self.assertEqual(r["outputs"]["matte"]["frames"], frames)
+
     def test_objects_on_different_frames_each_tracked_from_their_own(self):
         frames = list(range(1, 11))
         objs = [{"id": 1, "anchors": [{"frame": 2, "points": [[100, 50, 1]]}]},
@@ -344,6 +401,51 @@ class Refind(unittest.TestCase):
         self.assertEqual(prompts[1][8].box, [130, 30, 170, 70])  # the one that looks like it (the other is something else)
         self.assertGreater(mattes[1][10][50, 162], 0.99)  # tracked on from it (2 frames: 12 px right of 150)
         self.assertLess(float(mattes[1][6].max()), 0.01)  # before it: still lost
+
+
+@unittest.skipUnless(HAVE, "needs numpy and Pillow")
+class LongShots(unittest.TestCase):
+    """A long shot mustn't be held in memory whole: frames are read and written one at a time."""
+
+    def test_jpegs_from_a_generator(self):
+        from strata_ml.tasks.segment import write_jpegs
+        d = tempfile.mkdtemp(prefix="strata_jpg_")
+        read = []
+
+        def frames():
+            for i in range(5):
+                read.append(i)
+                yield np.full((300, 400, 3), 0.1 * i, np.float32)
+        try:
+            w, h, sc = write_jpegs(frames(), d, 200)
+            self.assertEqual((w, h), (200, 150))
+            self.assertEqual(sorted(os.listdir(d)), [f"{i:05d}.jpg" for i in range(5)])
+            self.assertEqual(read, list(range(5)))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_lazy_frames_match_and_stay_few(self):
+        try:
+            import torch
+            sys.path.insert(0, os.path.join(ML, "strata_ml", "vendor", "sam2pkg"))
+            from sam2.utils.misc import load_video_frames
+        except Exception:  # noqa: BLE001
+            self.skipTest("needs PyTorch and Hydra")
+        from strata_ml.tasks.segment import write_jpegs
+        d = tempfile.mkdtemp(prefix="strata_lazy_")
+        try:
+            rng = np.random.default_rng(1)
+            write_jpegs((rng.random((48, 64, 3)).astype(np.float32) for _ in range(40)), d, 0)
+            dense, h0, w0 = load_video_frames(d, 64, True, compute_device=torch.device("cpu"))
+            lazy, h1, w1 = load_video_frames(d, 64, True, async_loading_frames="lazy", compute_device=torch.device("cpu"))
+            self.assertEqual((len(lazy), h1, w1), (40, h0, w0))
+            for i in (0, 7, 39, 7):
+                self.assertTrue(torch.allclose(lazy[i], dense[i]))
+            for i in range(40):
+                lazy[i]
+            self.assertLessEqual(len(lazy.cache), lazy.keep)  # only the last few kept
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class Bundled(unittest.TestCase):

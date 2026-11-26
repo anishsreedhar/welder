@@ -44,6 +44,8 @@ check("Flat" in comp and "Nope" not in comp, "membership")
 
 px = grade.sample(10, 10)
 check(close(px["R"], 1.0) and close(px["G"], 0.5) and close(px["B"], 0.25), "sample through Grade")
+ds = grade.deep_samples(10, 10)
+check(len(ds) == 1 and close(ds[0]["R"], 1.0) and ds[0]["Z"] == float("inf") and ds[0]["ZBack"] == float("inf"), "deep samples of a flat node: one, infinitely far")
 
 grade["mix"].set_key(1, 0.0)
 grade["mix"].set_key(9, 1.0)
@@ -93,6 +95,27 @@ comp = welder.open(path)
 check(comp.path == path and names(comp) == ["Flat", "Grade1", "Soft", "Write1"], "save and reopen")
 check(close(comp["Grade1"]["gain"].get(3)[0], 2.0), "keys survive a save")
 
+# Tracker gap filling: a track lost for frames 4-6 is carried back by the two still tracking
+moving = [[f, 10.0 + 3 * f, 20.0 + f, 0.99, 1 if f == 1 else 0] for f in range(1, 11)]
+lost = [k for k in moving if k[0] not in (4, 5, 6)]
+trk = comp.create("Tracker", tracks=[
+    {"name": "a", "enabled": True, "T": True, "keys": moving},
+    {"name": "b", "enabled": True, "T": True, "keys": [[k[0], k[1] + 40, k[2], 0.99, k[4]] for k in moving]},
+    {"name": "lost", "enabled": True, "T": True, "keys": [[k[0], k[1] + 20, k[2] + 30, 0.99, k[4]] for k in lost]},
+])
+rep = trk.fill_gaps(tracks=["lost"], after=False)
+check(rep["filled"] == 3 and rep["from_tracks"] == 3, "fill_gaps from other tracks")
+k5 = [k for k in trk["tracks"].info()["raw"][2]["keys"] if k[0] == 5][0]
+check(close(k5[1], 45.0) and close(k5[2], 55.0) and k5[4] == 2, "filled key on the path, marked filled")
+check(trk.clear_filled()["removed"] == 3, "clear_filled")
+raises_type = False
+try:
+    comp["Flat"].fill_gaps()
+except TypeError:
+    raises_type = True
+check(raises_type, "fill_gaps on a non-Tracker is a TypeError")
+comp.delete(trk)
+
 
 def raises(exc, fn, what):
     try:
@@ -107,6 +130,17 @@ raises(KeyError, lambda: comp["Missing"], "missing node is a KeyError")
 raises(ValueError, lambda: comp.create("NoSuchType"), "unknown type is a ValueError")
 raises(ValueError, lambda: comp["Flat"].set_input(0, comp["Soft"]), "loops are refused")
 raises(ValueError, lambda: comp.create("Grade", name="Flat"), "duplicate names are refused")
+
+grade = comp["Grade1"]
+grade.add_button("Half", "welder.this_node()['mix'] = 0.5")
+grade.add_button("Full", "welder.this_node()['mix'] = 1")
+grade.add_button("Half", "welder.this_node()['mix'] = 0.4")
+check([b["label"] for b in grade.buttons()] == ["Half", "Full"] and "0.4" in grade.buttons()[0]["code"], "Python buttons")
+grade.remove_button("Full")
+check([b["label"] for b in grade.buttons()] == ["Half"], "remove a button")
+raises(KeyError, lambda: grade.remove_button("Nope"), "a missing button is a KeyError")
+check(welder.this_node() is None or isinstance(welder.this_node(), welder.Node), "this_node outside a button")
+raises(ValueError, lambda: welder.on("no_such_event", print), "unknown events are refused")
 
 comp.delete("Soft")
 check("Soft" not in comp and comp["Write1"].inputs in ([], [None]), "delete disconnects")

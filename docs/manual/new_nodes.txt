@@ -142,3 +142,17 @@ MultiTone
 WhipTransition
 PrismLens
 PixelMosh
+DeepRead
+DeepToImage
+DeepMerge
+DeepHoldout
+DeepFromImage
+DeepRecolor
+DeepGrade
+DeepColorCorrect
+DeepTransform
+DeepCrop
+DeepReformat
+DeepSample
+DeepToPoints
+VanishingCamera

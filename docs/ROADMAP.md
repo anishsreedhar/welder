@@ -15,7 +15,8 @@
 - [x] Viewer: A/B wipe and difference, OCIO view transform, RAM playback cache with pre-rendering
 - [ ] Viewer next: ROI box, 2-up / stacked compare, flipbook to disk
 - [x] DPX and TIFF (native), 16-bit PNG, movies through FFmpeg (ProRes, DNxHR, H.264 / HEVC read, MJPEG, MPEG-4, FFV1)
-- [ ] Formats next: H.264 / HEVC writing (needs a GPL encoder build or the OS's encoders), audio, timecode, OpenImageIO plugins, Cineon .cin
+- [x] H.264 / HEVC writing through hardware encoders (NVENC, AMF, Media Foundation, Vulkan Video; no GPL x264 / x265)
+- [ ] Formats next: audio, timecode, OpenImageIO plugins, Cineon .cin
 - [x] Curve editor and dope sheet (per-key interpolation, tangents)
 - [ ] Curves next: expressions on curves, curve filters (smooth, reduce keys), multiple-curve scaling by box
 - [x] Paste nodes copied in another .nk app (its clipboard format); groups as real nodes (Ctrl+G / Ctrl+Alt+G / Ctrl+Enter, own knobs), gizmos (.gizmo files and groups saved as .sgizmo), backdrops and sticky notes
@@ -30,13 +31,15 @@
 - [x] Copy nodes from Welder in the .nk clipboard format, and export whole comps as .nk (`welder nk`)
 - [x] Python API: the `welder` module (scripts in their own process over a local socket, any Python 3.8+), `welder python` for headless scripts (docs/PYTHON.md)
 - [x] Python in the editor: Script Editor (run / stop / output, one undo step per run), Scripts menu, init.py, the interpreter in Preferences
-- [ ] Python next: callbacks (comp opened / saved, knob changed), Python buttons on nodes, an MCP server for AI assistants on the same commands
+- [x] Python callbacks (init.py's `welder.on()`: comp opened / saved, knob changed, nodes made / deleted, frame, selection; one undo step each) and Python buttons on nodes
+- [x] MCP server for AI assistants on the same commands: build and edit comps, render, read pixels and PNG previews, one undo step per change; `welder mcp` for Claude Desktop / Claude Code (docs/MCP.md)
 - [x] Autosave with crash recovery, atomic saves, ask before discarding unsaved changes; Viewer › Performance (UI frame times and their parts, per-node render times, caches); `welder_ui --smoke` startup / open / play / autosave check with a stall watchdog
 - [x] Proxy / render scale, disk cache (content-keyed viewer frames), cost-aware tile cache
 
 ## Phase 3 — production
 - [x] Keyers: ScreenKeyer (Keylight-style), IBKColour + IBKGimme, ChromaKeyer, Keyer, HueKeyer, Difference, Despill; viewer colour picker
 - [x] Tracker: point tracks (NCC, sub-pixel), background tracking, match-move / stabilise, exports to Transform / CornerPin2D / roto shapes, CornerPin2D node
+- [x] Tracker corner pin and gap filling: a live corner pin from 4 or more tracks (least squares, a bad track dropped, carries on from 3 / 2 / 1 when corners are lost, lost corners shown where they're solved), CornerPin2D export through it; Fill gaps for lost frames from the tracks still tracking (or interpolated), filled frames marked and clearable, in Python and MCP too
 - [x] PlanarTracker: robust homography alignment (pyramid Lucas-Kanade, gain/bias, outlier rejection), region drawn or taken from a roto shape, surface corner pin, match-move / stabilise, exports to CornerPin2D and roto shapes, advanced-edition import
 - [ ] Tracking next: affine pattern warping, tracking roto shapes directly; HueKeyer / HueCorrect curves; Primatte-style 3D keyer
 - [x] Retiming: OFlow (variational optical flow, occlusion-aware interpolation, speed / frame curves, shutter motion blur, OFlow2 / Kronos import) and RIFE (neural frame interpolation through ncnn, Vulkan GPU or CPU)
@@ -45,7 +48,7 @@
 - [ ] Creative next: feedback (recursive) loops, a reaction-diffusion / flow-field generator, noise as a 3D texture on geometry, more gradient presets and saving your own
 - [x] CG passes: VectorBlur, ZDefocus / Defocus (bokeh shapes, focus picking), Cryptomatte keyer with viewer picking, ScanlineRender motion blur and motion vectors
 - [x] .nk panel parity: Read (frame modes, loop / bounce, missing frames, proxy, premultiplied, auto alpha, Metadata tab), Transform (every classic filter with downscale footprint, clamp, black outside, skew X / Y, motion blur with shutter), Reformat (to box, turn, pbb), Merge / Copy layers, Grade reverse, (un)premult by, the Node tab (label, lifetime, hide input)
-- [ ] Next: deep-aware defocus, Cryptomatte preview in the viewer's overlay
+- [ ] Next: Cryptomatte preview in the viewer's overlay
 - [ ] GPU rendering (OFX GPU suites; native nodes in compute shaders)
 - [x] Camera tracking: CameraTracker (automatic KLT feature tracks, masks, structure-from-motion solve with bundle adjustment and focal-length solve, error display, ground plane / origin / scale), Camera and Card3D nodes, exports to Camera nodes, cards on tracked points, .nk, .chan and Blender
 - [x] Lens distortion: solved jointly with the camera (k1 / k2), LensDistortion undistort / redistort and ST map output, STMap
@@ -57,7 +60,10 @@
 - [x] BlenderRender: Cycles / EEVEE renders through the Welder camera with Welder geometry (visible, shadow catcher, holdout; textures and Project3D projections), cached frames, passes as channels
 - [ ] Blender next: lights and cameras from Welder 3D lights, Alembic / USD exchange, render on another machine
 - [ ] AI next: LTX text / image to video, splats in ScanlineRender (with geometry), splat editing (crop boxes), remote workers
-- [ ] Deep compositing
+- [x] Deep compositing, part 1: deep samples through the graph (any flat node sees them flattened), DeepRead (deep scanline / tiled EXR), DeepToImage, deep EXR writing (Write with deep on; DeepWrite in 0.2.6)
+- [x] Deep compositing, part 2: DeepMerge (combine / plus / holdout; volumes split where they overlap), DeepHoldout, DeepFromImage, DeepRecolor, DeepGrade, DeepColorCorrect, DeepTransform, DeepCrop, DeepReformat
+- [x] Deep compositing, part 3: ScanlineRender as a deep source (every surface per pixel), DeepSample, DeepToPoints in the 3D viewer, deep samples from Python (`deep_samples`) and MCP (`sample_deep`)
+- [x] Deep compositing, part 4: flatten and DeepMerge on the GPU (CPU fallback), deep-aware ZDefocus, deep samples under the viewer cursor
 - [ ] OFX: overlays/interacts, parametric params, 8/16-bit plugins
 - [ ] .nk importer: more nodes, TCL beyond [frame] / [value]; pixel-diff test suite against the original renders
 - [ ] Windows/macOS builds and CI

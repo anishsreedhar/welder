@@ -22,6 +22,9 @@
 #include "core/ThreadBudget.h"
 #include "core/NetPath.h"
 #include "core/Update.h"
+#include "core/Deep.h"
+#include "nodes/DeepNodes.h"
+#include "io/ExrIO.h"
 #include "io/ImageIO.h"
 #include "io/PsdIO.h"
 #include "io/MovieIO.h"
@@ -43,6 +46,7 @@
 #include "nodes/CamExport.h"
 #include "nodes/Geo.h"
 #include "nodes/Scene3D.h"
+#include "nodes/VanishCam.h"
 #include "nodes/SceneImport.h"
 #include "nodes/PointMesh.h"
 #include "nodes/MeshEdit.h"
@@ -3626,6 +3630,209 @@ int main(int argc, char** argv) {
         CHECK_NEAR(px(cp, 30, 10, "G"), 8, 1e-3);   // and 2 px up
     });
 
+    test("tracking: corner pin from tracks (least squares, lost corners) and gap filling", [] {
+        // A flat surface moving in perspective: frame f maps the reference (frame 1) by H(f).
+        const double ref[8] = {10, 10, 54, 10, 54, 40, 10, 40};
+        auto Hof = [&](double f, double H[9]) {
+            const double t = f - 1;
+            double dst[8] = {10 + 0.8 * t, 10 + 0.3 * t, 54 + 0.5 * t, 10 - 0.2 * t, 54 + 0.9 * t, 40 + 0.6 * t, 10 + 0.2 * t, 40 + 0.1 * t};
+            CHECK(track::homography(ref, dst, H));
+        };
+        auto mapH = [](const double H[9], double x, double y, double& u, double& v) {
+            const double w = H[6] * x + H[7] * y + H[8];
+            u = (H[0] * x + H[1] * y + H[2]) / w;
+            v = (H[3] * x + H[4] * y + H[5]) / w;
+        };
+        const std::vector<std::pair<double, double>> pts = {{10, 10}, {54, 10}, {54, 40}, {10, 40}, {30, 20}, {20, 32}};
+        auto truth = [&](int i, double f, double& u, double& v) {
+            double H[9];
+            Hof(f, H);
+            mapH(H, pts[i].first, pts[i].second, u, v);
+        };
+        auto makeTracks = [&](int n, int last) {
+            json tracks = json::array();
+            for (int i = 0; i < n; ++i) {
+                json t = {{"name", "p" + std::to_string(i + 1)}, {"enabled", true}, {"T", true}};
+                for (int f = 1; f <= last; ++f) {
+                    double u, v;
+                    truth(i, f, u, v);
+                    track::setKey(t, {(double)f, u, v, 0.99, f == 1});
+                }
+                tracks.push_back(t);
+            }
+            return tracks;
+        };
+
+        // fitPoints: exact from 4, robust to a bad 6th point, lower models from fewer / collinear points
+        {
+            double H[9];
+            Hof(9, H);
+            std::vector<track::PointPair> pp;
+            for (auto [x, y] : pts) {
+                double u, v;
+                mapH(H, x, y, u, v);
+                pp.push_back({x, y, u, v});
+            }
+            std::vector<track::PointPair> four(pp.begin(), pp.begin() + 4);
+            track::Fit f4 = track::fitPoints(four);
+            CHECK(f4.ok && f4.model == 4 && f4.rms < 1e-6);
+            double u, v, eu, ev;
+            f4.H.apply(30, 20, u, v);
+            mapH(H, 30, 20, eu, ev);
+            CHECK_NEAR(u, eu, 1e-6);
+            CHECK_NEAR(v, ev, 1e-6);
+            std::vector<track::PointPair> bad = pp;
+            bad.push_back({40, 25, 0, 0});
+            mapH(H, 40, 25, bad.back().cx, bad.back().cy);
+            bad.back().cx += 15;  // a slipped track
+            track::Fit fr = track::fitPoints(bad);
+            CHECK(fr.ok && fr.model == 4 && fr.used == 6);
+            fr.H.apply(20, 32, u, v);
+            mapH(H, 20, 32, eu, ev);
+            CHECK_NEAR(u, eu, 1e-4);
+            CHECK_NEAR(v, ev, 1e-4);
+            track::Fit f3 = track::fitPoints({pp[0], pp[1], pp[2]});
+            CHECK(f3.ok && f3.model == 3);
+            CHECK(f3.H.m[6] == 0 && f3.H.m[7] == 0);
+            f3.H.apply(pp[1].rx, pp[1].ry, u, v);
+            CHECK_NEAR(u, pp[1].cx, 1e-6);  // three points: an exact affine
+            track::Fit fl = track::fitPoints({{0, 0, 1, 1}, {10, 0, 11, 1}, {20, 0, 21, 1}, {30, 0, 31, 1}});
+            CHECK(fl.ok && fl.model == 2);  // on a line: no perspective / affine
+            track::H9 hi = f4.H * f4.H.inverse();  // the identity, up to scale
+            CHECK_NEAR(hi.m[0] / hi.m[8], 1, 1e-9);
+            CHECK_NEAR(hi.m[4] / hi.m[8], 1, 1e-9);
+            CHECK_NEAR(hi.m[1] / hi.m[8], 0, 1e-9);
+            CHECK_NEAR(hi.m[5] / hi.m[8], 0, 1e-9);
+        }
+
+        // the Tracker's corner pin = a CornerPin2D from the reference corners to the frame's
+        json tracks = makeTracks(4, 20);
+        double c5[8];
+        for (int i = 0; i < 4; ++i) truth(i, 5, c5[2 * i], c5[2 * i + 1]);
+        auto c = comp(json::array({
+            {{"name", "P"}, {"type", "TestPattern"}},
+            {{"name", "Trk"}, {"type", "Tracker"}, {"inputs", {"P"}},
+             {"params", {{"tracks", tracks}, {"transform", "corner pin match-move"}, {"reference_frame", 1}}}},
+            {{"name", "Stab"}, {"type", "Tracker"}, {"inputs", {"Trk"}},
+             {"params", {{"tracks", tracks}, {"transform", "corner pin stabilize"}, {"reference_frame", 1}}}},
+            {{"name", "CP"}, {"type", "CornerPin2D"}, {"inputs", {"P"}},
+             {"params", {{"from1", {10, 10}}, {"from2", {54, 10}}, {"from3", {54, 40}}, {"from4", {10, 40}},
+                         {"to1", {c5[0], c5[1]}}, {"to2", {c5[2], c5[3]}}, {"to3", {c5[4], c5[5]}}, {"to4", {c5[6], c5[7]}}}}},
+            {{"name", "RL"}, {"type", "ReferenceLink"}, {"inputs", {"P", "Trk"}}, {"params", {{"reference_frame", 1}}}},
+        }));
+        auto a = render(*c, "Trk", 5), b = render(*c, "CP", 5), rl = render(*c, "RL", 5), back = render(*c, "Stab", 5);
+        for (auto [x, y] : std::vector<std::pair<int, int>>{{30, 20}, {15, 12}, {50, 38}, {25, 30}}) {
+            CHECK_NEAR(px(a, x, y, "R"), px(b, x, y, "R"), 0.02);
+            CHECK_NEAR(px(a, x, y, "G"), px(b, x, y, "G"), 0.02);
+            CHECK_NEAR(px(rl, x, y, "R"), px(b, x, y, "R"), 0.02);
+            CHECK_NEAR(px(back, x, y, "R"), x, 0.1);  // pin then un-pin: back where it was (one resample: concatenated)
+        }
+        // a lost corner: the pin carries on from the other three (affine)
+        {
+            json lost = tracks;
+            track::clearKeys(lost[3], 4, 1);
+            track::Fit f = track::pinSolve(lost, 1, 5);
+            CHECK(f.ok && f.model == 3 && f.used == 3);
+            CHECK(!track::trackedAt(lost[3], 5));
+            json p = {{"tracks", lost}, {"transform", "corner pin match-move"}, {"reference_frame", 1}};
+            track::H9 M = track::trackerMatrix(p, 5);
+            CHECK(M.m[6] == 0 && M.m[7] == 0);
+            double u, v;
+            M.apply(10, 10, u, v);
+            CHECK_NEAR(u, c5[0], 1e-2);  // the three it has still land on their tracks
+            CHECK_NEAR(v, c5[1], 1e-2);
+            // a gap inside a track isn't a position (interpolating across it is a guess)
+            json gap = tracks;
+            for (int f = 6; f <= 12; ++f) track::deleteKey(gap[0], f);
+            CHECK(!track::trackedAt(gap[0], 9));
+            CHECK(track::positionAt(gap[0], 9).has_value());
+        }
+
+        // gap filling from the other tracks: a gap inside and a lost end, back on the surface
+        {
+            json t6 = makeTracks(6, 20);
+            for (int f = 6; f <= 12; ++f) track::deleteKey(t6[0], f);
+            track::clearKeys(t6[0], 15, 1);  // stopped at 15
+            track::FillOptions o;
+            o.after = true;
+            o.first = 1;
+            o.last = 20;
+            track::FillReport r = track::fillGaps(t6, {0}, o);
+            CHECK(r.frames == 7 + 5 && r.fromTracks == 12 && r.interpolated == 0 && r.skipped == 0);
+            for (int f : {6, 9, 12, 16, 20}) {
+                auto k = track::keyAt(t6[0], f);
+                CHECK(k && k->filled && !k->user);
+                double u, v;
+                truth(0, f, u, v);
+                CHECK_NEAR(k->x, u, 0.01);
+                CHECK_NEAR(k->y, v, 0.01);
+            }
+            CHECK(t6[0]["keys"][6][4] == 2);  // stored as 2: filled
+            CHECK(!track::keyAt(t6[0], 3)->filled);
+            // filling again redoes the filled frames (no doubles); clear removes them
+            track::FillReport r2 = track::fillGaps(t6, {0}, o);
+            CHECK(r2.frames == 12);
+            CHECK(track::keysOf(t6[0]).size() == 20);
+            CHECK(track::clearFilled(t6, {0}) == 12);
+            CHECK(track::keysOf(t6[0]).size() == 8);
+            // a slipped stretch: keys with a high error count as lost with redo_above
+            json t7 = makeTracks(6, 20);
+            for (int f = 8; f <= 9; ++f) {
+                auto k = *track::keyAt(t7[1], f);
+                k.x += 4;
+                k.score = 0.6;
+                track::setKey(t7[1], k);
+            }
+            o.redoAbove = 0.2;
+            o.after = false;
+            track::FillReport r3 = track::fillGaps(t7, {1}, o);
+            CHECK(r3.frames == 2);
+            double u, v;
+            truth(1, 8, u, v);
+            CHECK_NEAR(track::keyAt(t7[1], 8)->x, u, 0.01);
+            // the corner pin uses filled corners like tracked ones
+            json t4 = makeTracks(4, 20);
+            track::clearKeys(t4[2], 10, 1);
+            track::FillOptions oa;
+            oa.after = true;
+            oa.last = 20;
+            CHECK(track::fillGaps(t4, {2}, oa).fromTracks == 10);  // from the other three: affine
+            CHECK(track::pinSolve(t4, 1, 15).model == 4);
+        }
+        // nothing else tracking: smooth / linear interpolation of the track's own keys
+        {
+            json t = {{"name", "solo"}, {"T", true}};
+            for (int f = 1; f <= 30; ++f) {
+                if (f > 10 && f < 20) continue;
+                track::setKey(t, {(double)f, 5.0 + 2 * f, 0.05 * f * f, 1, false});
+            }
+            json ts = json::array({t});
+            track::FillOptions o;
+            o.method = "auto";
+            track::FillReport r = track::fillGaps(ts, {0}, o);
+            CHECK(r.frames == 9 && r.interpolated == 9);
+            auto k = track::keyAt(ts[0], 15);
+            CHECK_NEAR(k->x, 35, 0.01);              // a straight line stays straight
+            CHECK_NEAR(k->y, 0.05 * 225, 0.3);       // and the curve keeps curving (linear is 1.25 px off here)
+            json tl = json::array({t});
+            o.method = "linear";
+            track::fillGaps(tl, {0}, o);
+            CHECK_NEAR(track::keyAt(tl[0], 15)->y, (0.05 * 100 + 0.05 * 400) / 2, 1e-3);
+            o.method = "from other tracks";  // nothing to carry it: left alone
+            json tn = json::array({t});
+            track::FillReport rn = track::fillGaps(tn, {0}, o);
+            CHECK(rn.frames == 0 && rn.skipped == 9);
+            // past the end: on at its last speed
+            o.method = "smooth";
+            o.inside = false;
+            o.after = true;
+            o.last = 32;
+            json te = json::array({t});
+            track::fillGaps(te, {0}, o);
+            CHECK_NEAR(track::keyAt(te[0], 32)->x, 5 + 2 * 32, 1e-3);
+        }
+    });
+
     test("Precomp: renders once, copies, reads local in the editor and network in renders, Clear goes live", [] {
         namespace fs = std::filesystem;
         const fs::path root = fs::temp_directory_path() / ("strata_precomp_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -4043,6 +4250,155 @@ int main(int argc, char** argv) {
         CHECK(std::fabs(cam3d::dot(cd.normal(), pl.n)) > 0.9999 && cam3d::dot(cd.normal(), eye - cd.O) > 0);
         CHECK(cd.w < 4 * 1.3 && cd.h < 4 * 1.3);  // snug: the patch with a margin, not the whole plane
         CHECK(!scene3d::cardOnPoints(line, eye, V3(1, 0, 0), cd));
+    });
+
+    test("VanishingCamera: focal, orientation and position from drawn axis lines", [] {
+        using cam3d::V3;
+        const double W = 1920, H = 1080;
+        // a camera looking at `target` from `eye`, +Y up (no roll unless asked)
+        auto lookAt = [&](V3 eye, V3 target, double focal, double rollDeg = 0) {
+            cam3d::Camera c;
+            const V3 f = cam3d::normalize(target - eye), rt = cam3d::normalize(cam3d::cross(f, V3(0, 1, 0))), up = cam3d::cross(rt, f);
+            cam3d::M3 R;
+            for (int i = 0; i < 3; ++i) R.m[i][0] = rt[i], R.m[i][1] = up[i], R.m[i][2] = -f[i];
+            c.R = R * cam3d::M3::rotZ(rollDeg);
+            c.C = eye;
+            c.focal = focal;
+            c.haperture = 36;
+            c.vaperture = 36 * H / W;
+            return c;
+        };
+        // segments along world axis a through a few points round the origin, as the user would draw them
+        auto linesOf = [&](const cam3d::Camera& c, int a, int count, double jitter = 0) {
+            std::vector<vanish::Line> out;
+            std::mt19937 rng(11 + a);
+            std::normal_distribution<double> N(0, 1);
+            const V3 starts[4] = {V3(-1, 0, -1), V3(1, 0.5, 1), V3(-0.5, 1.2, 0.8), V3(0.7, 0.2, -0.9)};
+            for (int i = 0; i < count; ++i) {
+                V3 e;
+                e[a] = 1;
+                V3 p = starts[i], q = starts[i] + e * 1.5;
+                double x1, y1, x2, y2;
+                CHECK(c.project(p, W, H, x1, y1) && c.project(q, W, H, x2, y2));
+                out.push_back({x1 + jitter * N(rng), y1 + jitter * N(rng), x2 + jitter * N(rng), y2 + jitter * N(rng)});
+            }
+            return out;
+        };
+        auto origin = [&](const cam3d::Camera& c, vanish::Setup& st) {
+            CHECK(c.project(V3(0, 0, 0), W, H, st.ox, st.oy));
+        };
+        auto same = [](const cam3d::Camera& a, const cam3d::Camera& b, double tolPos, double tolDeg, double tolMm) {
+            double rot = 0;
+            for (int i = 0; i < 3; ++i) rot = std::max(rot, std::acos(std::clamp(cam3d::dot(a.R.col(i), b.R.col(i)), -1.0, 1.0)) * 180 / M_PI);
+            const bool ok = cam3d::norm(a.C - b.C) < tolPos && rot < tolDeg && std::fabs(a.focal - b.focal) < tolMm;
+            if (!ok) std::printf("    C %.4f %.4f %.4f vs %.4f %.4f %.4f, rot %.7f deg, focal %.6f vs %.6f\n", a.C.x, a.C.y, a.C.z, b.C.x, b.C.y,
+                                 b.C.z, rot, a.focal, b.focal);
+            return ok;
+        };
+
+        // three-point perspective, focal solved, scale from a known length along X
+        {
+            const cam3d::Camera truth = lookAt(V3(4, 3, 6), V3(0, 0.3, 0), 28, 4);
+            vanish::Setup st;
+            st.W = W, st.H = H;
+            for (int a = 0; a < 3; ++a) st.lines[a] = linesOf(truth, a, 3);
+            origin(truth, st);
+            st.scale = vanish::Scale::Reference;
+            st.refAxis = 0;
+            st.refLength = 2;
+            CHECK(truth.project(V3(2, 0, 0), W, H, st.rx, st.ry));
+            vanish::Result r = vanish::solve(st);
+            CHECK(r.ok && r.focalSolved);
+            CHECK(same(r.cam, truth, 1e-5, 1e-4, 1e-4));
+            CHECK(r.spreadDeg[0] < 1e-4 && r.hasVP[1]);
+        }
+        // two-point (floor edges along X and Z), focal solved, scale from the camera height
+        {
+            const cam3d::Camera truth = lookAt(V3(-3, 1.6, 5), V3(0.5, 0, 0), 35);
+            vanish::Setup st;
+            st.W = W, st.H = H;
+            st.lines[0] = linesOf(truth, 0, 2);
+            st.lines[2] = linesOf(truth, 2, 2);
+            origin(truth, st);
+            st.scale = vanish::Scale::Height;
+            st.height = 1.6;
+            vanish::Result r = vanish::solve(st);
+            CHECK(r.ok);
+            CHECK(same(r.cam, truth, 1e-5, 1e-4, 1e-4));
+            CHECK(std::fabs(r.fovH - 2 * std::atan(18.0 / 35) * 180 / M_PI) < 1e-6);
+            // a little hand-drawn wobble: still close
+            st.lines[0] = linesOf(truth, 0, 3, 0.7);
+            st.lines[2] = linesOf(truth, 2, 3, 0.7);
+            r = vanish::solve(st);
+            CHECK(r.ok && same(r.cam, truth, 0.1, 0.5, 1.0) && r.spreadDeg[0] > 0);
+            // spin / flip turn the world (the camera keeps seeing the origin where it was)
+            st.spinDeg = 90;
+            st.flipUp = true;
+            st.scale = vanish::Scale::Distance;
+            st.distance = cam3d::norm(truth.C);
+            r = vanish::solve(st);
+            double u, v;
+            CHECK(r.ok && r.cam.project(V3(0, 0, 0), W, H, u, v) && std::fabs(u - st.ox) < 1e-3 && std::fabs(v - st.oy) < 1e-3);
+            CHECK(r.cam.R.col(1).y < 0);  // upside down: the world's +Y points down the frame
+            // the camera height needs the origin below the horizon
+            st.spinDeg = 0, st.flipUp = false;
+            st.scale = vanish::Scale::Height;
+            st.oy = H - 1;
+            CHECK(truth.project(V3(0, 3, 0), W, H, st.ox, st.oy));
+            r = vanish::solve(st);
+            CHECK(!r.ok && r.error.find("horizon") != std::string::npos);
+        }
+        // known focal: one vanishing point plus a single line along a second axis
+        {
+            const cam3d::Camera truth = lookAt(V3(2.5, 1.2, 7), V3(0, 0.4, 0), 50, -3);
+            vanish::Setup st;
+            st.W = W, st.H = H;
+            st.solveFocal = false;
+            st.focalMm = 50;
+            st.lines[0] = linesOf(truth, 0, 2);
+            st.lines[1] = linesOf(truth, 1, 1);
+            origin(truth, st);
+            st.distance = cam3d::norm(truth.C);
+            vanish::Result r = vanish::solve(st);
+            CHECK(r.ok && !r.focalSolved);
+            CHECK(same(r.cam, truth, 1e-5, 1e-4, 1e-4));
+            // solving the focal length needs a second vanishing point
+            st.solveFocal = true;
+            r = vanish::solve(st);
+            CHECK(!r.ok && r.error.find("focal") != std::string::npos);
+            // the wrong known focal length: still a camera, with a note on the axes
+            st.solveFocal = false;
+            st.focalMm = 20;
+            st.lines[1] = linesOf(truth, 1, 2);
+            r = vanish::solve(st);
+            CHECK(r.ok && r.note.find("perpendicular") != std::string::npos);
+        }
+        // not enough lines
+        {
+            vanish::Setup st;
+            CHECK(!vanish::solve(st).ok);
+            st.lines[0] = {{0, 0, 100, 10}};
+            CHECK(!vanish::solve(st).ok);
+        }
+        // the node: starter lines solve, and feed a Scene3D's camera input
+        {
+            json p = vanish::starterLines(64, 48);
+            p["image_size"] = {64, 48};
+            auto c = comp(json::array({{{"name", "V"}, {"type", "VanishingCamera"}, {"params", p}},
+                                       {{"name", "S"}, {"type", "Scene3D"}, {"inputs", {nullptr, "V"}}}}));
+            auto cam = cam3d::cameraAt(c->find("V"), 1);
+            CHECK(cam && cam->focal > 10 && cam->focal < 60);
+            auto* src = dynamic_cast<scene3d::SceneSource*>(c->find("S"));
+            auto sn = src ? src->scene(1) : scene3d::Snapshot();
+            CHECK(sn.camera && cam3d::norm(sn.camera->C - cam->C) < 1e-9);
+            // baked to Camera knobs, the same camera
+            json cp = vanish::cameraParams(*cam);
+            auto c2 = comp(json::array({{{"name", "K"}, {"type", "Camera"}, {"params", cp}}}));
+            auto kc = cam3d::cameraAt(c2->find("K"), 1);
+            double u1, v1, u2, v2;
+            CHECK(kc && cam->project(V3(0.3, 0.2, -0.4), 64, 48, u1, v1) && kc->project(V3(0.3, 0.2, -0.4), 64, 48, u2, v2));
+            CHECK(std::fabs(u1 - u2) < 1e-3 && std::fabs(v1 - v2) < 1e-3);
+        }
     });
 
     test("Scene3D: Insert / Match Move / Stabilize homographies round-trip on an animated camera", [] {
@@ -6104,6 +6460,18 @@ Connections:  {
         const double vin = spread(p), vout = spread(q);
         std::printf("  guided filter: edge %.2f | %.2f, flat noise %.3f -> %.3f\n", q[10 * W + 30], q[10 * W + 33], vin, vout);
         CHECK(vout < vin * 0.5);
+        // logits -> a sharp matte: a low-res model's logits (a ramp of 0.7 a px, scaled up 18x) cut at 0 with a
+        // 1 px edge, solid 1 inside however unsure (logit 1.1 was a 0.75 grey as a sigmoid)
+        {
+            const int LW = 72, LH = 4;
+            std::vector<float> L(LW * LH);
+            for (int y = 0; y < LH; ++y)
+                for (int x = 0; x < LW; ++x) L[y * LW + x] = std::min(1.1f, (x - 36.0f) * 0.7f / 18.0f);
+            edgeFromLogits(L, LW, LH, 1.0f);
+            CHECK(L[2 * LW + 30] == 0.0f && L[2 * LW + 35] < 0.05f);
+            CHECK(std::fabs(L[2 * LW + 36] - 0.5f) < 1e-4f);
+            CHECK(L[2 * LW + 37] > 0.95f && L[2 * LW + 60] == 1.0f && L[2 * LW + 71] == 1.0f);
+        }
         // trimap: 1 inside the core, 0.5 within the band, 0 outside
         std::vector<float> m(W * H);
         for (int y = 0; y < H; ++y)
@@ -6241,6 +6609,95 @@ Connections:  {
         CHECK(rs.params["objects"][0]["coarse"].size() == 1 && rs.params["objects"][0]["coarse"].contains("2"));
         // the trimap settings are part of a refined frame's tag: changing them makes frame 1 stale
         n->params.data["trimap_erode"] = 12;
+        n->paramsChanged();
+        CHECK(mlnodes::trackMaskRefinerStatus(n, 1).state == mlnodes::TrackMaskRefinerStatus::NotYet);
+        ml::setHome("");
+    });
+    test("TrackMask logits: cut sharp at the plate's size, solid however unsure; RAW keeps the soft matte; SAM High-Res refines from the tracked weights", [] {
+        auto home = std::filesystem::temp_directory_path() / "strata_mlhome_tm6";
+        std::filesystem::remove_all(home);
+        ml::setHome(home.string());
+        const int W = 128, H = 32, LW = 16, LH = 4;  // the track's logits 8x smaller than the plate
+        auto c = comp(json::array({{{"name", "K"}, {"type", "Constant"}, {"params", {{"color", {0.5, 0.5, 0.5, 1}}}}},
+                                   {{"name", "TM"}, {"type", "TrackMask"}, {"inputs", {"K"}}}}),
+                     W, H);
+        c->firstFrame = 1;
+        c->lastFrame = 1;
+        Node* n = c->find("TM");
+        auto* m = dynamic_cast<mlnodes::MLNode*>(n);
+        tmscene::Scene s;
+        s.add()->anchorFor(1).points.push_back({70, 16, 1});
+        tmscene::store(n->params, s);
+        Engine e;
+        auto sp = m->spec("main", e);
+        CHECK(sp.params["min_confidence"].get<double>() == 2.0);
+        auto d = home / "jobs" / "seglg";
+        std::filesystem::create_directories(d / "out");
+        std::ofstream(d / "job.json") << "{}";
+        std::ofstream(d / "status.json") << json{{"state", "done"}}.dump();
+        std::ofstream(d / "result.json") << json{{"outputs", {{"matte", {{"frames", {1}}, {"width", LW}, {"height", LH}}},
+                                                              {"logit", {{"frames", {1}}, {"width", LW}, {"height", LH}}}}},
+                                                 {"objects", {1}}, {"object_tags", sp.params["object_tags"]}}.dump();
+        // logit 0.3 a logit px from x = 64 (plate), at most 1.1 (a sigmoid: 0.75 grey); the matte is its sigmoid
+        std::vector<float> lg(LW * LH), mt(LW * LH);
+        for (int y = 0; y < LH; ++y)
+            for (int x = 0; x < LW; ++x) {
+                const float px8 = (x + 0.5f) * 8;
+                lg[y * LW + x] = std::min(1.1f, (px8 - 64) / 8 * 0.3f);
+                mt[y * LW + x] = 1 / (1 + std::exp(-lg[y * LW + x]));
+            }
+        CHECK(ml::writeNpy((d / "out" / "logit.1.npy").string(), lg.data(), LW, LH, 1, true));
+        CHECK(ml::writeNpy((d / "out" / "matte.1.npy").string(), mt.data(), LW, LH, 1, true));
+        n->params.data["ml"] = {{"main", {{"result", "seglg"}}}};
+        n->params.data["mask_output"] = "Hard Mask";
+        n->params.data["hard_threshold"] = 0.5;
+        n->paramsChanged();
+        auto im = render(*c, "TM", 1);
+        CHECK_NEAR(px(im, 100, 16, "A"), 1, 1e-6);  // solid inside (the sigmoid was 0.75)
+        CHECK_NEAR(px(im, 30, 16, "A"), 0, 1e-6);
+        CHECK_NEAR(px(im, 63, 16, "A"), 0, 1e-6);  // the edge on x = 64
+        CHECK_NEAR(px(im, 64, 16, "A"), 1, 1e-6);
+        n->params.data["mask_output"] = "RAW Mask";
+        n->paramsChanged();
+        CHECK_NEAR(px(render(*c, "TM", 1), 100, 16, "A"), 1 / (1 + std::exp(-1.1)), 2e-3);
+        // TrackMask's matte output is data to the viewer
+        CHECK(!n->outputIsData());
+        n->params.data["output"] = "matte";
+        CHECK(n->outputIsData());
+        n->params.data["output"] = "alpha";
+        // SAM High-Res: Refine edges with the weights it tracked with (no install), after Track by itself
+        std::filesystem::create_directories(home / "models" / "sam2.1-hiera-large");
+        std::ofstream(home / "models" / "sam2.1-hiera-large" / ".complete") << "";
+        n->params.data["mask_output"] = "SAM High-Res";
+        n->params.data["hires_tile"] = "1536";
+        n->paramsChanged();
+        auto rs = m->spec("refine", e);
+        CHECK(rs.error.empty() && rs.task == "matte_refine" && m->models(rs).empty());
+        CHECK(rs.params["model"] == "sam2.1-hiera-large" && rs.params["hires_tile"] == 1536);
+        CHECK(m->followUp("main") == "refine");
+        auto st = mlnodes::trackMaskRefinerStatus(n, 1);
+        CHECK(st.state == mlnodes::TrackMaskRefinerStatus::NotYet && st.text.find("SAM High-Res") != std::string::npos);
+        // its result: logits over the whole plate (half its size) with the edge moved to x = 70
+        auto rd = home / "jobs" / "hrlg";
+        std::filesystem::create_directories(rd / "out");
+        std::ofstream(rd / "job.json") << "{}";
+        std::ofstream(rd / "status.json") << json{{"state", "done"}}.dump();
+        std::ofstream(rd / "result.json") << json{{"outputs", {{"refined_1", {{"frames", {1}}, {"width", W / 2}, {"height", H / 2}}}}},
+                                                  {"crops", {{"1", {{"1", {0, 0, W, H}}}}}}, {"plate", {W, H}},
+                                                  {"object_tags", rs.params["object_tags"]}, {"kind", "logit"}}.dump();
+        std::vector<float> hr((W / 2) * (H / 2));
+        for (int y = 0; y < H / 2; ++y)
+            for (int x = 0; x < W / 2; ++x) hr[y * (W / 2) + x] = std::clamp(((x + 0.5f) * 2 - 70) * 0.5f, -16.0f, 16.0f);
+        CHECK(ml::writeNpy((rd / "out" / "refined_1.1.npy").string(), hr.data(), W / 2, H / 2, 1, true));
+        n->params.data["ml"]["refine"] = {{"result", "hrlg"}};
+        n->params.data["smooth_radius"] = 1;
+        n->paramsChanged();
+        CHECK(mlnodes::trackMaskRefinerStatus(n, 1).state == mlnodes::TrackMaskRefinerStatus::Refined);
+        auto ref = render(*c, "TM", 1);
+        std::printf("  SAM High-Res edge: %.3f %.3f %.3f\n", px(ref, 68, 16, "A"), px(ref, 70, 16, "A"), px(ref, 72, 16, "A"));
+        CHECK(px(ref, 67, 16, "A") < 0.05 && px(ref, 72, 16, "A") > 0.95 && px(ref, 0, 0, "A") < 1e-3 && px(ref, 127, 31, "A") > 0.999);
+        // the tile size is part of a refined frame's tag
+        n->params.data["hires_tile"] = "1024";
         n->paramsChanged();
         CHECK(mlnodes::trackMaskRefinerStatus(n, 1).state == mlnodes::TrackMaskRefinerStatus::NotYet);
         ml::setHome("");
@@ -6899,6 +7356,87 @@ Connections:  {
             CHECK(movie::probe(p).profile == want);
             if (movie::probe(p).profile != want) std::printf("    %s: profile %s\n", pr.c_str(), movie::probe(p).profile.c_str());
         }
+        // H.264 / H.265: only the machine's hardware encoders are built in, so with no GPU encoder here
+        // the Writer must fail with each encoder's reason. STRATA_TEST_VIDEO_ENCODER=<FFmpeg encoder>
+        // (e.g. libopenh264 in a test FFmpeg) checks the rest of the path without one.
+        {
+            auto enc = movie::videoEncoders();
+            std::string names;
+            for (auto& n : enc) names += " " + n;
+            std::printf("    video encoders in this build:%s\n", names.empty() ? " none" : names.c_str());
+            struct HCase { const char* codec; const char* ext; const char* profile; const char* rate; const char* want; };
+            for (auto hc : std::vector<HCase>{{"h.264", ".mp4", "high", "quality", "h264"}, {"h.264", ".mov", "main", "bitrate", "h264"},
+                                              {"h.265", ".mov", "main", "quality", "hevc"}, {"h.265", ".mkv", "main 10", "quality", "hevc"}}) {
+                const int W = 256, H = 128, N = 12;
+                std::string p = (dir / (std::string("h_") + hc.codec + "_" + hc.profile + hc.ext)).string();
+                for (auto& ch : p) if (ch == ' ') ch = '_';
+                movie::WriterOptions o;
+                o.codec = hc.codec;
+                o.fps = 25;
+                o.profile = hc.profile;
+                o.rate = hc.rate;
+                o.bitrate = 8;
+                o.keyframes = 5;
+                std::string used;
+                try {
+                    movie::Writer w(p, W, H, false, o);
+                    used = w.encoderUsed();
+                    for (int k = 0; k < N; ++k) {
+                        raster::Raster r;
+                        r.w = W; r.h = H; r.n = 3;
+                        r.px.resize((size_t)W * H * 3);
+                        for (int y = 0; y < H; ++y)
+                            for (int x = 0; x < W; ++x) {
+                                float* q = r.at(x, y);
+                                q[0] = (k + 0.5f) / N;
+                                q[1] = 0.2f + 0.6f * x / (W - 1);
+                                q[2] = 0.5f;
+                            }
+                        w.write(r);
+                    }
+                    w.close();
+                } catch (const RenderError& e) {
+                    std::string m = e.what();
+                    bool none = m.find("encoder would start") != std::string::npos;
+                    CHECK(none);
+                    std::printf("    %s %s %s: no encoder here (%s)\n", hc.codec, hc.profile, hc.ext,
+                                m.substr(0, m.find("\nH.264")).c_str());
+                    if (!none) std::printf("    unexpected: %s\n", m.c_str());
+                    continue;
+                }
+                auto info = movie::probe(p);
+                CHECK(info.width == W && info.height == H);
+                CHECK(info.frames == N);
+                CHECK(info.codec == hc.want);
+                CHECK(std::fabs(info.fps - 25) < 1e-3);
+                double worst = 0;
+                for (int k : {0, 6, 3, 11, 1}) {
+                    auto rp = movie::readFrame(p, k);
+                    const float* q = rp->at(W / 2, H / 2);
+                    worst = std::max({worst, (double)std::fabs(q[0] - (k + 0.5f) / N), (double)std::fabs(q[2] - 0.5f)});
+                }
+                CHECK(worst < 0.04);
+                std::printf("    %s %s %s via %s: %d frames, codec %s, max error %.4f\n", hc.codec, hc.profile, hc.ext, used.c_str(),
+                            info.frames, info.codec.c_str(), worst);
+            }
+            movie::WriterOptions o;
+            o.codec = "h.264";
+            bool threw = false;
+            try {
+                movie::Writer w((dir / "odd.mp4").string(), 255, 128, false, o);
+            } catch (const RenderError& e) {
+                threw = std::string(e.what()).find("even width") != std::string::npos;
+            }
+            CHECK(threw);
+            o.encoder = "bogus";
+            threw = false;
+            try {
+                movie::Writer w((dir / "bogus.mp4").string(), 64, 64, false, o);
+            } catch (const RenderError& e) {
+                threw = std::string(e.what()).find("unknown video encoder") != std::string::npos;
+            }
+            CHECK(threw);
+        }
         // Write / Read nodes: a ProRes movie rendered over a frame range, read back by frame number
         auto c = comp(json::array({
             {{"name", "C"}, {"type", "Constant"}, {"params", {{"color", {0.18, 0.5, 0.05, 1}}, {"format", {96, 54}}}}},
@@ -7317,6 +7855,130 @@ Connections:  {
         // proxy: renders, with grain
         auto half = renderScaled(*c, "CG", 0.5);
         CHECK(half->bounds.width() == W / 2 && std::isfinite(px(half, 60, 40, "R")));
+    });
+    // Render each node on the CPU and then on the GPU (the router forced each way): the GPU must have
+    // run, and every value match within tol (relative above 1).
+    auto gpuParity = [](Comp& c, const std::vector<std::string>& names, double tol) {
+        for (auto& nm : names) {
+            gpu::setEnabled(false);  // everything on the CPU
+            auto cpu = render(c, nm, 2, 128);
+            gpu::setEnabled(true);
+            gpu::setRoute(gpu::RouteMode::Gpu);
+            // this node's own kind of job ran on the GPU (not only the ones upstream)
+            const std::string kind = c.find(nm)->type;
+            const auto before = gpu::stats().runs, jobs = gpu::routedGpuJobs(kind);
+            auto g = render(c, nm, 2, 128);
+            gpu::setRoute(gpu::RouteMode::Auto);
+            const bool used = gpu::stats().runs > before && (kind == "Transform" || gpu::routedGpuJobs(kind) > jobs);
+            double worst = 0;
+            size_t at = 0;
+            for (size_t i = 0; i < cpu->data.size() && i < g->data.size(); ++i) {
+                const double d = std::fabs(cpu->data[i] - g->data[i]) / std::max(1.0, (double)std::fabs(cpu->data[i]));
+                if (d > worst || std::isnan(d)) worst = std::isnan(d) ? 1e9 : d, at = i;
+            }
+            const bool ok = worst < tol && used && cpu->bounds == g->bounds && cpu->channels == g->channels;
+            std::printf("  %s: max |cpu - gpu| %.2g, gpu used %d%s\n", nm.c_str(), worst, used, ok ? "" : "  <-- FAIL");
+            if (!ok && at < cpu->data.size())
+                std::printf("    at pixel %zu ch %zu: cpu %g gpu %g\n", at / cpu->nch(), at % cpu->nch(), cpu->data[at], g->data[at]);
+            CHECK(cpu->bounds == g->bounds);
+            CHECK(used);
+            CHECK(worst < tol);
+        }
+    };
+    test("GPU: Grade and the colour/math nodes match the CPU (gamma, reverse, clamps, unpremult, mix, ranges)", [&] {
+        if (!gpu::available()) {
+            std::printf("  (no GPU: %s)\n", gpu::status().c_str());
+            return;
+        }
+        // values below 0 and above 1, a soft alpha, and an extra channel
+        json nodes = json::array({
+            {{"name", "Scene"}, {"type", "MovingScene"}},
+            {{"name", "Src"}, {"type", "Grade"}, {"inputs", {"Scene"}},
+             {"params", {{"multiply", {2.4, 2.1, 1.8, 1}}, {"offset", {-0.45, -0.3, -0.2, 0}}, {"black_clamp", false}}}},
+        });
+        std::vector<std::string> names;
+        auto add = [&](const std::string& nm, const std::string& type, json p) {
+            nodes.push_back({{"name", nm}, {"type", type}, {"inputs", {"Src"}}, {"params", p}});
+            names.push_back(nm);
+        };
+        add("G0", "Grade", {{"multiply", 1.3}, {"offset", 0.02}});
+        add("G1", "Grade", {{"gamma", {0.7, 1.3, 2.0, 1}}, {"lift", {0.05, 0, 0.1, 0}}, {"gain", {1.2, 0.9, 1.1, 1}}, {"white_clamp", true}});
+        add("G2", "Grade", {{"gamma", {0.8, 1.6, 1.0, 1}}, {"blackpoint", 0.02}, {"whitepoint", 0.9}, {"black_clamp", false}});
+        add("G3", "Grade", {{"gamma", {1.4, 0.6, 1.2, 1}}, {"multiply", 1.5}, {"reverse", true}, {"black_clamp", false}});
+        add("G4", "Grade", {{"gamma", 1.7}, {"channels", "all"}, {"unpremult", "A"}, {"mix", 0.6}});
+        add("G5", "Grade", {{"gamma", 0.5}, {"unpremult", "A"}, {"invert_unpremult", true}, {"white_clamp", true}});
+        add("Mu", "Multiply", {{"value", {1.5, 0.5, 2, 0.8}}, {"channels", "rgba"}});
+        add("Ad", "Add", {{"value", {0.1, -0.2, 0.3, 0}}});
+        add("Ga", "Gamma", {{"value", {2.2, 0.45, 1.0, 1}}});
+        add("In", "Invert", {{"channels", "rgba"}});
+        add("Cl", "Clamp", {{"minimum", {0.1, 0, 0.2, 0}}, {"maximum", {0.8, 1, 0.9, 1}}});
+        add("S0", "Saturation", {{"saturation", 1.6}});
+        add("S1", "Saturation", {{"saturation", 0.3}, {"mode", "CCIR 601"}});
+        add("S2", "Saturation", {{"saturation", 2.0}, {"mode", "Maximum"}});
+        add("CC", "ColorCorrect", {{"saturation", 1.2}, {"contrast", 1.3}, {"gamma", 0.9}, {"gain", 1.1}, {"offset", 0.01},
+                                   {"shadows.gain", {1.2, 1, 0.8, 1}}, {"midtones.gamma", 1.4}, {"highlights.contrast", 0.8},
+                                   {"highlights.saturation", 0.5}});
+        add("Pm", "Premult", {{"channels", "all"}});
+        add("Up", "Unpremult", {});
+        auto c = comp(nodes, 400, 300);
+        gpuParity(*c, names, 1e-4);
+    });
+    test("GPU: Merge matches the CPU (every operation, video colorspace, alpha masking, several A inputs)", [&] {
+        if (!gpu::available()) return;
+        json nodes = json::array({
+            {{"name", "Scene"}, {"type", "MovingScene"}},
+            {{"name", "B"}, {"type", "Grade"}, {"inputs", {"Scene"}},
+             {"params", {{"multiply", {2.4, 2.1, 1.8, 1}}, {"offset", {-0.45, -0.3, -0.2, 0}}, {"black_clamp", false}}}},
+            {{"name", "Moved"}, {"type", "Transform"}, {"inputs", {"Scene"}}, {"params", {{"translate", {-37, 11}}, {"filter", "impulse"}}}},
+            {{"name", "A"}, {"type", "Grade"}, {"inputs", {"Moved"}}, {"params", {{"multiply", {0.7, 1.3, 1.1, 1}}, {"channels", "rgba"}}}},
+            {{"name", "A2"}, {"type", "Invert"}, {"inputs", {"Scene"}}, {"params", {{"channels", "rgba"}}}},
+            {{"name", "Rgb"}, {"type", "Remove"}, {"inputs", {"A2"}}, {"params", {{"channels", "alpha"}}}},
+        });
+        std::vector<std::string> names;
+        int k = 0;
+        for (const char* op : {"over", "under", "plus", "minus", "from", "multiply", "screen", "max", "min", "difference", "divide", "in",
+                               "out", "atop", "xor", "mask", "stencil", "copy", "average", "hypot", "overlay", "hard-light",
+                               "conjoint-over", "disjoint-over", "geometric"}) {
+            std::string nm = "M" + std::to_string(k++);
+            nodes.push_back({{"name", nm}, {"type", "Merge"}, {"inputs", {"B", "A"}}, {"params", {{"operation", op}}}});
+            names.push_back(nm);
+        }
+        auto add = [&](const std::string& nm, json inputs, json p) {
+            nodes.push_back({{"name", nm}, {"type", "Merge"}, {"inputs", inputs}, {"params", p}});
+            names.push_back(nm);
+        };
+        add("Vid", {"B", "A"}, {{"operation", "screen"}, {"video_colorspace", true}});
+        add("AM", {"B", "A"}, {{"operation", "plus"}, {"alpha_masking", true}});
+        add("Multi", {"B", "A", nullptr, "A2"}, {{"operation", "over"}, {"mix", 0.7}});
+        add("MultiVid", {"B", "A", nullptr, "A2"}, {{"operation", "multiply"}, {"video_colorspace", true}});
+        add("NoAlpha", {"B", "Rgb"}, {{"operation", "over"}});
+        add("Masked", {"B", "A", "A2"}, {{"operation", "difference"}});
+        add("Depth", {"B", "A"}, {{"operation", "over"}, {"channels", "all"}});
+        auto c = comp(nodes, 400, 300);
+        gpuParity(*c, names, 1e-4);
+    });
+    test("GPU: Transform motion blur in one submission matches the CPU (edges, filters, many samples)", [&] {
+        if (!gpu::available()) return;
+        json nodes = json::array({{{"name", "Scene"}, {"type", "MovingScene"}}});
+        std::vector<std::string> names;
+        int k = 0;
+        for (int variant = 0; variant < 4; ++variant) {
+            json tx = json::object(), rot = json::object();
+            tx["keys"] = json::array({json::array({1, -20}), json::array({3, 45})});
+            rot["keys"] = json::array({json::array({1, 0}), json::array({3, 12})});
+            json p = {{"translate", json::array({tx, 7})}, {"rotate", rot}, {"motionblur", variant == 3 ? 3 : 1},
+                      {"filter", variant == 1 ? "lanczos4" : variant == 2 ? "impulse" : "cubic"}, {"shutter", 0.75}};
+            if (variant == 1) {
+                p["black_outside"] = false;
+                p["clamp"] = true;
+            }
+            if (variant == 2) p["scale"] = 0.4;
+            std::string nm = "MB" + std::to_string(k++);
+            nodes.push_back({{"name", nm}, {"type", "Transform"}, {"inputs", {"Scene"}}, {"params", p}});
+            names.push_back(nm);
+        }
+        auto c = comp(nodes, 400, 300);
+        gpuParity(*c, names, 2e-4);
     });
     test("GPU: Transform / CornerPin resampling matches the CPU (every filter, edges, clamp, perspective)", [] {
         if (!gpu::available()) {
@@ -9398,6 +10060,511 @@ Connections:  {
             CHECK(eg / n < 0.4);
             CHECK(eg / n < ec / n + 0.02);
         }
+    });
+    // ---------------------------------------------------------------- deep
+    // A deep image with empty pixels, hard surfaces, a volume, samples given out of order, and an
+    // extra channel; its bbox starts away from the origin.
+    auto makeDeep = [] {
+        DeepImage d(Box(3, 2, 40, 30), {"R", "G", "B", "A", "id"});
+        const int nc = d.nch();
+        for (int y = d.bounds.y1; y < d.bounds.y2; ++y)
+            for (int x = d.bounds.x1; x < d.bounds.x2; ++x) {
+                const int n = (x * 7 + y * 3) % 4;  // 0..3 samples
+                float* s = d.newPixel(n);
+                for (int k = 0; k < n; ++k, s += nc) {
+                    const float a = 0.25f + 0.2f * k;
+                    s[d.ch("R")] = a * (x / 40.0f);
+                    s[d.ch("G")] = a * (y / 30.0f);
+                    s[d.ch("B")] = a * 0.5f;
+                    s[d.ai] = a;
+                    s[d.ch("id")] = (float)k;
+                    s[d.zi] = 10.0f - 3.0f * k + x * 0.01f;  // back to front: sorted on the way in
+                    s[d.zbi] = s[d.zi] + (k == 1 ? 2.0f : 0.0f);
+                }
+                d.sortPixel(d.pixelIndex(x, y));
+            }
+        d.finish();
+        return d;
+    };
+    auto sameDeep = [](const DeepImage& a, const DeepImage& b, double eps) {
+        if (a.bounds != b.bounds) return false;
+        for (int y = a.bounds.y1; y < a.bounds.y2; ++y)
+            for (int x = a.bounds.x1; x < a.bounds.x2; ++x) {
+                if (a.count(x, y) != b.count(x, y)) return false;
+                for (int k = 0; k < a.count(x, y); ++k)
+                    for (int c = 0; c < a.nch(); ++c) {
+                        const int bc = b.ch(a.channels[c]);
+                        if (bc < 0) return false;
+                        if (std::fabs(a.sample(x, y)[k * a.nch() + c] - b.sample(x, y)[k * b.nch() + bc]) > eps) return false;
+                    }
+            }
+        return true;
+    };
+    const auto deepDir = std::filesystem::temp_directory_path() / "welder_deep_test";
+    std::filesystem::create_directories(deepDir);
+
+    test("deep: samples are sorted front to back", [&] {
+        DeepImage d = makeDeep();
+        bool sorted = true;
+        for (int y = d.bounds.y1; y < d.bounds.y2; ++y)
+            for (int x = d.bounds.x1; x < d.bounds.x2; ++x)
+                for (int k = 1; k < d.count(x, y); ++k) sorted = sorted && d.sample(x, y)[(k - 1) * d.nch() + d.zi] <= d.sample(x, y)[k * d.nch() + d.zi];
+        CHECK(sorted);
+        CHECK(d.finished());
+        CHECK(d.channels.back() == "ZBack");
+    });
+
+    test("deep EXR round trip: every sample, every compression", [&] {
+        DeepImage d = makeDeep();
+        Format f;
+        f.width = 48;
+        f.height = 36;
+        for (const std::string comp : {"none", "rle", "zips"}) {
+            const std::string p = (deepDir / ("rt_" + comp + ".exr")).string();
+            DeepExrWriteOptions o;
+            o.type = ExrPixelType::Float;
+            o.compression = comp;
+            writeDeepExr(p, d, f, o);
+            DeepExrFile r = readDeepExr(p);
+            CHECK(r.header.format.width == 48 && r.header.format.height == 36);
+            CHECK(r.header.bounds == d.bounds);
+            CHECK(r.image->total() == d.total());
+            CHECK(sameDeep(d, *r.image, 0));
+            CHECK(r.header.compression == comp);
+        }
+        // half colour: close, depths exact
+        const std::string p = (deepDir / "rt_half.exr").string();
+        writeDeepExr(p, d, f, DeepExrWriteOptions{});
+        DeepExrFile r = readDeepExr(p);
+        CHECK(sameDeep(d, *r.image, 2e-3));
+        bool zExact = true;
+        for (size_t i = 0; i < d.total(); ++i) zExact = zExact && d.samples[i * d.nch() + d.zi] == r.image->samples[i * r.image->nch() + r.image->zi];
+        CHECK(zExact);
+        bool threw = false;
+        try {
+            DeepExrWriteOptions bad;
+            bad.compression = "dwaa";
+            writeDeepExr(p, d, f, bad);
+        } catch (const RenderError&) {
+            threw = true;
+        }
+        CHECK(threw);
+        threw = false;
+        try {
+            readDeepExr(p, "nope");
+        } catch (const RenderError&) {
+            threw = true;
+        }
+        CHECK(threw);
+    });
+
+    test("deep: DeepRead flattened matches Read's flattening", [&] {
+        DeepImage d = makeDeep();
+        Format f;
+        f.width = 48;
+        f.height = 36;
+        const std::string p = (deepDir / "flat_match.exr").string();
+        DeepExrWriteOptions o;
+        o.type = ExrPixelType::Float;
+        writeDeepExr(p, d, f, o);
+        auto c = comp(json::array({json{{"name", "R"}, {"type", "Read"}, {"params", {{"file", p}}}},
+                                   json{{"name", "D"}, {"type", "DeepRead"}, {"params", {{"file", p}}}},
+                                   json{{"name", "F"}, {"type", "DeepToImage"}, {"inputs", {"D"}}, {"params", {{"depth", "z"}}}},
+                                   json{{"name", "G"}, {"type", "Grade"}, {"inputs", {"D"}}, {"params", {{"multiply", 2}}}}}),
+                      48, 36);
+        ImagePtr a = render(*c, "R"), b = render(*c, "F", 1, 16), v = render(*c, "D", 1, 32), g = render(*c, "G");
+        double worst = 0, worstZ = 0, worstV = 0, worstG = 0;
+        for (int y = 0; y < 36; ++y)
+            for (int x = 0; x < 48; ++x) {
+                for (const char* ch : {"R", "G", "B", "A"}) {
+                    worst = std::max(worst, (double)std::fabs(px(a, x, y, ch) - px(b, x, y, ch)));
+                    worstV = std::max(worstV, (double)std::fabs(px(v, x, y, ch) - px(b, x, y, ch)));
+                    if (std::string(ch) != "A") worstG = std::max(worstG, (double)std::fabs(px(g, x, y, ch) - 2 * px(b, x, y, ch)));
+                }
+                worstZ = std::max(worstZ, (double)std::fabs(px(a, x, y, "depth.Z") - px(b, x, y, "depth.Z")));
+                // the viewer's flat answer is 1/z
+                const float z = px(b, x, y, "depth.Z");
+                if (z > 0) worstV = std::max(worstV, (double)std::fabs(px(v, x, y, "depth.Z") - 1 / z));
+            }
+        std::printf("  |Read - DeepRead flattened| rgba %.2g, z %.2g; auto-flatten %.2g; Grade on deep %.2g\n", worst, worstZ, worstV, worstG);
+        CHECK(worst < 1e-6);
+        CHECK(worstZ < 1e-6);
+        CHECK(worstV < 1e-6);
+        CHECK(worstG < 1e-5);
+        CHECK(px(b, 10, 10, "id") == px(a, 10, 10, "id"));
+    });
+
+    test("deep: DeepRead -> Write (deep) keeps every sample (tiles assembled)", [&] {
+        DeepImage d = makeDeep();
+        Format f;
+        f.width = 48;
+        f.height = 36;
+        const std::string p = (deepDir / "in.exr").string(), q = (deepDir / "out.####.exr").string();
+        DeepExrWriteOptions o;
+        o.type = ExrPixelType::Float;
+        writeDeepExr(p, d, f, o);
+        // (a 0.2.6 DeepWrite loads as a Write with deep on)
+        const std::string q2 = (deepDir / "rgba.exr").string(), q3 = (deepDir / "flat.exr").string();
+        auto c = comp(json::array({json{{"name", "D"}, {"type", "DeepRead"}, {"params", {{"file", p}}}},
+                                   json{{"name", "W"}, {"type", "DeepWrite"}, {"inputs", {"D"}}, {"params", {{"file", q}, {"datatype", "float"}}}},
+                                   json{{"name", "W2"}, {"type", "Write"}, {"inputs", {"D"}},
+                                        {"params", {{"file", q2}, {"deep", true}, {"channels", "rgb"}, {"compression", "piz"}}}},
+                                   json{{"name", "K"}, {"type", "Constant"}, {"params", {{"color", {0.5, 0.25, 0, 1}}}}},
+                                   json{{"name", "W3"}, {"type", "Write"}, {"inputs", {"K"}}, {"params", {{"file", q3}, {"deep", true}}}}}),
+                      48, 36);
+        CHECK(c->find("W")->type == "Write" && c->find("W")->params.flag("deep", false));
+        EngineOptions eo;
+        eo.tileSize = 16;  // many tiles: the write assembles them
+        Engine e(eo);
+        c->find("W")->execute(e, 7);
+        DeepExrFile r = readDeepExr((deepDir / "out.0007.exr").string());
+        CHECK(sameDeep(d, *r.image, 0));
+        CHECK(r.header.compression == "zips");
+        // rgb asked for: A, Z and ZBack still go; piz (flat only) writes zips; colour as half
+        c->find("W2")->execute(e, 1);
+        DeepExrFile r2 = readDeepExr(q2);
+        CHECK(r2.header.compression == "zips");
+        CHECK(r2.image->channels.size() == 6 && r2.image->ch("ZBack") >= 0 && r2.image->ch("A") >= 0);
+        CHECK(r2.image->total() == d.total());
+        // a flat input: one sample a pixel, infinitely far (no depth.Z)
+        c->find("W3")->execute(e, 1);
+        DeepExrFile r3 = readDeepExr(q3);
+        CHECK(r3.image->count(3, 3) == 1 && std::fabs(r3.image->sample(3, 3)[r3.image->ch("G")] - 0.25f) < 1e-3);
+        CHECK(std::isinf(r3.image->sample(3, 3)[r3.image->zi]));
+        // to .nk: a deep Write is a DeepWrite there
+        const std::string nkText = nk::exportNodes(json::parse(R"([{"name": "W", "type": "Write", "params": {"file": "d.####.exr", "deep": true}},
+            {"name": "F", "type": "Write", "params": {"file": "f.####.exr"}}])")).text;
+        CHECK(nkText.find("DeepWrite {") != std::string::npos && nkText.find("\nWrite {") != std::string::npos);
+        // a request across tile edges is the same as the file
+        DeepPtr part = e.requestDeep(c->find("D"), 1, Box(5, 4, 37, 29));
+        CHECK(sameDeep(*DeepImage::crop(d, Box(5, 4, 37, 29), d.channels), *part, 0));
+        // Write passes its input through (deep samples too)
+        CHECK(e.deepChannels(c->find("W"), 1) == d.channels);
+    });
+
+    test("deep: proxy scale and flat inputs", [&] {
+        DeepImage d = makeDeep();
+        Format f;
+        f.width = 48;
+        f.height = 36;
+        const std::string p = (deepDir / "proxy.exr").string();
+        writeDeepExr(p, d, f, DeepExrWriteOptions{});
+        auto c = comp(json::array({json{{"name", "D"}, {"type", "DeepRead"}, {"params", {{"file", p}}}},
+                                   json{{"name", "K"}, {"type", "Constant"}, {"params", {{"color", {0.2, 0.4, 0.6, 1}}}}},
+                                   json{{"name", "KF"}, {"type", "DeepToImage"}, {"inputs", {"K"}}, {"params", {{"depth", "none"}}}}}),
+                      48, 36);
+        Engine e;
+        e.setScale(0.5);
+        CHECK(c->find("D")->format(e, 1).width == 24);
+        ImagePtr half = renderScaled(*c, "D", 0.5);
+        CHECK(half->bounds.width() <= 24);
+        ImagePtr k = render(*c, "KF");
+        CHECK(k->ch("depth.Z") < 0);
+        CHECK(std::fabs(px(k, 5, 5, "G") - 0.4f) < 1e-6 && std::fabs(px(k, 5, 5, "A") - 1) < 1e-6);
+        Engine e2;
+        DeepPtr kd = e2.requestDeep(c->find("K"), 1, Box(0, 0, 4, 4));
+        CHECK(kd->count(1, 1) == 1 && std::isinf(kd->sample(1, 1)[kd->zi]));
+    });
+    // deep phase 2: inputs made from Constants with DeepFromImage (a constant depth and thickness)
+    auto deepSlab = [](const std::string& name, json color, double z, double vol) {
+        return json::array({json{{"name", name + "_c"}, {"type", "Constant"}, {"params", {{"color", color}}}},
+                            json{{"name", name}, {"type", "DeepFromImage"}, {"inputs", {name + "_c"}},
+                                 {"params", {{"z_from", "constant"}, {"z", z}, {"volume", vol}}}}});
+    };
+    auto withNodes = [](std::initializer_list<json> parts) {
+        json all = json::array();
+        for (auto& p : parts)
+            for (auto& n : p) all.push_back(n);
+        return all;
+    };
+    test("deep: DeepMerge of overlapping volumes matches the analytic answer", [&] {
+        // A: [0, 2] alpha 0.5, red; B: [1, 3] alpha 0.5, green (premultiplied)
+        auto c = comp(withNodes({deepSlab("A", {0.5, 0, 0, 0.5}, 0, 2), deepSlab("B", {0, 0.5, 0, 0.5}, 1, 2),
+                                 json::array({json{{"name", "M"}, {"type", "DeepMerge"}, {"inputs", {"B", "A"}}},
+                                              json{{"name", "F"}, {"type", "DeepToImage"}, {"inputs", {"M"}}, {"params", {{"depth", "z"}}}}})}));
+        ImagePtr f = render(*c, "F");
+        // two uniform fogs of density u = ln 2 / 2 per unit; R = 1 - e^-u + e^-u (1 - e^-2u) / 2, and so on
+        const double u = std::log(2.0) / 2;
+        const double R = (1 - std::exp(-u)) + std::exp(-u) * (1 - std::exp(-2 * u)) / 2;
+        const double G = std::exp(-u) * (1 - std::exp(-2 * u)) / 2 + std::exp(-3 * u) * (1 - std::exp(-u));
+        std::printf("  R %.6f (analytic %.6f), G %.6f (%.6f), A %.6f (0.75)\n", px(f, 3, 3, "R"), R, px(f, 3, 3, "G"), G, px(f, 3, 3, "A"));
+        CHECK(std::fabs(px(f, 3, 3, "R") - R) < 1e-5);
+        CHECK(std::fabs(px(f, 3, 3, "G") - G) < 1e-5);
+        CHECK(std::fabs(px(f, 3, 3, "A") - 0.75) < 1e-5);
+        CHECK(std::fabs(px(f, 3, 3, "depth.Z") - 0) < 1e-6);
+        // the merged samples don't overlap: [0,1] [1,2] [1,2] merged [2,3] = 3 samples
+        Engine e;
+        DeepPtr d = e.requestDeep(c->find("M"), 1, Box(0, 0, 4, 4));
+        CHECK(d->count(1, 1) == 3);
+        // the order of the inputs doesn't matter
+        c->find("M")->inputs = {c->find("A"), c->find("B")};
+        Engine::graphChanged();
+        ImagePtr g = render(*c, "F");
+        CHECK(std::fabs(px(g, 3, 3, "R") - R) < 1e-5 && std::fabs(px(g, 3, 3, "G") - G) < 1e-5);
+    });
+
+    test("deep: hard surfaces merge as over by depth, plus adds, drop hidden", [&] {
+        auto c = comp(withNodes({deepSlab("Near", {0.2, 0, 0, 0.4}, 2, 0), deepSlab("Far", {0, 0, 1, 1}, 5, 0),
+                                 deepSlab("Same", {0, 0.3, 0, 0.3}, 2, 0),
+                                 json::array({json{{"name", "M"}, {"type", "DeepMerge"}, {"inputs", {"Far", "Near"}}, {"params", {{"drop_hidden", true}}}},
+                                              json{{"name", "F"}, {"type", "DeepToImage"}, {"inputs", {"M"}}},
+                                              json{{"name", "P"}, {"type", "DeepMerge"}, {"inputs", {"Same", "Near"}}, {"params", {{"operation", "plus"}}}},
+                                              json{{"name", "PF"}, {"type", "DeepToImage"}, {"inputs", {"P"}}}})}));
+        ImagePtr f = render(*c, "F");
+        CHECK(std::fabs(px(f, 1, 1, "R") - 0.2) < 1e-6);
+        CHECK(std::fabs(px(f, 1, 1, "B") - 0.6) < 1e-6);  // far blue behind 40% near
+        CHECK(std::fabs(px(f, 1, 1, "A") - 1.0) < 1e-6);
+        CHECK(std::fabs(px(f, 1, 1, "depth.Z") - 0.5) < 1e-6);  // 1/z of the nearest
+        ImagePtr p = render(*c, "PF");
+        CHECK(std::fabs(px(p, 1, 1, "R") - 0.2) < 1e-6 && std::fabs(px(p, 1, 1, "G") - 0.3) < 1e-6);
+        CHECK(std::fabs(px(p, 1, 1, "A") - 0.7) < 1e-6);
+        Engine e;
+        CHECK(e.requestDeep(c->find("P"), 1, Box(0, 0, 2, 2))->count(1, 1) == 1);  // same depth: one sample
+    });
+
+    test("deep: holdouts (DeepHoldout, DeepMerge holdout)", [&] {
+        auto c = comp(withNodes({deepSlab("Sub", {1, 0, 0, 1}, 5, 0), deepSlab("Front", {0, 1, 0, 0.6}, 2, 0),
+                                 deepSlab("Back", {0, 1, 0, 0.6}, 8, 0), deepSlab("Fog", {0, 0, 0, 0.5}, 4, 2),
+                                 json::array({json{{"name", "H1"}, {"type", "DeepHoldout"}, {"inputs", {"Sub", "Front"}}},
+                                              json{{"name", "H2"}, {"type", "DeepHoldout"}, {"inputs", {"Sub", "Back"}}},
+                                              json{{"name", "H3"}, {"type", "DeepHoldout"}, {"inputs", {"Sub", "Fog"}}},
+                                              json{{"name", "M"}, {"type", "DeepMerge"}, {"inputs", {"Sub", "Front"}}, {"params", {{"operation", "holdout"}}}},
+                                              json{{"name", "MF"}, {"type", "DeepToImage"}, {"inputs", {"M"}}}})}));
+        ImagePtr h1 = render(*c, "H1"), h2 = render(*c, "H2"), h3 = render(*c, "H3"), m = render(*c, "MF");
+        CHECK(std::fabs(px(h1, 2, 2, "R") - 0.4) < 1e-6 && std::fabs(px(h1, 2, 2, "A") - 0.4) < 1e-6);
+        CHECK(px(h1, 2, 2, "G") == 0);  // the holdout itself isn't in the result
+        CHECK(std::fabs(px(h2, 2, 2, "R") - 1) < 1e-6);  // behind: no effect
+        // a fog [4, 6] with alpha 0.5: the subject at 5 is behind half of it
+        CHECK(std::fabs(px(h3, 2, 2, "R") - std::sqrt(0.5)) < 1e-5);
+        CHECK(std::fabs(px(m, 2, 2, "R") - 0.4) < 1e-6 && std::fabs(px(m, 2, 2, "A") - 0.4) < 1e-6);
+    });
+
+    test("deep: DeepRecolor flattens to the flat colour", [&] {
+        auto c = comp(withNodes({deepSlab("Near", {0.1, 0.1, 0.1, 0.5}, 2, 0), deepSlab("Far", {0.2, 0.2, 0.2, 0.5}, 4, 0),
+                                 json::array({json{{"name", "M"}, {"type", "DeepMerge"}, {"inputs", {"Far", "Near"}}},
+                                              json{{"name", "Flat"}, {"type", "Constant"}, {"params", {{"color", {0.3, 0.6, 0.15, 0.9}}}}},
+                                              json{{"name", "RC"}, {"type", "DeepRecolor"}, {"inputs", {"M", "Flat"}}},
+                                              json{{"name", "RCA"}, {"type", "DeepRecolor"}, {"inputs", {"M", "Flat"}}, {"params", {{"target_alpha", true}}}},
+                                              json{{"name", "F"}, {"type", "DeepToImage"}, {"inputs", {"RC"}}},
+                                              json{{"name", "FA"}, {"type", "DeepToImage"}, {"inputs", {"RCA"}}}})}));
+        ImagePtr f = render(*c, "F"), fa = render(*c, "FA");
+        // without target alpha the colour is the flat one's share of the deep alpha (0.75)
+        CHECK(std::fabs(px(f, 1, 1, "G") - 0.6) < 1e-5 && std::fabs(px(f, 1, 1, "A") - 0.75) < 1e-6);
+        CHECK(std::fabs(px(fa, 1, 1, "G") - 0.6) < 1e-5 && std::fabs(px(fa, 1, 1, "A") - 0.9) < 1e-5);
+        CHECK(std::fabs(px(fa, 1, 1, "B") - 0.15) < 1e-5);
+    });
+
+    test("deep: colour, transform, crop and reformat", [&] {
+        auto c = comp(withNodes({deepSlab("S", {0.25, 0.25, 0.25, 0.5}, 3, 2),
+                                 json::array({json{{"name", "G"}, {"type", "DeepGrade"}, {"inputs", {"S"}}, {"params", {{"multiply", {2, 2, 2, 1}}}}},
+                                              json{{"name", "GL"}, {"type", "DeepGrade"}, {"inputs", {"S"}},
+                                                   {"params", {{"multiply", {2, 2, 2, 1}}, {"limit_z", true}, {"zmin", 10}, {"zmax", 20}}}},
+                                              json{{"name", "CC"}, {"type", "DeepColorCorrect"}, {"inputs", {"S"}}, {"params", {{"saturation", 0}, {"gain", {1, 2, 1, 1}}}}},
+                                              json{{"name", "T"}, {"type", "DeepTransform"}, {"inputs", {"S"}}, {"params", {{"translate", {10, 5}}, {"ztranslate", 1}, {"zscale", 2}}}},
+                                              json{{"name", "Cr"}, {"type", "DeepCrop"}, {"inputs", {"S"}},
+                                                   {"params", {{"use_znear", true}, {"znear", 4}, {"box", {0, 0, 32, 48}}}}},
+                                              json{{"name", "Rf"}, {"type", "DeepReformat"}, {"inputs", {"S"}}, {"params", {{"format", {32, 24}}}}}})}));
+        Engine e;
+        auto one = [&](const std::string& n, int x, int y) { return e.requestDeep(c->find(n), 1, Box(x, y, x + 1, y + 1)); };
+        DeepPtr g = one("G", 4, 4), gl = one("GL", 4, 4), cc = one("CC", 4, 4), t = one("T", 12, 12), cr = one("Cr", 4, 4), cro = one("Cr", 40, 4);
+        CHECK(std::fabs(g->sample(4, 4)[g->ch("R")] - 0.5) < 1e-6 && std::fabs(g->sample(4, 4)[g->ai] - 0.5) < 1e-6);
+        CHECK(std::fabs(gl->sample(4, 4)[gl->ch("R")] - 0.25) < 1e-6);  // outside the depth range
+        CHECK(std::fabs(cc->sample(4, 4)[cc->ch("G")] - 0.5) < 1e-6 && std::fabs(cc->sample(4, 4)[cc->ch("R")] - 0.25) < 1e-6);
+        CHECK(std::fabs(t->sample(12, 12)[t->zi] - 7) < 1e-6 && std::fabs(t->sample(12, 12)[t->zbi] - 11) < 1e-6);
+        CHECK(e.dod(c->find("T"), 1) == Box(10, 5, 74, 53));
+        // crop at z 4 of the slab [3, 5]: the back half, alpha 1 - sqrt(0.5)
+        CHECK(cr->count(4, 4) == 1 && std::fabs(cr->sample(4, 4)[cr->zi] - 4) < 1e-6);
+        CHECK(std::fabs(cr->sample(4, 4)[cr->ai] - (1 - std::sqrt(0.5))) < 1e-6);
+        CHECK(cro->count(40, 4) == 0);
+        CHECK(c->find("Rf")->format(e, 1).width == 32);
+        CHECK(e.dod(c->find("Rf"), 1) == Box(0, 0, 32, 24));
+        ImagePtr rf = render(*c, "Rf");
+        CHECK(std::fabs(px(rf, 31, 23, "A") - 0.5) < 1e-6);
+    });
+    test("deep: ScanlineRender gives every surface; DeepSample; DeepToPoints", [&] {
+        auto c = comp(json::array({{{"name", "Red"}, {"type", "Constant"}, {"params", {{"color", {1, 0, 0, 1}}}}},
+                                   {{"name", "Blue"}, {"type", "Constant"}, {"params", {{"color", {0, 0, 1, 1}}}}},
+                                   {{"name", "Near"}, {"type", "Card"}, {"inputs", {"Red"}}, {"params", {{"translate", {0, 0, -3}}, {"uniform_scale", 0.5}}}},
+                                   {{"name", "Far"}, {"type", "Card"}, {"inputs", {"Blue"}}, {"params", {{"translate", {0, 0, -10}}, {"uniform_scale", 20}}}},
+                                   {{"name", "Sc"}, {"type", "Scene"}, {"inputs", {"Near", "Far"}}},
+                                   {{"name", "Cam"}, {"type", "Camera"}},
+                                   {{"name", "SR"}, {"type", "ScanlineRender"}, {"inputs", {nullptr, "Sc", "Cam"}}},
+                                   {{"name", "F"}, {"type", "DeepToImage"}, {"inputs", {"SR"}}},
+                                   {{"name", "DS"}, {"type", "DeepSample"}, {"inputs", {"SR"}}, {"params", {{"pos", {32, 24}}}}},
+                                   {{"name", "DP"}, {"type", "DeepToPoints"}, {"inputs", {"SR", "Cam"}}, {"params", {{"density", 1}}}}}),
+                      64, 48);
+        Engine e;
+        DeepPtr d = e.requestDeep(c->find("SR"), 1, Box(32, 24, 33, 25));
+        CHECK(d->count(32, 24) == 2);  // the red card and the blue one hidden behind it
+        if (d->count(32, 24) == 2) {
+            CHECK(std::fabs(d->sample(32, 24)[d->zi] - 3) < 1e-3 && std::fabs(d->sample(32, 24)[d->nch() + d->zi] - 10) < 1e-3);
+            CHECK(std::fabs(d->sample(32, 24)[d->ch("R")] - 1) < 1e-4 && std::fabs(d->sample(32, 24)[d->nch() + d->ch("B")] - 1) < 1e-4);
+        }
+        // flattened, it is the ordinary render (but for antialiased edges)
+        ImagePtr flat = render(*c, "SR"), f = render(*c, "F");
+        double worst = 0, worstFar = 0, edgeOff = 0;
+        int edge = 0;
+        for (int y = 0; y < 48; ++y)
+            for (int x = 0; x < 64; ++x) {
+                double dd = 0;
+                for (const char* ch : {"R", "G", "B", "A"}) dd = std::max(dd, (double)std::fabs(px(flat, x, y, ch) - px(f, x, y, ch)));
+                if (dd > 1e-3) ++edge;
+                // where they differ (the near card's outline, its texture's filtered edge part
+                // transparent): deep has the blue card behind showing through, the flat render none
+                if (dd > 1e-3) edgeOff = std::max(edgeOff, std::fabs(px(f, x, y, "R") + px(f, x, y, "B") - 1.0) + std::fabs(px(f, x, y, "A") - 1.0));
+                if (dd > 1e-3 && std::getenv("STRATA_DEEP_DEBUG"))
+                    std::printf("    %d,%d flat %g %g %g %g deep %g %g %g %g\n", x, y, px(flat, x, y, "R"), px(flat, x, y, "G"), px(flat, x, y, "B"),
+                                px(flat, x, y, "A"), px(f, x, y, "R"), px(f, x, y, "G"), px(f, x, y, "B"), px(f, x, y, "A"));
+                worst = std::max(worst, dd);
+                if (px(flat, x, y, "R") == 0) worstFar = std::max(worstFar, std::fabs(1.0 - px(f, x, y, "A")));  // inner mesh edges don't show
+            }
+        std::printf("  flat vs deep flattened: %d edge pixels differ (worst %.3f, red over blue there within %.2g); far card alpha off by %.2g\n", edge,
+                    worst, edgeOff, worstFar);
+        CHECK(edge < 80);  // (the outline of the 22 x 16 pixel card)
+        CHECK(edgeOff < 1e-4);
+        CHECK(worstFar < 1e-4);
+        json si = c->find("DS")->info(e, 1);
+        CHECK(si.value("samples", 0) == 2);
+        CHECK(si["metadata"].contains("sample 02"));
+        auto pts = deepPointsOf(c->find("DP"), 1, &e);
+        CHECK(pts && pts->points.size() > 64 * 48);
+        bool nearPoint = false;
+        for (auto& q : pts->points) nearPoint = nearPoint || (std::fabs(q.z + 3) < 0.01 && std::fabs(q.x) < 0.05 && std::fabs(q.y) < 0.05);
+        CHECK(nearPoint);
+    });
+    test("deep: ZDefocus blurs each sample at its own depth (the background shows through a blurred edge)", [&] {
+        // an opaque red square at 1 in front of an opaque green wall at 10, focused on the wall
+        json nodes = withNodes({deepSlab("Wall", {0, 1, 0, 1}, 10, 0),
+                                json::array({json{{"name", "Sq_r"}, {"type", "Rectangle"}, {"params", {{"area", {32, 16, 64, 48}}, {"color", {1, 0, 0, 1}}}}},
+                                             json{{"name", "Sq"}, {"type", "DeepFromImage"}, {"inputs", {"Sq_r"}}, {"params", {{"z_from", "constant"}, {"z", 1}}}},
+                                             json{{"name", "M"}, {"type", "DeepMerge"}, {"inputs", {"Wall", "Sq"}}},
+                                             json{{"name", "Flat"}, {"type", "DeepToImage"}, {"inputs", {"M"}}},
+                                             json{{"name", "ZD"}, {"type", "ZDefocus"}, {"inputs", {"M"}},
+                                                  {"params", {{"focus_plane", 10}, {"size", 8}, {"maximum", 8}}}},
+                                             json{{"name", "ZF"}, {"type", "ZDefocus"}, {"inputs", {"Flat"}},
+                                                  {"params", {{"focus_plane", 10}, {"size", 8}, {"maximum", 8}}}},
+                                             json{{"name", "ZS"}, {"type", "ZDefocus"}, {"inputs", {"Sq"}},
+                                                  {"params", {{"focus_plane", 10}, {"size", 8}, {"maximum", 8}}}},
+                                             json{{"name", "ZSF"}, {"type", "ZDefocus"}, {"inputs", {"Sq_flat"}},
+                                                  {"params", {{"focus_plane", 10}, {"size", 8}, {"maximum", 8}}}},
+                                             json{{"name", "Sq_flat"}, {"type", "DeepToImage"}, {"inputs", {"Sq"}}}})});
+        auto c = comp(nodes, 96, 64);
+        ImagePtr d = render(*c, "ZD"), f = render(*c, "ZF");
+        // two pixels inside the square's left edge: its blur is part transparent there
+        const double dg = px(d, 34, 32, "G"), dr = px(d, 34, 32, "R"), fg = px(f, 34, 32, "G");
+        std::printf("  inside the edge: deep R %.3f G %.3f A %.3f, flat G %.3f\n", dr, dg, px(d, 34, 32, "A"), fg);
+        CHECK(dg > 0.15);                          // the wall behind shows through
+        CHECK(fg < 0.05);                          // (flattened, there's no wall there to show)
+        CHECK(std::fabs(dr + dg - 1) < 0.08);      // and the two add up to the whole pixel
+        CHECK(std::fabs(px(d, 34, 32, "A") - 1) < 1e-3);
+        // far from the square: the wall as it is
+        CHECK(std::fabs(px(d, 4, 4, "G") - 1) < 1e-4 && std::fabs(px(d, 4, 4, "R")) < 1e-4);
+        // one sample a pixel (a flat image made deep): the same as the flat ZDefocus
+        ImagePtr s = render(*c, "ZS"), sf = render(*c, "ZSF");
+        double worst = 0;
+        for (size_t k = 0; k < s->data.size() && k < sf->data.size(); ++k) worst = std::max(worst, (double)std::fabs(s->data[k] - sf->data[k]));
+        std::printf("  single samples vs flat: max diff %.2g\n", worst);
+        CHECK(s->channels == sf->channels);
+        CHECK(worst < 1e-4);
+    });
+    test("deep GPU: flattening and tidying (DeepMerge) match the CPU", [&] {
+        if (!gpu::available()) {
+            std::printf("  (no GPU: %s)\n", gpu::status().c_str());
+            return;
+        }
+        // random pixels: hard surfaces, volumes (overlapping, touching, inside each other), shared
+        // depths, transparent and opaque samples, samples at infinity
+        std::mt19937 rng(7);
+        std::uniform_real_distribution<float> U(0, 1);
+        const ChannelSet cs = deepChannelsOf(rgbaChannels());
+        DeepImage d(Box(0, 0, 61, 37), cs);
+        const int nc = d.nch();
+        std::vector<uint32_t> offs{0}, tidy;
+        std::vector<float> s;
+        const float inf = std::numeric_limits<float>::infinity();
+        for (int i = 0; i < 61 * 37; ++i) {
+            const int n = i % 11 == 0 ? 0 : (int)(U(rng) * (i % 7 == 0 ? 40 : 6));
+            for (int k = 0; k < n; ++k) {
+                std::vector<float> p(nc);
+                const float a = U(rng) < 0.1f ? 1.0f : U(rng) < 0.1f ? 0.0f : U(rng);
+                p[d.ai] = a;
+                for (const char* c : {"R", "G", "B"}) p[d.ch(c)] = U(rng) * std::max(a, 0.2f);
+                float z0 = std::floor(U(rng) * 8) * 0.5f + 1, z1 = z0;
+                const float r = U(rng);
+                if (r < 0.4f) z1 = z0 + std::floor(U(rng) * 6) * 0.5f + 0.25f;
+                else if (r < 0.45f) z0 = z1 = inf;
+                else if (r < 0.5f) z1 = inf;
+                p[d.zi] = z0;
+                p[d.zbi] = z1;
+                s.insert(s.end(), p.begin(), p.end());
+            }
+            offs.push_back((uint32_t)(s.size() / nc));
+            tidy.push_back(i % 5 == 0 ? 0 : 1);
+        }
+        for (int mode = 0; mode < 4; ++mode) {
+            const DeepCombine cm = mode & 1 ? DeepCombine::Plus : DeepCombine::Over;
+            const bool drop = mode & 2;
+            auto o1 = offs, o2 = offs;
+            auto s1 = s, s2 = s;
+            gpu::setRoute(gpu::RouteMode::Cpu);
+            tidyPixels(o1, s1, tidy, nc, d.zi, d.zbi, d.ai, cm, drop);
+            gpu::setRoute(gpu::RouteMode::Gpu);
+            const auto jobs = gpu::routedGpuJobs("deep_tidy");
+            tidyPixels(o2, s2, tidy, nc, d.zi, d.zbi, d.ai, cm, drop);
+            gpu::setRoute(gpu::RouteMode::Auto);
+            const bool used = gpu::routedGpuJobs("deep_tidy") > jobs;
+            double worst = 0;
+            if (o1 == o2 && std::getenv("STRATA_DEEP_DEBUG"))
+                for (size_t k = 0; k < s1.size(); ++k)
+                    if (std::fabs(s1[k] - s2[k]) > 1e-4) {
+                        size_t smp = k / nc, px = 0;
+                        while (o1[px + 1] <= smp) ++px;
+                        std::printf("    px %zu sample %zu ch %zu: cpu %g gpu %g; in:\n", px, smp - o1[px], k % nc, s1[k], s2[k]);
+                        for (uint32_t q = offs[px]; q < offs[px + 1]; ++q) {
+                            std::printf("     ");
+                            for (int c = 0; c < nc; ++c) std::printf(" %g", s[q * nc + c]);
+                            std::printf("\n");
+                        }
+                        std::printf("    cpu out:\n");
+                        for (uint32_t q = o1[px]; q < o1[px + 1]; ++q) {
+                            std::printf("     ");
+                            for (int c = 0; c < nc; ++c) std::printf(" %g/%g", s1[q * nc + c], s2[q * nc + c]);
+                            std::printf("\n");
+                        }
+                        break;
+                    }
+            if (o1 == o2)
+                for (size_t k = 0; k < s1.size(); ++k)
+                    if (!(s1[k] == s2[k])) worst = std::max(worst, std::isnan(s2[k]) ? 1e9 : (double)(std::fabs(s1[k] - s2[k]) / std::max(1.0f, std::fabs(s1[k]))));
+            std::printf("  tidy %s%s: %u samples in, %u out, same counts %d, max |cpu - gpu| %.2g, gpu used %d\n", cm == DeepCombine::Plus ? "plus" : "over",
+                        drop ? " + drop hidden" : "", offs.back(), o1.back(), o1 == o2, worst, used);
+            CHECK(used);
+            CHECK(o1 == o2);
+            CHECK(worst < 1e-4);
+        }
+        // flatten: the tidy image, whole and through a region larger than it
+        auto o = offs;
+        auto ss = s;
+        gpu::setRoute(gpu::RouteMode::Cpu);
+        tidyPixels(o, ss, tidy, nc, d.zi, d.zbi, d.ai, DeepCombine::Over, false);
+        d.offsets = o;
+        d.samples = ss;
+        for (Box b : {d.bounds, Box(-5, 3, 70, 30)})
+            for (DeepDepthOut dm : {DeepDepthOut::InverseZ, DeepDepthOut::Z}) {
+                Image f1(b, flatChannelsOf(cs)), f2(b, flatChannelsOf(cs));
+                gpu::setRoute(gpu::RouteMode::Cpu);
+                flattenDeep(d, f1, dm);
+                gpu::setRoute(gpu::RouteMode::Gpu);
+                const auto jobs = gpu::routedGpuJobs("deep_flatten");
+                flattenDeep(d, f2, dm);
+                gpu::setRoute(gpu::RouteMode::Auto);
+                double worst = 0;
+                for (size_t k = 0; k < f1.data.size(); ++k)
+                    if (!(f1.data[k] == f2.data[k])) worst = std::max(worst, (double)(std::fabs(f1.data[k] - f2.data[k]) / std::max(1.0f, std::fabs(f1.data[k]))));
+                std::printf("  flatten %dx%d: max |cpu - gpu| %.2g\n", b.width(), b.height(), worst);
+                CHECK(gpu::routedGpuJobs("deep_flatten") > jobs);
+                CHECK(worst < 1e-5);
+            }
     });
     std::printf("\n%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

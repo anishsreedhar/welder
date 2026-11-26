@@ -1,6 +1,6 @@
 # AI nodes and the ML worker
 
-The nodes in the **AI** toolbar run on your NVIDIA GPU through the **ML worker**,
+The nodes in the **AI** toolbar run on your GPU through the **ML worker**,
 a Python process that Welder starts in the background, in the same way ComfyUI
 runs models. The worker never holds up the editor. You press **Run**, keep
 working, and the node shows the result when it's ready.
@@ -34,6 +34,9 @@ Two 3D nodes work without the worker:
    * `venv-corridorkey`: Python 3.12 and PyTorch 2.9.1 (CUDA 12.8) for
      CorridorKey, which needs older numpy and transformers than the others.
 
+   On a PC without an NVIDIA GPU it sets up for the GPU it finds instead (see
+   [AMD and Intel GPUs](#amd-and-intel-gpus)).
+
    It installs [uv](https://astral.sh/uv) to do this if you don't have it. Run
    it again any time: finished steps are kept. Python itself goes in the ML
    home too (`ml\python`), so the whole folder can be copied to another machine
@@ -45,6 +48,36 @@ Two 3D nodes work without the worker:
    resumable and go to `ml\models`. LTX-2.5 itself is 72 GB (the distilled
    transformer, the Gemma text encoder, VAEs and the upscaler). Each IC-LoRA is
    0.3–1.3 GB.
+
+### AMD and Intel GPUs
+
+**Set up ML** looks at the display adapters Windows lists and installs the PyTorch
+build for the best one. NVIDIA (CUDA) runs every AI node. On other GPUs the AI
+masking nodes (TrackMask with its text find and matte refiners, and CorridorKey)
+run on the GPU, and the rest run on the CPU:
+
+| GPU | How PyTorch reaches it | What runs on the GPU |
+|---|---|---|
+| NVIDIA GeForce / RTX | CUDA 12.8 | everything |
+| Intel Arc (A- and B-series, Core Ultra graphics) | PyTorch's XPU build | TrackMask, text find, the matte refiners, CorridorKey, Depth |
+| AMD Radeon on Windows | DirectML (`torch-directml`, in its own `venv-directml`) | TrackMask, text find, the matte refiners, CorridorKey |
+| AMD Radeon on Linux | ROCm 6.4 | everything but gsplat's fast splat kernels (CUDA only) |
+| none of these | the CPU build | everything, slowly |
+
+* The ML section shows what the worker found, for example *running on Intel(R)
+  Arc(TM) B580 Graphics via Intel XPU*, or *AI masking on AMD Radeon RX 7900 XTX via
+  DirectML; other ML nodes on the CPU*.
+* When a backend can't run part of a model (DirectML lacks some of PyTorch's
+  operators), or runs out of memory, the job carries on on the CPU and its log says so.
+* To pick a GPU yourself, run `bin\ml\setup-ml.bat "<ml home>" amd` (or `nvidia`,
+  `intel`, `cpu`), or set `WELDER_ML_GPU` before **Set up ML**. Running setup again
+  after a GPU change swaps the PyTorch builds in place.
+* `WELDER_ML_DEVICE` makes the worker use one backend (`cuda`, `rocm`, `xpu`,
+  `directml`, `cpu`), and `WELDER_ML_DEVICE_INDEX` picks among several GPUs. Stop
+  the worker in the ML section after changing them.
+* DirectML runs on PyTorch 2.4.1 (the newest `torch-directml` supports), with
+  full-precision maths, so it's slower than CUDA on a comparable card. TrackMask
+  loads SAM 2.1 for every job there instead of keeping it loaded between jobs.
 
 ### Installing models by hand
 
@@ -404,8 +437,11 @@ worker started by hand reads the model folders Welder uses from
 * The plates CorridorKey reads are staged as uncompressed EXRs inside the job's folder
   in Welder's cache folder (Preferences), on the machine that runs the key, and
   deleted when it's done: a fast local disk there is quickest.
-* **Needs:** an NVIDIA RTX 30-series or newer (CUDA), and `venv-corridorkey` (the
-  panel says **Update ML** when it's missing).
+* **Needs:** a GPU: an NVIDIA RTX 30-series or newer (CUDA) works best; Intel Arc
+  (XPU) and AMD Radeon (DirectML on Windows, ROCm on Linux) run it too (see
+  [AMD and Intel GPUs](#amd-and-intel-gpus)). Away from CUDA it picks its temporal
+  window from the card's memory instead of measuring free memory. And `venv-corridorkey`
+  (the panel says **Update ML** when it's missing).
 * **It isn't part of Welder.** Its licence can't be bundled with Welder's AGPL, so
   **Download** (about 5 GB) fetches CorridorKey's own code from Corridor Digital's
   GitHub (at the commit Welder was tested with) and runs its `download_weights.py`,
@@ -448,11 +484,27 @@ worker started by hand reads the model folders Welder uses from
   object. **Re-find Text Objects** looks for them again every few frames while tracking and
   picks up an object again where its track lost it, matched by position and look.
 * **model:** large (best), base_plus, small, tiny (quickest) - all SAM 2.1, Apache 2.0.
+* **leak cleanup** (default 2): SAM's mask is the 0 crossing of its logits. Parts of an object
+  where it was never at least this sure (its faint leaks into the background) are dropped, as
+  are specks. 0 keeps everything. Changing it tracks again.
+* **Edges at full size.** SAM always makes a 256 x 256 mask of the frame (it sees a 1024 x 1024
+  picture), so on a 4.6K plate one step of its mask is ~18 x 12 plate px. TrackMask keeps its
+  logits and cuts them at the plate's own size, with an antialiased edge **edge width** px wide.
+  The edge is sharp, and the matte is solid 1 inside however sure the model was. Tracks made
+  before this show their soft matte, as RAW does.
 * **mask output:** how the tracked matte is shown.
   * **RAW Mask**: the model's matte as it comes (older saves keep this look).
   * **Hard Mask**: cut at a threshold.
   * **Guided Smooth Mask** (the default): smoothed along the plate's own edges with a guided
     filter (radius, edge detail). On the GPU for large frames.
+  * **SAM High-Res**: after Track (or with **Refine edges**), SAM's image model segments the
+    tracked edge again in tiles of **tile** plate px (1024: one mask step per 4 plate px), only
+    along the edge, prompted with the tracked matte there. A tile's answer is used only within a
+    few of the tracked mask's steps of its edge, faded in from the tile's sides. Where it disagrees
+    with the track away from the edge (it lost the object in that tile), the tile is ignored. The
+    result is then smoothed like Guided Smooth. It uses the weights TrackMask tracked with
+    (nothing to install), with the GPU's memory checked (one tile at a time, then the CPU). It is
+    slower than tracking: about 6-15 tiles a frame for a person filling a 4.6K plate.
   * **ViTMatte** / **MEMatte**: a matting model works out the edges. **Refine edges** (also
     started by itself after Track) crops each object's box plus **crop padding** %, makes a
     trimap (sure inside / the band between **trimap inside** and **trimap outside** px / sure
@@ -468,7 +520,9 @@ worker started by hand reads the model folders Welder uses from
   softness (px), levels (black, white, gamma), **temporal smoothing** (blends each pixel with
   the same pixel up to 4 frames either side, weighted by how far and how different, so edge
   flicker settles and real motion is kept), invert; **output** alpha (the plate with the
-  matte in alpha, optionally premultiplied) or matte (white on black). Grow, edge offset
+  matte in alpha, optionally premultiplied) or matte (white on black). The viewer shows the alpha
+  channel, and TrackMask's matte output, without the view transform (a matte is data: under
+  an ACES view, 1.0 would otherwise look ~0.75 grey). Grow, edge offset
   and the guided filter run on the GPU for large frames, with the CPU as the fallback.
 * **Convert to Splines** turns the tracked mattes into animated Bezier shapes. Each object's outlines
   are traced (holes come out as shapes blended minus), corners are kept as cusp points, and the

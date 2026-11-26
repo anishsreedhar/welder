@@ -8,6 +8,7 @@
 #include <string_view>
 #include <vector>
 
+#include "core/Deep.h"
 #include "core/Schema.h"
 #include "App.h"
 #include "nodes/Roto.h"
@@ -89,6 +90,14 @@ struct ViewerState {
     std::string builtWith;   // the compare settings the textures were built with
     int wipeDrag = 0;        // 1 dragging the centre, 2 the rotate handle
     bool hasB = false;       // the textures hold a B image
+    // A deep node's samples under the cursor, listed once it rests on a pixel for a moment
+    bool deepReadout = true;
+    int deepX = 0, deepY = 0;
+    double deepFrame = 0, deepSince = 0;
+    uint64_t deepContent = 0;
+    std::string deepNode;
+    bool deepAsked = false;
+    DeepPtr deepAt;
 };
 
 // The Viewer's 3D mode (Tab): Maya-style navigation and manipulators.
@@ -280,6 +289,11 @@ struct TrackerState {
     int exportChoice = 0;              // the panel's export menu
     float keyScroll = 0;               // keyframe snapshots: scroll (in snapshots)
     double lastDragAt = -1;            // when a track was last moved (zoom window "on track change")
+    // the panel's Fill gaps settings
+    int fillMethod = 0;                // auto | from other tracks | smooth | linear
+    bool fillInside = true, fillBefore = false, fillAfter = true;
+    float fillRedo = 0;                // also refill keys with an error above this (0: off)
+    int fillMaxGap = 0;                // longest gap filled (0: any)
 };
 
 // PlanarTracker tools in the viewer.
@@ -531,6 +545,12 @@ void drawDialogs(App& app, UiState& ui);
 // Python (ScriptEditor.cpp): the Script Editor window and the Scripts menu.
 void drawScriptEditor(App& app, UiState& ui);
 void drawScriptsMenu(App& app, UiState& ui);
+// A node's Python button (its ui "python_buttons"): runs its code, welder.this_node() = the node.
+bool runPythonButton(App& app, const std::string& node, const std::string& label);
+// The node's Python buttons, a row on its panel (nothing when it has none).
+void drawPythonButtons(App& app, Node* n);
+// The Node tab's editor for them: add, rename, edit and remove.
+void editPythonButtons(App& app, Node* n);
 
 // Shared actions
 // I / O: set the in / out point at the current frame, or take it off when it is already there.
@@ -609,6 +629,14 @@ void rotoExportPoints(App& app, UiState& ui, Node* n);
 bool rotoSetToolByName(App& app, UiState& ui, Node* n, const std::string& name);
 void addReferenceLink(App& app, Node* link, bool stabilize);
 void drawFlowPaintViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec2 p1, const ViewXf& xf, bool hovered);
+// VanishingCamera (VanishTool.cpp): lines, origin and the solved camera in the viewer; its keys;
+// its panel rows (info "vanishcam" / "vanishlines") and buttons ("vcam_..."): true when handled.
+Node* activeVanishCam(App& app);
+void drawVanishCamViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec2 p1, const ViewXf& xf, bool hovered);
+bool vanishCamHotkeys(App& app, UiState& ui);
+bool vanishCamInfo(App& app, Node* n, const std::string& info);
+bool vanishCamButton(App& app, Node* n, const std::string& action);
+ImVec2 vanishTestScreen(double x, double y);  // (UI tests) an image position on screen in the viewer
 // Markup (MarkupTool.cpp): its tool row over the viewer, drawing / editing in the viewer, its panel,
 // and Save image (the node at the current frame, at scale 1 / 0.5 / 0.25, written to `path`).
 Node* activeMarkup(App& app);
@@ -687,6 +715,7 @@ void testSelectInBrowser(const std::string& name);
 void graphDropFiles(App& app, UiState& ui, const std::vector<std::string>& paths, ImVec2 screenPos);
 extern ImVec2 gTestKnobPos;  // STRATA_TEST_ALTKEY (Properties.cpp)
 extern ImVec2 gTest3DOrigin, gTest3DSize;  // STRATA_TEST_SCENE3D: the (first) 3D view drawn (Viewer3D.cpp)
+extern ImVec2 gTestDeepHover;  // STRATA_TEST_DEEPHOVER: the screen position of the pixel to rest on (Viewer.cpp)
 extern ImVec2 gTestXformCentre;  // STRATA_TEST_VIEWERCLICK: the open Transform's centre handle (TransformTool.cpp)
 bool graphTestPipe(App& app, UiState& ui, int frame);
 

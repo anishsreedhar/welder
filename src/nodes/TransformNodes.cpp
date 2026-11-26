@@ -3,6 +3,7 @@
 // Transforms map output pixel centres back into the input with the inverse
 // matrix and resample with the selected filter. Pixel centres sit at +0.5.
 #include <cmath>
+#include <cstring>
 
 #include "Cam3D.h"
 #include "CameraTrackerNode.h"
@@ -128,6 +129,7 @@ bool gpuWarp(const Image& src, const Mat3& inv, const Filter& f, const SampleOpt
         int lobes;
         float footX, footY;
         int flags;
+        float wt;
     } pc{};
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c) pc.m[r * 3 + c] = L.m[r][c];
@@ -148,6 +150,61 @@ bool gpuWarp(const Image& src, const Mat3& inv, const Filter& f, const SampleOpt
     return gpu::run("warp", {{src.data.data(), src.data.size() * sizeof(float)}, {m.data(), m.size() * sizeof(int)}},
                     {{out.data.data(), out.data.size() * sizeof(float)}}, &pc, sizeof pc, (uint32_t)(pc.ow + 15) / 16,
                     (uint32_t)(pc.oh + 15) / 16);
+}
+
+// Motion blur on the GPU: the average of several resamples of one source (inverse matrices
+// invs), each a dispatch adding its weighted sample into the output, in one submission (the
+// source goes up once). The CPU sums the same samples in the same order.
+bool gpuWarpBlur(const Image& src, const std::vector<Mat3>& invs, const Filter& f, const std::vector<SampleOpts>& sos,
+                 const std::vector<bool>& affine, const std::vector<int>& map, Image& out) {
+    const int n = out.nch();
+    if (n == 0 || n > 16 || src.bounds.empty() || out.bounds.area() < 4096 || invs.empty() || !gpu::available() || !gpu::hasFloat64())
+        return false;
+    const Box& sb = src.bounds;
+    const Box& ob = out.bounds;
+    struct Push {
+        double m[9];
+        int sw, sh, sn, ow, oh, on;
+        int kind;
+        float B, C;
+        int lobes;
+        float footX, footY;
+        int flags;
+        float wt;
+    };
+    static_assert(sizeof(Push) <= 128, "push constants");
+    std::vector<gpu::Dispatch> ds;
+    const float w = 1.0f / invs.size();
+    for (size_t k = 0; k < invs.size(); ++k) {
+        const Mat3 L = Mat3::translate(-sb.x1, -sb.y1) * invs[k] * Mat3::translate(ob.x1, ob.y1);
+        Push pc{};
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) pc.m[r * 3 + c] = L.m[r][c];
+        pc.sw = sb.width();
+        pc.sh = sb.height();
+        pc.sn = src.nch();
+        pc.ow = ob.width();
+        pc.oh = ob.height();
+        pc.on = n;
+        pc.kind = f.kind == Filter::Impulse ? 0 : f.kind == Filter::Bilinear ? 1 : f.kind == Filter::BC ? 2 : 3;
+        pc.B = f.B;
+        pc.C = f.C;
+        pc.lobes = f.lobes;
+        pc.footX = affine[k] ? sos[k].footX : -1.0f;
+        pc.footY = affine[k] ? sos[k].footY : -1.0f;
+        pc.flags = (sos[k].clamp ? 1 : 0) | (sos[k].blackOutside ? 2 : 0) | 4 | (k == 0 ? 8 : 0);
+        pc.wt = w;
+        gpu::Dispatch d;
+        std::memcpy(d.push, &pc, sizeof pc);
+        d.gx = (uint32_t)(pc.ow + 15) / 16;
+        d.gy = (uint32_t)(pc.oh + 15) / 16;
+        ds.push_back(d);
+    }
+    std::vector<int> m(map.begin(), map.end());
+    return gpu::runSequence("warp",
+                            {{src.data.data(), nullptr, src.data.size() * sizeof(float)}, {m.data(), nullptr, m.size() * sizeof(int)},
+                             {nullptr, out.data.data(), out.data.size() * sizeof(float)}},
+                            ds);
 }
 
 // Shared implementation for matrix-driven nodes.
@@ -244,6 +301,7 @@ public:
             return;
         }
         // motion blur: the average of the transforms across the shutter
+        if (renderBlurGpu(a, ch.src, Ms, out)) return;
         std::fill(out.data.begin(), out.data.end(), 0.0f);
         Image tmp(out.bounds, out.channels);
         const float w = 1.0f / Ms.size();
@@ -251,6 +309,38 @@ public:
             renderOne(a, ch.src, M, tmp);
             for (size_t i = 0; i < out.data.size(); ++i) out.data[i] += tmp.data[i] * w;
         }
+    }
+    // Motion blur in one GPU submission: the source fetched once (the union of what each sample
+    // needs), every sample a dispatch. False: the caller renders the samples one by one.
+    bool renderBlurGpu(RenderArgs& a, Node* src0, const std::vector<Mat3>& Ms, Image& out) {
+        if (!gpu::available() || out.bounds.area() < 4096) return false;
+        const Filter f = filter();
+        const bool black = blackOutside();
+        Box need;
+        std::vector<Mat3> invs;
+        std::vector<SampleOpts> sos;
+        std::vector<bool> affine;
+        const Box in = black ? Box() : a.engine.dod(src0, a.frame);
+        for (const Mat3& M : Ms) {
+            if (M.isIntegerTranslate() && black) return false;  // renderOne's exact shift
+            Mat3 inv = M.inverse();
+            SampleOpts so = footprint(inv, (a.region.x1 + a.region.x2) / 2.0, (a.region.y1 + a.region.y2) / 2.0);
+            Box nd = transformBox(inv, a.region, pad() + (int)std::ceil(std::max(so.footX, so.footY) * f.radius()));
+            if (!black) {  // as renderOne: only real pixels, clamped to the input's bbox
+                if (in.empty() || nd.intersect(in).empty()) return false;
+                nd = nd.intersect(in);
+            }
+            need = need.empty() ? nd : need.unite(nd);
+            so.clamp = clampFilter();
+            so.blackOutside = black;
+            invs.push_back(inv);
+            sos.push_back(so);
+            affine.push_back(std::fabs(inv.m[2][0]) < 1e-15 && std::fabs(inv.m[2][1]) < 1e-15);
+        }
+        ImagePtr src = a.fetch(src0, need);
+        std::vector<int> map(out.nch());
+        for (int c = 0; c < out.nch(); ++c) map[c] = src->ch(out.channels[c]);
+        return gpuWarpBlur(*src, invs, f, sos, affine, map, out);
     }
     void renderOne(RenderArgs& a, Node* src0, const Mat3& M, Image& out) {
         Mat3 inv = M.inverse();
@@ -387,7 +477,8 @@ public:
 
 // Tracker: tracks (see Track.h) and, from them, the Transform tab's transform:
 // transform ("none" | "stabilize" | "stabilize 1pt" | "match-move" | "match-move 1pt" |
-// "remove jitter" | "add jitter"), reference_frame, jitter_period, smooth [t, r, s],
+// "remove jitter" | "add jitter" | "corner pin match-move" | "corner pin stabilize": the
+// perspective from the enabled T tracks, see track::pinSolve), reference_frame, jitter_period, smooth [t, r, s],
 // then filter / clamp / black_outside / motionblur / shutter / shutteroffset as Transform's.
 class TrackerNode : public TransformNode {
 public:
@@ -397,15 +488,14 @@ public:
     Mat3 matrixAt(Engine& e, double f) override {
         Mat3 M;
         if (mode() == "none") return M;
-        track::Affine A = track::trackerTransform(params.data, f);
-        const double sc = e.scale();
-        M.m[0][0] = A.a;
-        M.m[0][1] = A.b;
-        M.m[0][2] = A.tx * sc;
-        M.m[1][0] = A.c;
-        M.m[1][1] = A.d;
-        M.m[1][2] = A.ty * sc;
-        return M;
+        return toRenderScale(track::trackerMatrix(params.data, f), e.scale());
+    }
+    // A full-resolution 3x3 at render scale: S H S^-1.
+    static Mat3 toRenderScale(const track::H9& H, double sc) {
+        Mat3 M;
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) M.m[i][j] = H.m[i * 3 + j];
+        return Mat3::scale(sc, sc) * M * Mat3::scale(1 / sc, 1 / sc);
     }
 };
 
@@ -647,6 +737,11 @@ public:
         const double sc = e.scale();
         if (n->type == "Tracker") {  // whatever the tracker itself is set to do
             if (!n->params.has("tracks")) return std::nullopt;
+            if (track::isPinMode(n->params.str("transform", "none"))) {  // the tracker's corner pin
+                track::Fit fit = track::pinSolve(n->params.data["tracks"], ref, f);
+                if (!fit.ok) return std::nullopt;
+                return TrackerNode::toRenderScale(fit.H, sc);
+            }
             track::Solve so = track::solve(n->params.data["tracks"], ref, f);
             if (!so.ok) return std::nullopt;
             track::Affine A = so.matrix();
