@@ -6,6 +6,8 @@
 #include <cmath>
 
 #include "NodeUtils.h"
+#include "ColorCorrect.h"
+#include <map>
 
 namespace strata {
 
@@ -16,7 +18,7 @@ inline int comp4(const std::string& ch) {
     if (ch == "R" || (ch.size() > 2 && ch.compare(ch.size() - 2, 2, ".R") == 0)) return 0;
     if (ch == "G" || (ch.size() > 2 && ch.compare(ch.size() - 2, 2, ".G") == 0)) return 1;
     if (ch == "B" || (ch.size() > 2 && ch.compare(ch.size() - 2, 2, ".B") == 0)) return 2;
-    if (ch == "A") return 3;
+    if (ch == "A" || (ch.size() > 2 && ch.compare(ch.size() - 2, 2, ".A") == 0)) return 3;
     return 0;
 }
 
@@ -43,15 +45,14 @@ public:
         const bool invUp = params.flag("invert_unpremult", false);
         std::vector<int> uidx;
         if (ua >= 0)
-            for (int i : idx)
-                if (i != ua) uidx.push_back(i);
+            for (int i = 0; i < out.nch(); ++i)
+                if (i != ua && (coupledChannels() || std::find(idx.begin(), idx.end(), i) != idx.end())) uidx.push_back(i);
         auto alphaAt = [&](const float* p) { return invUp ? 1.0f - p[ua] : p[ua]; };
         if (ua >= 0)
             for (size_t k = 0; k < (size_t)out.bounds.width() * out.bounds.height(); ++k) {
                 float* p = out.data.data() + k * out.nch();
                 float al = alphaAt(p);
-                if (al > 1e-8f)
-                    for (int i : uidx) p[i] /= al;
+                for (int i : uidx) p[i] = al != 0.0f ? p[i] / al : 0.0f;
             }
         apply(a, out, idx, comps);
         if (ua >= 0) {  // premultiply again, by the input's alpha
@@ -59,8 +60,18 @@ public:
             for (size_t k = 0; k < (size_t)out.bounds.width() * out.bounds.height(); ++k) {
                 float* p = out.data.data() + k * out.nch();
                 float al = invUp ? 1.0f - sp[k * src->nch() + src->ch(up)] : sp[k * src->nch() + src->ch(up)];
-                if (al > 1e-8f)
-                    for (int i : uidx) p[i] *= al;
+                for (int i : uidx) p[i] *= al;
+            }
+        }
+
+        // Coupled operations read every RGB component, but only selected
+        // channels may change (including when unpremultiplying internally).
+        if (coupledChannels()) {
+            for (int i = 0; i < out.nch(); ++i) {
+                if (std::find(idx.begin(), idx.end(), i) != idx.end()) continue;
+                const int si = src->ch(out.channels[i]);
+                for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
+                    for (int x = out.bounds.x1; x < out.bounds.x2; ++x) out.px(x, y)[i] = src->at(x, y, si);
             }
         }
 
@@ -70,13 +81,13 @@ public:
             for (int x = out.bounds.x1; x < out.bounds.x2; ++x) {
                 float w = mm.weight(x, y);
                 float* o = out.px(x, y);
-                const float* s = src->px(x, y);
-                for (int i : idx) o[i] = lerpf(s[i], o[i], w);
+                for (int i : idx) o[i] = lerpf(src->at(x, y, src->ch(out.channels[i])), o[i], w);
             }
     }
 
 protected:
     virtual std::string defaultChannels() const { return "rgb"; }
+    virtual bool coupledChannels() const { return false; }
     // Modify `out` in place for the selected channel indices.
     virtual void apply(RenderArgs& a, Image& out, const std::vector<int>& idx, const std::vector<int>& comps) = 0;
 
@@ -229,12 +240,30 @@ class SaturationNode : public PixelOp {
 
 // ColorCorrect: master / shadows / midtones / highlights, each with
 // saturation, contrast (pivot 0.18), gamma, gain, offset. Range weights use
-// smooth falloffs similar to the .nk default lookup curves.
+// editable smooth curves with derived midtones.
 class ColorCorrectNode : public PixelOp {
+public:
+    ChannelSet channels(Engine& e, double frame) override {
+        ChannelSet ch = Node::channels(e, frame);
+        if (params.flag("inject", false) && input(1) && channelIndex(ch, "mask.a") < 0) ch.push_back("mask.a");
+        return ch;
+    }
+    void render(RenderArgs& a, Image& out) override {
+        PixelOp::render(a, out);
+        if (params.flag("inject", false) && input(1)) {
+            auto mask = a.fetch(input(1), a.region);
+            const int mc = mask->ch(resolveChannelName(params.str("mask_channel", "A"))), oc = out.ch("mask.a");
+            if (oc >= 0)
+                for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
+                    for (int x = out.bounds.x1; x < out.bounds.x2; ++x) out.px(x, y)[oc] = mask->at(x, y, mc);
+        }
+    }
+private:
+    bool coupledChannels() const override { return true; }
     struct Range {
         std::array<double, 4> sat, con, gam, gain, off;
         bool identity() const {
-            for (int c = 0; c < 3; ++c)
+            for (int c = 0; c < 4; ++c)
                 if (sat[c] != 1 || con[c] != 1 || gam[c] != 1 || gain[c] != 1 || off[c] != 0) return false;
             return true;
         }
@@ -245,43 +274,83 @@ class ColorCorrectNode : public PixelOp {
                 params.vec<4>(k("gamma"), f, {1, 1, 1, 1}), params.vec<4>(k("gain"), f, {1, 1, 1, 1}),
                 params.vec<4>(k("offset"), f, {0, 0, 0, 0})};
     }
-    static void applyRange(const Range& R, float rgb[3]) {
-        float l = luma709(rgb[0], rgb[1], rgb[2]);
-        for (int c = 0; c < 3; ++c) {
-            float v = l + (rgb[c] - l) * (float)R.sat[c];
+    static float luminance(float r, float g, float b) { return .2125f * r + .7154f * g + .0721f * b; }
+    static void applyRange(const Range& R, float rgb[4]) {
+        float l = luminance(rgb[0], rgb[1], rgb[2]);
+        for (int c = 0; c < 4; ++c) {
+            float v = c == 3 ? rgb[c] : l + (rgb[c] - l) * (float)R.sat[c];
             if (R.con[c] != 1) v = 0.18f * std::pow(std::max(v, 0.0f) / 0.18f, (float)R.con[c]) + std::min(v, 0.0f);
-            if (R.gam[c] != 1 && v > 0 && R.gam[c] > 0) v = std::pow(v, (float)(1.0 / R.gam[c]));
+            if (R.gam[c] != 1 && v > 0 && R.gam[c] != 0) v = std::pow(v, (float)(1.0 / R.gam[c]));
             v = v * (float)R.gain[c] + (float)R.off[c];
             rgb[c] = v;
         }
     }
-    static float smooth(float e0, float e1, float x) {
-        float t = std::clamp((x - e0) / (e1 - e0), 0.0f, 1.0f);
-        return t * t * (3 - 2 * t);
-    }
-    void apply(RenderArgs& a, Image& out, const std::vector<int>&, const std::vector<int>&) override {
+    void apply(RenderArgs& a, Image& out, const std::vector<int>& idx, const std::vector<int>& comps) override {
         Range M = range("", a.frame), S = range("shadows", a.frame), Mi = range("midtones", a.frame),
               H = range("highlights", a.frame);
-        int r = out.ch("R"), g = out.ch("G"), b = out.ch("B");
-        if (r < 0 || g < 0 || b < 0) return;
         const bool idM = M.identity(), idS = S.identity(), idMi = Mi.identity(), idH = H.identity();
+        const json lookup = params.has("lookup") ? params.data["lookup"] : cc::defaultLookup();
+        const cc::RangeCurve shadow(lookup, "shadow"), highlight(lookup, "highlight");
+        const bool test = params.flag("test", false);
+        const float preserve = params.flag("enable_mix_luminance", true)
+                                   ? (float)std::clamp(params.num("mix_luminance", a.frame, 0), 0.0, 1.0) : 0.0f;
+        struct Group {
+            std::array<int, 4> ch = {-1, -1, -1, -1};
+            std::vector<std::pair<int, int>> selected;
+        };
+        std::map<std::string, Group> groups;
+        for (size_t k = 0; k < idx.size(); ++k) {
+            const std::string& name = out.channels[idx[k]];
+            const auto dot = name.rfind('.');
+            const std::string prefix = dot == std::string::npos ? "" : name.substr(0, dot + 1);
+            const bool standard = name == prefix + std::string(1, "RGBA"[comps[k]]);
+            Group& group = groups[standard ? prefix : prefix + "#" + name];
+            for (int c = 0; c < 4; ++c) group.ch[c] = out.ch(prefix + std::string(1, "RGBA"[c]));
+            group.selected.emplace_back(idx[k], comps[k]);
+        }
+        for (const auto& [_, group] : groups)
         for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
             for (int x = out.bounds.x1; x < out.bounds.x2; ++x) {
                 float* p = out.px(x, y);
-                float l = luma709(p[r], p[g], p[b]);
-                float ws = 1.0f - smooth(0.0f, 0.09f, l);
-                float wh = smooth(0.5f, 1.0f, l);
-                float wm = std::max(0.0f, 1.0f - ws - wh);
-                float base[3] = {p[r], p[g], p[b]};
+                float base[4] = {};
+                for (int c = 0; c < 4; ++c) if (group.ch[c] >= 0) base[c] = p[group.ch[c]];
+                if (group.ch[0] < 0 && group.ch[1] < 0 && group.ch[2] < 0)
+                    base[0] = base[1] = base[2] = p[group.selected.front().first];
+                const float l = luminance(base[0], base[1], base[2]);
+                const std::array<float, 3> original = {base[0], base[1], base[2]};
+                const float ws = (float)shadow.eval(l), wh = (float)highlight.eval(l), wm = 1 - ws - wh;
                 if (!idM) applyRange(M, base);
-                float s[3] = {base[0], base[1], base[2]}, m[3] = {base[0], base[1], base[2]},
-                      h[3] = {base[0], base[1], base[2]};
+                float s[4], m[4], h[4], result[4];
+                std::copy(base, base + 4, s); std::copy(base, base + 4, m); std::copy(base, base + 4, h);
                 if (!idS) applyRange(S, s);
                 if (!idMi) applyRange(Mi, m);
                 if (!idH) applyRange(H, h);
-                p[r] = ws * s[0] + wm * m[0] + wh * h[0];
-                p[g] = ws * s[1] + wm * m[1] + wh * h[1];
-                p[b] = ws * s[2] + wm * m[2] + wh * h[2];
+                for (int c = 0; c < 4; ++c) result[c] = base[c] + ws * (s[c] - base[c]) + wm * (m[c] - base[c]) + wh * (h[c] - base[c]);
+                if (preserve > 0) {
+                    // The classic luminance mix works in sRGB-encoded values.
+                    // The raw corrected components enter its luminance in R/G/B
+                    // order; adjusted components are written separately. Verified
+                    // numerically against Nuke 15, including HDR and partial mix.
+                    auto encode = [](double v) { return v <= .0031308 ? 12.92 * v : 1.055 * std::pow(v, 1 / 2.4) - .055; };
+                    auto decode = [](double v) { return v <= .04045 ? v / 12.92 : std::pow((v + .055) / 1.055, 2.4); };
+                    double encoded[3] = {encode(original[0]), encode(original[1]), encode(original[2])};
+                    auto lum = [&]() { return .2126 * encoded[0] + .7152 * encoded[1] + .0722 * encoded[2]; };
+                    const double originalLum = lum();
+                    for (int c = 0; c < 3; ++c) {
+                        bool selected = false;
+                        for (auto [_, component] : group.selected) if (component == c) selected = true;
+                        if (!selected) continue;
+                        encoded[c] = encode(result[c]);
+                        result[c] = (float)decode(encoded[c] + preserve * (originalLum - lum()));
+                    }
+                }
+                // Grey levels identify the dominant range; green/magenta
+                // show the continuous falloff against that classification.
+                if (test) {
+                    const float shade = ws > wm + 1e-6f && ws > wh + 1e-6f ? 0 : wh > wm + 1e-6f ? 1 : .25f;
+                    result[0] = result[2] = shade; result[1] = wh + .25f * wm;
+                }
+                for (auto [ch, c] : group.selected) p[ch] = result[c];
             }
     }
 };

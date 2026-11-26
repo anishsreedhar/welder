@@ -50,6 +50,69 @@ class Tokenizer(unittest.TestCase):
             nk2strata.vector(nk2strata.Word("{parent.size}", "brace"))
 
 
+class ColorCorrect(unittest.TestCase):
+    def test_reference_clipboard_controls(self):
+        _, _, nodes = convert("""
+set cut_paste_input [stack 0]
+version 15.0 v5
+push $cut_paste_input
+ColorCorrect {
+ master 0
+ saturation_panelDropped true
+ contrast_panelDropped true
+ gamma_panelDropped true
+ gain_panelDropped true
+ name ColorCorrect1
+ selected true
+ xpos 316
+ ypos -88
+}
+""")
+        cc = nodes["ColorCorrect1"]
+        self.assertEqual(cc["type"], "ColorCorrect")
+        self.assertEqual((cc["ui"]["x"], cc["ui"]["y"]), (316, -88))
+        self.assertEqual(set(cc["ui"]["cc_controls"]), {"saturation", "contrast", "gamma", "gain"})
+        self.assertTrue(cc["ui"]["cc_controls"]["gain"]["wheel"])
+        self.assertNotIn("master", cc["params"])
+
+    def test_ranges_and_mask_options(self):
+        _, report, nodes = convert("""
+ColorCorrect {
+ name CC
+ channels {rgba.red rgba.blue}
+ shadows.gain {2 1 1 1}
+ lookup {shadow {curve x0 1 x0.2 0} midtone {curve x0 0 x1 0} highlight {curve x0.4 0 x1 1}}
+ test true
+ inject true
+ mix_luminance 0.75
+ enable_mix_luminance false
+ maskChannelInput none
+ unpremult rgba.alpha
+ invert_unpremult true
+ mix 0.5
+}
+""")
+        p = nodes["CC"]["params"]
+        self.assertEqual(p["lookup"], {"shadow": [[0, 1], [.2, 0]], "highlight": [[.4, 0], [1, 1]]})
+        self.assertEqual(p["channels"], ["R", "B"])
+        self.assertEqual(p["mix_luminance"], .75)
+        self.assertFalse(p["enable_mix_luminance"])
+        self.assertEqual(p["unpremult"], "A")
+        self.assertTrue(p["invert_unpremult"])
+        self.assertEqual(p["mask_channel"], "none")
+        self.assertTrue(p["test"] and p["inject"])
+
+    def test_positional_ranges(self):
+        _, _, nodes = convert("""
+ColorCorrect {
+ name CC
+ lookup {{curve x0 1 x0.1 0} {curve x0 0 x1 0} {curve x0.6 0 x1 1}}
+}
+""")
+        self.assertEqual(nodes["CC"]["params"]["lookup"]["shadow"], [[0, 1], [.1, 0]])
+        self.assertEqual(nodes["CC"]["params"]["lookup"]["highlight"], [[.6, 0], [1, 1]])
+
+
 class Graph(unittest.TestCase):
     def test_stack_order_top_is_input0(self):
         _, _, n = convert("""

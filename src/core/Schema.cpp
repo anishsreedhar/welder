@@ -1,5 +1,6 @@
 #include "Schema.h"
 #include "nodes/NoiseLib.h"
+#include "nodes/ColorCorrect.h"
 #include "Studio.h"
 
 #include <map>
@@ -188,7 +189,8 @@ std::vector<KnobDef> ccRange(const std::string& pre) {
     r.push_back(Div(pre.empty() ? "master" : pre.c_str()));
     for (auto [n, def, hi] : std::vector<std::tuple<const char*, double, double>>{
              {"saturation", 1, 4}, {"contrast", 1, 4}, {"gamma", 1, 4}, {"gain", 1, 4}, {"offset", 0, 1}}) {
-        KnobDef d = Col(n, n, def, n == std::string("offset") ? -1 : 0, hi);
+        const double upper = n == std::string("gamma") ? 5 : hi;
+        KnobDef d = Col(n, n, def, 2 * def - upper, upper);
         d.name = k(n);
         r.push_back(d);
     }
@@ -1498,12 +1500,29 @@ std::vector<NodeDef> build() {
                             Same(B("white_clamp", "white clamp", false))}),
                  ""});
     {
-        std::vector<KnobDef> k = ccRange("");
+        std::vector<KnobDef> k = {Ch("channels", "channels", "rgb")};
+        auto master = ccRange("");
+        k.insert(k.end(), master.begin(), master.end());
         for (const char* r : {"shadows", "midtones", "highlights"}) {
             auto rr = ccRange(r);
             k.insert(k.end(), rr.begin(), rr.end());
         }
-        d.push_back({"ColorCorrect", "Color", colorMask(k), ""});
+        k.push_back(OnTab(B("test", "test", false), "Ranges"));
+        k.push_back(OnTab({"lookup", "", Knob::Curves, cc::defaultLookup(), 0, 1,
+                           {"shadow", "midtone", "highlight"},
+                           "Edit shadow and highlight weights; midtone = 1 - shadow - highlight."}, "Ranges"));
+        k.push_back(OnTab(Div(""), "Ranges"));
+        k.push_back(OnTab(Width(C("mask_channel", "mask", "A", {}), 150), "Ranges"));
+        k.push_back(OnTab(Same(B("inject", "inject", false)), "Ranges"));
+        k.push_back(OnTab(Same(B("invert_mask", "invert", false)), "Ranges"));
+        k.push_back(OnTab(Same(B("fringe", "fringe", false)), "Ranges"));
+        k.push_back(OnTab(Width(C("unpremult", "(un)premult by", "none", {}), 150), "Ranges"));
+        k.push_back(OnTab(Same(B("invert_unpremult", "invert", false)), "Ranges"));
+        k.push_back(OnTab(B("enable_mix_luminance", "mix luminance", true), "Ranges"));
+        k.push_back(OnTab(Same(EnableIf(F("mix_luminance", "", 0, 0, 1), "enable_mix_luminance=true"), true), "Ranges"));
+        k.push_back(OnTab(F("mix", "mix", 1, 0, 1), "Ranges"));
+        d.push_back({"ColorCorrect", "Color", k,
+                     "Correct master, shadows, midtones and highlights; edit tonal weights in Ranges."});
     }
     d.push_back({"Saturation", "Color",
                  colorMask({Ch("channels", "channels", "rgb"), F("saturation", "saturation", 1, 0, 4),

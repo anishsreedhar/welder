@@ -29,6 +29,7 @@
 #include "nodes/MeshEdit.h"
 #include "nodes/PrecompNode.h"
 #include "nodes/Curves.h"
+#include "nodes/ColorCorrect.h"
 #include "nodes/TextRender.h"
 #include <thread>
 #include "core/Engine.h"
@@ -610,6 +611,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
         }
     }
     gKeyHovered = false;
+    bool keyDrawn = false;
     ImGui::BeginGroup();
     kit::takeAltClick();  // nothing left over from another knob
     // expression-driven: purple (red when it fails); animated: blue
@@ -648,8 +650,10 @@ void numericKnob(Ctx& c, const KnobDef& k) {
         if (k.noSlider) return;
         ImGui::SameLine();
         double sv = fv;
-        if (kit::tickSlider("##s", &sv, k.lo, k.hi, std::max(40.0f, sliderRoom - fw - ImGui::GetStyle().ItemSpacing.x), k.logSlider,
-                            isInt))
+        const float sw = std::max(40.0f, sliderRoom - fw - ImGui::GetStyle().ItemSpacing.x);
+        const bool cc = c.node->type == "ColorCorrect" && k.type == Knob::Color;
+        if (cc ? kit::colorCorrectSlider("##s", &sv, defs[0], k.hi - defs[0], sw)
+               : kit::tickSlider("##s", &sv, k.lo, k.hi, sw, k.logSlider, isInt))
             commit(comp, sv);
         startGesture();
     };
@@ -729,6 +733,102 @@ void numericKnob(Ctx& c, const KnobDef& k) {
             ImGui::SameLine();
             if (ImGui::Button(k.button.c_str())) buttonAction(c, k.name + ":button");
         }
+    } else if (k.type == Knob::Color && c.node->type == "ColorCorrect") {
+        const json controls = c.node->ui.value("cc_controls", json::object());
+        const json state = controls.contains(k.name) ? controls[k.name] : json::object();
+        const bool unequal = !(cur[0] == cur[1] && cur[1] == cur[2] && cur[2] == cur[3]);
+        const bool wheel = state.value("wheel", false);
+        const bool split = wheel || state.value("split", unequal);
+        auto setState = [&](const char* key, bool on) {
+            const std::string name = c.node->name, knob = k.name, field = key;
+            c.app.edit([name, knob, field, on](Comp& comp) {
+                if (Node* node = comp.find(name)) node->ui["cc_controls"][knob][field] = on;
+            });
+        };
+        const float icon = ImGui::GetFrameHeight(), spacing = ImGui::GetStyle().ItemSpacing.x;
+        const float controlsX = ImGui::GetCursorScreenPos().x;
+        const float rowW = std::max(100.0f, avail - 3 * (icon + spacing));
+        // Keep the compact field/slider first, and expansion controls at the right.
+        if (split) ImGui::Dummy(ImVec2(rowW, icon));
+        else scalarRow(-1, false, rowW);
+        ImGui::SameLine();
+        float col[4] = {(float)cur[0], (float)cur[1], (float)cur[2], (float)cur[3]};
+        if (ImGui::ColorEdit4("##sw", col, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_Float |
+                             ImGuiColorEditFlags_HDR | ImGuiColorEditFlags_NoLabel)) {
+            for (int i = 0; i < 4; ++i) if (col[i] != (float)cur[i]) commit(i, col[i]);
+        }
+        startGesture();
+        ImGui::SameLine();
+        if (ImGui::Button("##wheel", ImVec2(icon, icon))) setState("wheel", !wheel);
+        {
+            ImVec2 a = ImGui::GetItemRectMin();
+            const ImVec2 center(a.x + icon * .5f, a.y + icon * .5f);
+            for (int i = 0; i < 12; ++i) {
+                float r, g, b;
+                ImGui::ColorConvertHSVtoRGB(i / 12.0f, .85f, 1, r, g, b);
+                const float angle = i * 6.2831853f / 12;
+                ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(center.x + std::cos(angle) * icon * .22f,
+                    center.y + std::sin(angle) * icon * .22f), icon * .13f, ImGui::GetColorU32(ImVec4(r, g, b, 1)), 8);
+            }
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s the color wheel", wheel ? "Hide" : "Show");
+        ImGui::SameLine();
+        if (ImGui::SmallButton(split ? "1" : "4")) { setState("split", !split); if (wheel) setState("wheel", false); }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(split ? "Collapse channel sliders (values are kept)" : "Show four channel sliders");
+        if (!k.noAnim) { keyButton(c, k, n, cur, defs); keyDrawn = true; }
+        if (split) {
+            const float top = ImGui::GetCursorScreenPos().y;
+            const float wheelSize = std::min(94.0f, ImGui::GetFrameHeightWithSpacing() * 4 - spacing);
+            float sliderX = controlsX;
+            if (wheel) {
+                ImGui::SetCursorScreenPos(ImVec2(controlsX, top));
+                ImGui::InvisibleButton("##disk", ImVec2(wheelSize, wheelSize));
+                const ImVec2 center(controlsX + wheelSize * .5f, top + wheelSize * .5f);
+                const float radius = wheelSize * .47f;
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                // A circular HSV disc: neutral at the center, pure hues at the rim.
+                for (int ring = 12; ring >= 1; --ring)
+                    for (int segment = 0; segment < 64; ++segment) {
+                        const float t0 = segment * 6.2831853f / 64, t1 = (segment + 1) * 6.2831853f / 64;
+                        float r, g, b;
+                        ImGui::ColorConvertHSVtoRGB((segment + .5f) / 64, ring / 12.0f, 1, r, g, b);
+                        const float rad = radius * ring / 12;
+                        dl->AddTriangleFilled(center, ImVec2(center.x + rad * std::cos(t0), center.y + rad * std::sin(t0)),
+                            ImVec2(center.x + rad * std::cos(t1), center.y + rad * std::sin(t1)), ImGui::GetColorU32(ImVec4(r, g, b, 1)));
+                    }
+                float hue, sat, value;
+                ImGui::ColorConvertRGBtoHSV(std::max(col[0], 0.0f), std::max(col[1], 0.0f), std::max(col[2], 0.0f), hue, sat, value);
+                const ImVec2 marker(center.x + radius * sat * std::cos(hue * 6.2831853f), center.y + radius * sat * std::sin(hue * 6.2831853f));
+                dl->AddCircleFilled(marker, 3.5f, IM_COL32(255, 255, 255, 255));
+                dl->AddCircle(marker, 3.5f, IM_COL32(25, 25, 25, 255));
+                if (ImGui::IsItemActive() && ImGui::IsMouseDown(0) && !ImGui::GetIO().KeyAlt) {
+                    const ImVec2 mouse = ImGui::GetIO().MousePos;
+                    float angle = std::atan2(mouse.y - center.y, mouse.x - center.x) / 6.2831853f;
+                    if (angle < 0) angle += 1;
+                    const float saturation = std::min(1.0f, std::hypot(mouse.x - center.x, mouse.y - center.y) / radius);
+                    ImGui::ColorConvertHSVtoRGB(angle, saturation, value > 0 ? value : 1.0f, col[0], col[1], col[2]);
+                    for (int i = 0; i < 3; ++i) commit(i, col[i]);
+                }
+                startGesture();
+                sliderX += wheelSize + spacing;
+            }
+            const char* names[] = {"R", "G", "B", "A"};
+            for (int i = 0; i < 4; ++i) {
+                ImGui::SetCursorScreenPos(ImVec2(sliderX, top + i * ImGui::GetFrameHeightWithSpacing()));
+                ImGui::PushID(i);
+                const float fw = std::round(ImGui::GetFontSize() * 4.5f);
+                double val = cur[i];
+                if (kit::valueField("##component", &val, fw, names[i], false, dragSpeed)) commit(i, val);
+                startGesture();
+                ImGui::SameLine();
+                if (kit::colorCorrectSlider("##componentSlider", &val, defs[i], k.hi - defs[i],
+                                   std::max(30.0f, avail - (sliderX - controlsX) - fw - spacing))) commit(i, val);
+                startGesture();
+                ImGui::PopID();
+            }
+            ImGui::SetCursorScreenPos(ImVec2(controlsX, top + 4 * ImGui::GetFrameHeightWithSpacing()));
+            ImGui::Dummy(ImVec2(1, 0));
+        }
     } else if (k.type == Knob::Color) {
         // classic: one slider drives all channels; expand for per-channel values.
         static std::set<std::string> expanded;
@@ -803,7 +903,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
             c.app.message(c.node->name + "." + k.name + ": key at frame " + fb);
         }
     }
-    if (!k.noAnim) keyButton(c, k, n, cur, defs);
+    if (!k.noAnim && !keyDrawn) keyButton(c, k, n, cur, defs);
     ImGui::EndGroup();
     // right-click over the knob: expose it as an input (the keyframe button keeps its own menu)
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) && ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
@@ -1125,6 +1225,7 @@ bool condOk(const Node* n, const std::string& cond);
 // Named lookup curves (ColorLookup, HueCorrect, AddMix...): a list of the curves to pick from, and a
 // graph: click on the curve to add a point, drag points, double-click a point to delete it.
 void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
+    const bool ranges = c.node->type == "ColorCorrect" && k.name == "lookup";
     struct State {
         std::string sel;
         int drag = -1;
@@ -1138,6 +1239,15 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
     json val = stt.dragging ? stt.working : (pv && pv->is_object() ? *pv : k.def);
     if (!val.is_object()) val = json::object();
     auto curveOf = [&](const std::string& n) -> json {
+        if (ranges && n == "midtone") {
+            json points = json::array();
+            cc::RangeCurve shadow(val, "shadow"), highlight(val, "highlight");
+            for (int i = 0; i <= 100; ++i) {
+                const double x = i / 100.0;
+                points.push_back({x, 1 - shadow.eval(x) - highlight.eval(x)});
+            }
+            return points;
+        }
         if (val.contains(n) && val[n].is_array()) return val[n];
         if (k.def.is_object() && k.def.contains(n)) return k.def[n];
         return json::array({json::array({k.lo, k.lo}), json::array({k.hi, k.hi})});
@@ -1145,7 +1255,8 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
     if (stt.sel.empty() || std::find(k.options.begin(), k.options.end(), stt.sel) == k.options.end())
         stt.sel = k.options.empty() ? "" : k.options[0];
     const double period = c.node->type == "HueCorrect" ? k.hi - k.lo : 0;
-    auto curveColour = [](const std::string& n) -> ImU32 {
+    auto curveColour = [ranges](const std::string& n) -> ImU32 {
+        if (ranges) return n == "shadow" ? IM_COL32(90, 130, 250, 255) : n == "midtone" ? IM_COL32(220, 100, 180, 255) : IM_COL32(220, 220, 235, 255);
         std::string l = n;
         for (auto& ch : l) ch = (char)std::tolower((unsigned char)ch);
         if (l == "red" || l == "r" || l.find("r_") == 0 || l.find("red") != std::string::npos) return IM_COL32(230, 80, 80, 255);
@@ -1173,6 +1284,8 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
         ImGui::PopStyleColor();
         ImGui::PopID();
     }
+    const bool derived = ranges && stt.sel == "midtone";
+    ImGui::BeginDisabled(derived);
     if (ImGui::SmallButton("reset")) {
         c.app.checkpoint();
         std::string s = stt.sel;
@@ -1183,11 +1296,13 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
             else j[s] = d;
         });
     }
+    ImGui::EndDisabled();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("reset the selected curve");
     ImGui::EndGroup();
     ImGui::SameLine();
     // the graph
-    const float w = std::max(120.0f, ImGui::GetContentRegionAvail().x - 4), h = std::clamp(w * 0.6f, 140.0f, 260.0f);
+    const float w = std::max(120.0f, ImGui::GetContentRegionAvail().x - 4);
+    const float h = ranges ? std::clamp(w * 1.05f, 240.0f, 440.0f) : std::clamp(w * 0.6f, 140.0f, 260.0f);
     ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     double ylo = std::min(0.0, k.lo), yhi = std::max(1.0, k.hi);
@@ -1220,10 +1335,17 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
                                         hue((i + 1) / 60.0f), hue((i + 1) / 60.0f), hue(i / 60.0f));
         }
     }
-    for (int g = 0; g <= 4; ++g) {  // grid
-        const float gx = p0.x + w * g / 4, gy = p0.y + h * g / 4;
-        dl->AddLine(ImVec2(gx, p0.y), ImVec2(gx, p0.y + h), IM_COL32(55, 55, 55, 255));
-        dl->AddLine(ImVec2(p0.x, gy), ImVec2(p0.x + w, gy), IM_COL32(55, 55, 55, 255));
+    const int divisions = ranges ? 10 : 4;
+    for (int g = 0; g <= divisions; ++g) {  // grid
+        const float gx = p0.x + w * g / divisions, gy = p0.y + h * g / divisions;
+        const ImU32 grid = ranges ? IM_COL32(48, 73, 45, 255) : IM_COL32(55, 55, 55, 255);
+        dl->AddLine(ImVec2(gx, p0.y), ImVec2(gx, p0.y + h), grid);
+        dl->AddLine(ImVec2(p0.x, gy), ImVec2(p0.x + w, gy), grid);
+        if (ranges) {
+            char text[16]; std::snprintf(text, sizeof text, "%.1f", g / 10.0);
+            const float tx = std::min(gx + 2, p0.x + w - ImGui::CalcTextSize(text).x - 2);
+            dl->AddText(ImVec2(tx, p0.y + h - ImGui::GetTextLineHeight()), IM_COL32(128, 158, 110, 255), text);
+        }
     }
     {  // y = 0 and y = 1
         ImVec2 a = toS(k.lo, 0), b = toS(k.hi, 0);
@@ -1233,17 +1355,20 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
     }
     auto drawCurve = [&](const std::string& n, bool selected) {
         LookupCurve cv = LookupCurve::fromJson(curveOf(n), {}, period);
+        const cc::RangeCurve rangeCurve(val, n == "shadow" ? "shadow" : "highlight");
         ImU32 col = curveColour(n);
         if (!selected) col = (col & 0x00ffffff) | 0x70000000;
         ImVec2 prev;
         for (int i = 0; i <= 200; ++i) {
             const double x = k.lo + (k.hi - k.lo) * i / 200.0;
-            ImVec2 s = toS(x, cv.pts.empty() ? x : cv.eval(x));
+            double y = cv.pts.empty() ? x : cv.eval(x);
+            if (ranges && n != "midtone") y = rangeCurve.eval(x);
+            ImVec2 s = toS(x, y);
             s.y = std::clamp(s.y, p0.y - 2, p0.y + h + 2);
             if (i) dl->AddLine(prev, s, col, selected ? 2.0f : 1.0f);
             prev = s;
         }
-        if (selected)
+        if (selected && !(ranges && n == "midtone"))
             for (auto& [x, y] : cv.pts) dl->AddCircleFilled(toS(x, y), 4, col);
     };
     dl->PushClipRect(p0, ImVec2(p0.x + w, p0.y + h), true);
@@ -1275,7 +1400,7 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
             j[s] = np;
         });
     };
-    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+    if (!derived && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
         int i = nearest();
         if (i >= 0 && pts.size() > 1) {
             c.app.checkpoint();
@@ -1284,14 +1409,14 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
         }
         stt.drag = -1;
         stt.dragging = false;
-    } else if (ImGui::IsItemActivated()) {
+    } else if (!derived && ImGui::IsItemActivated()) {
         int i = nearest();
         c.app.checkpoint();
         if (i < 0) {  // a new point on the curve (or where clicked, away from it)
             double x, y;
             fromS(m, x, y);
             LookupCurve cv = LookupCurve::fromJson(pts, {}, period);
-            const double cy = cv.pts.empty() ? x : cv.eval(x);
+            const double cy = ranges ? cc::RangeCurve(val, stt.sel.c_str()).eval(x) : cv.pts.empty() ? x : cv.eval(x);
             if (std::fabs(toS(x, cy).y - m.y) < 10) y = cy;
             pts.push_back(json::array({x, y}));
             commit(pts);
@@ -1312,7 +1437,8 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
             // stay between the neighbours
             const double lo = stt.drag > 0 ? wp[stt.drag - 1][0].get<double>() + 1e-4 : (period > 0 ? k.lo : -1e9);
             const double hi = stt.drag + 1 < (int)wp.size() ? wp[stt.drag + 1][0].get<double>() - 1e-4 : (period > 0 ? k.hi : 1e9);
-            x = std::clamp(x, lo, hi);
+            x = std::clamp(x, ranges ? std::max(k.lo, lo) : lo, ranges ? std::min(k.hi, hi) : hi);
+            if (ranges) y = std::clamp(y, 0.0, 1.0);
             if (ImGui::GetIO().KeyShift) y = wp[stt.drag][1].get<double>();  // shift: sideways only
             if (ImGui::GetIO().KeyCtrl) x = wp[stt.drag][0].get<double>();   // ctrl: up and down only
             wp[stt.drag] = json::array({x, y});
@@ -1332,7 +1458,8 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
     if (ImGui::IsItemHovered()) {
         double x, y;
         fromS(m, x, y);
-        ImGui::SetTooltip("%s  x %.3f  y %.3f\nclick: add / drag a point, double-click: delete\nshift-drag: sideways, ctrl-drag: up / down",
+        if (derived) ImGui::SetTooltip("Midtone is derived: 1 - shadow - highlight. Edit those curves to change it.");
+        else ImGui::SetTooltip("%s  x %.3f  y %.3f\nclick: add / drag a point, double-click: delete\nshift-drag: sideways, ctrl-drag: up / down",
                           stt.sel.c_str(), x, y);
     }
     (void)avail;
@@ -1484,8 +1611,10 @@ void channelsKnob(Ctx& c, const KnobDef& k, float avail) {
     };
     // the layer menu
     const float menuW = std::min(avail * 0.4f, std::round(ImGui::GetFontSize() * 11));
-    if (kit::beginCombo("##layer", layer.c_str(), menuW)) {
+    const bool ccRgb = c.node->type == "ColorCorrect" && layer == "rgba" && on == std::set<std::string>{"R", "G", "B"};
+    if (kit::beginCombo("##layer", ccRgb ? "rgb" : layer.c_str(), menuW)) {
         std::vector<std::string> opts = abRow ? std::vector<std::string>{"rgba"} : std::vector<std::string>{"none", "all", "rgba"};
+        if (c.node->type == "ColorCorrect") opts.insert(opts.begin() + 2, "rgb");
         for (auto& l : layers)
             if (std::find(opts.begin(), opts.end(), l) == opts.end()) opts.push_back(l);
         if (std::find(opts.begin(), opts.end(), layer) == opts.end()) opts.push_back(layer);
@@ -1493,7 +1622,8 @@ void channelsKnob(Ctx& c, const KnobDef& k, float avail) {
             if (ImGui::Selectable(o.c_str(), o == layer)) {
                 std::set<std::string> all;
                 for (auto& ch : layerChannels(o)) all.insert(ch);
-                store(o, all);
+                if (o == "rgb") all.erase("A");
+                store(o == "rgb" ? "rgba" : o, all);
             }
         ImGui::EndCombo();
     }
@@ -1621,6 +1751,7 @@ void knobBody(Ctx& c, const KnobDef& k) {
         }
     } else if (k.type == Knob::Choice) {
         std::string cur = getString(c.node, k.name, k.def.is_string() ? k.def.get<std::string>() : "");
+        if (c.node->type == "ColorCorrect" && k.name == "mask_channel" && !c.node->input(1) && !findParam(c.node, k.name)) cur = "none";
         if (k.name == "file_type" && !findParam(c.node, k.name)) {  // Write: from the file's extension
             std::string f = getString(c.node, "file", "");
             auto dot = f.rfind('.');
@@ -1633,7 +1764,21 @@ void knobBody(Ctx& c, const KnobDef& k) {
             size_t idx = (size_t)std::atof(cur.c_str());
             if (idx < k.options.size()) cur = k.options[idx];
         }
-        const std::vector<std::string> opts = k.options.empty() ? c.node->knobChoices(k.name) : k.options;
+        std::vector<std::string> opts = k.options.empty() ? c.node->knobChoices(k.name) : k.options;
+        if (c.node->type == "ColorCorrect" && (k.name == "mask_channel" || k.name == "unpremult")) {
+            opts = {"none", "R", "G", "B", "A"};
+            const int input = k.name == "mask_channel" ? 1 : 0;
+            if (Node* in = c.node->input(input))
+                for (const auto& ch : c.app.nodeInfo(in->name).channels)
+                    if (std::find(opts.begin(), opts.end(), ch) == opts.end()) opts.push_back(ch);
+            if (std::find(opts.begin(), opts.end(), cur) == opts.end()) opts.push_back(cur);
+            bool enabled = cur != "none";
+            if (kit::checkbox("##enabled", &enabled)) {
+                c.app.checkpoint();
+                change(c, k.name, [enabled](json& j) { j = enabled ? "A" : "none"; });
+            }
+            ImGui::SameLine();
+        }
         if (kit::beginCombo("##c", cur.c_str(), k.width > 0 ? k.width : std::min(avail, 220.0f))) {
             for (auto& o : opts)
                 if (ImGui::Selectable(o.c_str(), o == cur)) {

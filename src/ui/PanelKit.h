@@ -28,6 +28,9 @@ bool altClickItem();
 bool takeAltClick();
 // A slider with tick marks. `log`: finer near the low end. One-sided ranges fill up to the value.
 bool tickSlider(const char* id, double* v, double lo, double hi, float width, bool log = false, bool isInt = false);
+// ColorCorrect: signed scale centered on its neutral value, numbered ticks,
+// and a thin vertical rectangular handle.
+bool colorCorrectSlider(const char* id, double* v, double neutral, double extent, float width);
 // A checkbox; its label turns the accent colour when on.
 bool checkbox(const char* label, bool* v, const char* tip = nullptr);
 // A menu with the field's colour.

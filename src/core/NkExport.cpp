@@ -11,6 +11,7 @@
 #include <set>
 
 #include "Comp.h"
+#include "nodes/ColorCorrect.h"
 
 namespace strata::nk {
 
@@ -638,6 +639,27 @@ struct Writer {
             } else if (type == "ColorCorrect") {
                 for (std::string rng : {"", "shadows.", "midtones.", "highlights."})
                     for (const char* k : {"saturation", "contrast", "gamma", "gain", "offset"}) copy((rng + k).c_str());
+                copy("mix_luminance");
+                for (const char* k : {"test", "inject", "enable_mix_luminance"})
+                    if (has(k)) raw(k, p.value(k, false) ? "true" : "false");
+                if (has("lookup") && p["lookup"].is_object()) {
+                    const cc::RangeCurve shadow(p["lookup"], "shadow"), highlight(p["lookup"], "highlight");
+                    std::string text = "{";
+                    for (const char* name : {"shadow", "midtone", "highlight"}) {
+                        text += std::string(name) + " {curve";
+                        for (int i = 0; i <= 100; ++i) {
+                            const double x = i / 100.0, s = shadow.eval(x), h = highlight.eval(x);
+                            const double y = std::string(name) == "shadow" ? s : std::string(name) == "highlight" ? h : 1 - s - h;
+                            text += " x" + fmt(x) + " " + fmt(y);
+                        }
+                        text += "} ";
+                    }
+                    raw("lookup", text + "}");
+                    warn("range curves sampled for .nk export");
+                }
+                if (n.contains("ui") && n["ui"].contains("cc_controls") && n["ui"]["cc_controls"].is_object())
+                    for (auto& [key, state] : n["ui"]["cc_controls"].items())
+                        if (state.is_object() && state.value("wheel", false)) raw(key + "_panelDropped", "true");
             } else if (type == "Saturation") {
                 copy("saturation");
                 if (has("mode") && p["mode"] != "Rec 709") raw("mode", word(p["mode"].get<std::string>()));

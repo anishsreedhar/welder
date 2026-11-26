@@ -1930,6 +1930,15 @@ class Translator:
                 except ValueError:
                     pass
         node["ui"] = dict(ui, nk_class=klass)
+        if klass == "ColorCorrect":
+            controls = {}
+            for prefix in ("", "shadows.", "midtones.", "highlights."):
+                for knob in ("saturation", "contrast", "gamma", "gain", "offset"):
+                    key = prefix + knob
+                    if str(knobs.get(key + "_panelDropped", "false")) in ("true", "1"):
+                        controls[key] = {"wheel": True, "split": True}
+            if controls:
+                node["ui"]["cc_controls"] = controls
         tc = nk_color(knobs["tile_color"]) if "tile_color" in knobs else None
         if tc and stype not in ("Backdrop", "StickyNote"):
             node["ui"]["tile_color"] = tc
@@ -2417,7 +2426,26 @@ class Translator:
                     for knob in ("saturation", "contrast", "gamma", "gain", "offset"):
                         num(rng + knob, dest=rng + knob)
                 if "lookup" in k:
-                    warn("custom shadow/highlight ranges (lookup) are approximated with default curves")
+                    curves = {name.rstrip("s"): points for name, points in parse_lut(k["lookup"]).items()
+                              if name in ("shadow", "shadows", "highlight", "highlights")}
+                    if not curves:
+                        for name, body in zip(("shadow", "midtone", "highlight"), split_words(str(k["lookup"]))):
+                            curves.update(parse_lut(name + " {" + str(body) + "}"))
+                    curves = {name.rstrip("s"): points for name, points in curves.items()
+                              if name in ("shadow", "shadows", "highlight", "highlights")}
+                    if curves:
+                        params["lookup"] = curves
+                        warn("range control points imported with Welder's smooth monotone interpolation")
+                    else:
+                        warn("could not read custom range curves; using the defaults")
+                for knob in ("mix_luminance",):
+                    num(knob, dest=knob)
+                for knob, default in (("enable_mix_luminance", True), ("test", False), ("inject", False)):
+                    if knob in k:
+                        params[knob] = flag(knob, default)
+                if "maskChannelInput" in k:
+                    ch = str(k["maskChannelInput"])
+                    params["mask_channel"] = "none" if ch == "none" else channel_name(ch)
             elif klass == "Saturation":
                 num("saturation", dest="saturation")
                 if "mode" in k:
@@ -2440,6 +2468,8 @@ class Translator:
                 if flag("invert_unpremult"):
                     params["invert_unpremult"] = True
             common_mix_mask()
+            if klass == "ColorCorrect" and str(k.get("maskChannelInput", "")) == "none":
+                params["mask_channel"] = "none"
             self.translated += 1
             return self.emit(nk_name, klass, stype, [main[0] if main else None] + masks[:1], params, k)
 

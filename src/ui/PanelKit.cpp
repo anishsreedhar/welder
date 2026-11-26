@@ -164,6 +164,61 @@ bool tickSlider(const char* id, double* v, double lo, double hi, float width, bo
     return changed;
 }
 
+bool colorCorrectSlider(const char* id, double* v, double neutral, double extent, float width) {
+    const float h = ImGui::GetFrameHeight();
+    width = std::max(30.0f, width);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton(id, ImVec2(width, h));
+    altClickItem();
+    const bool hot = ImGui::IsItemHovered();
+    const bool active = ImGui::IsItemActive() && !ImGui::GetIO().KeyAlt;
+    const float x0 = p.x + 5, x1 = p.x + width - 5;
+    const double lo = neutral - extent, hi = neutral + extent;
+    bool changed = false;
+    if (active) {
+        double t = std::clamp((double)(ImGui::GetIO().MousePos.x - x0) / (x1 - x0), 0.0, 1.0);
+        double value = lo + t * (hi - lo);
+        // A small detent makes the exact neutral easy to reach.
+        if (std::fabs(ImGui::GetIO().MousePos.x - (x0 + x1) * .5f) < 2) value = neutral;
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) value = neutral;
+        if (value != *v) { *v = value; changed = true; }
+    }
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float trackY = std::round(p.y + h * .32f);
+    const float halfHeight = std::max(4.0f, std::round(h * .23f));
+    const ImU32 tick = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+    dl->AddLine(ImVec2(x0, trackY), ImVec2(x1, trackY), kTrack, 2);
+    const int divisions = extent >= 2 ? (int)std::round(extent * 2) : 8;
+    const float fontSize = std::max(8.0f, ImGui::GetFontSize() * .68f);
+    float lastTextRight = -1e9f;
+    for (int i = 0; i <= divisions * 4; ++i) {
+        const float t = (float)i / (divisions * 4);
+        const float x = x0 + t * (x1 - x0);
+        const bool major = i % 4 == 0;
+        dl->AddLine(ImVec2(x, trackY - (major ? 5 : 3)), ImVec2(x, trackY), tick);
+        if (!major) continue;
+        const double value = lo + (hi - lo) * t;
+        char label[24];
+        std::snprintf(label, sizeof label, "%.3g", std::fabs(value) < 1e-7 ? 0.0 : value);
+        const float textW = ImGui::GetFont()->CalcTextSizeA(fontSize, FLT_MAX, 0, label).x;
+        const float tx = std::clamp(x - textW * .5f, p.x, p.x + width - textW);
+        // Retain the central default label even in a narrow properties bin.
+        const bool center = i == divisions * 2;
+        if (center || tx >= lastTextRight + 5) {
+            dl->AddText(ImGui::GetFont(), fontSize, ImVec2(tx, trackY + halfHeight + 1), tick, label);
+            lastTextRight = tx + textW;
+        }
+    }
+    const float hx = x0 + (float)std::clamp((*v - lo) / (hi - lo), 0.0, 1.0) * (x1 - x0);
+    const float halfWidth = std::max(2.0f, std::round(h * .09f));
+    const ImVec2 a(hx - halfWidth, trackY - halfHeight), b(hx + halfWidth, trackY + halfHeight);
+    dl->AddRectFilled(a, b, active || hot ? kAccent : themeAccent(180));
+    dl->AddRect(a, b, IM_COL32(20, 20, 20, 255));
+    if (active) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    if (hot) ImGui::SetTooltip("%.4g\nLeft: decrease; right: increase. Double-click: reset to %.3g.", *v, neutral);
+    return changed;
+}
+
 bool checkbox(const char* label, bool* v, const char* tip) {
     ImGui::PushID(label);
     const float h = ImGui::GetFrameHeight(), box = std::round(h * 0.78f);
