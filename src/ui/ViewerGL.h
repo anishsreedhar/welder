@@ -20,6 +20,9 @@ struct DisplayParams {
     int matte = 0;       // 1: alpha drawn as a red overlay (M)
     // OCIO display transform (working space -> display / view); null: plain sRGB encode
     std::shared_ptr<const color::GpuShader> ocio;
+    bool checkerboard = false;
+    bool clippingWarning = false;
+    bool raw = false;
 };
 
 // Load the GL entry points the shader needs. Call once with a current context.

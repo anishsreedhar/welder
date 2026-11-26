@@ -20,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <shared_mutex>
 #include <string>
@@ -180,11 +181,13 @@ public:
     void setViewerParam(const std::string& viewer, const std::string& key, const json& v);
     std::string newViewer();  // Ctrl+I: another Viewer node, made active; returns its name
     void syncViewer();        // viewed / compare from the active Viewer node (called every UI frame)
+    Node* viewerSource(Node* viewer, int index) const;
     // Viewers that aren't the active one render on their own thread (no playback cache): ask for
     // a view and read the latest result.
     void requestAuxView(const std::string& viewer, const std::string& node, const std::string& compare, double f,
                         const Box& region, double scale);
     ViewResult auxResult(const std::string& viewer);
+    void clearAuxView(const std::string& viewer);
 
     // ------------------------------------------------------------ viewer rendering
     void requestView(bool force = false);  // render `viewed` at `frame` (coalesced); ignored while paused unless forced
@@ -421,6 +424,12 @@ public:
     std::pair<double, double> visibleRange() const;
     // Frame range used for playback: the in/out points when set, else the visible range.
     std::pair<double, double> playRange() const;
+    using FrameRange = std::pair<double, double>;
+    std::optional<FrameRange> markedRange() const;
+    std::optional<FrameRange> pinnedRange() const;
+    void pinRange(std::optional<FrameRange> range);
+    void setMarkedRange(std::optional<FrameRange> range);
+    std::atomic<bool> playWholeRange{false};
     // The properties-bin entry for the project settings (not a node).
     static constexpr const char* kProjectPanel = "\x01Project Settings";
     void renameRefs(const std::string& from, const std::string& to);  // keep selection/panels in sync
@@ -432,6 +441,8 @@ private:
     void frameServerLoop(const RenderRequest& r, const std::vector<Node*>& writes);
     void resetEngine();
     std::string snapshot() const;
+    mutable std::mutex pinnedRangeMutex_;
+    std::optional<FrameRange> pinnedRange_;
     void restore(const std::string& snap);
 
     std::unique_ptr<Engine> engine_;

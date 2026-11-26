@@ -478,7 +478,10 @@ void drawMenuBar(App& app, UiState& ui) {
         if (ImGui::MenuItem("Fit", "F")) ui.viewer.fitPending = true;
         ImGui::MenuItem("Overlays", "Q", &ui.viewer.overlays);
         bool paused = app.viewPaused;
-        if (ImGui::MenuItem("Pause", "P", paused)) app.viewPaused = !paused;
+        if (ImGui::MenuItem("Pause", "P", paused)) {
+            app.viewPaused = !paused;
+            if (paused) app.requestView();
+        }
         ImGui::Separator();
         if (ImGui::BeginMenu("Compare (A / B)")) {
             Node* vn = app.viewerNode();
@@ -783,8 +786,7 @@ void tickPlayback(App& app, UiState& ui) {
         return;
     }
     Comp& c = *app.comp;
-    auto [visA, visB] = app.visibleRange();
-    const int first = (int)std::floor(visA), last = (int)std::ceil(visB), f = (int)std::lround(app.frame);
+    const int f = (int)std::lround(app.frame);
     auto [inD, outD] = app.playRange();
     const int inF = (int)inD, outF = (int)outD;
     double now = ImGui::GetTime();
@@ -801,11 +803,13 @@ void tickPlayback(App& app, UiState& ui) {
         const double period = 1.0 / std::max(1.0, c.fps);
         ui.lastPlayTime += period;
         if (now - ui.lastPlayTime > period) ui.lastPlayTime = now;  // fell behind: don't rush to catch up
-        int next = f + (app.playDir < 0 ? -1 : 1);
-        if (ui.playMode == 1 && (next > outF || next < inF)) {  // bounce
+        int64_t next = (int64_t)f + (app.playDir < 0 ? -1 : 1);
+        if (f < inF || f > outF) {
+            next = app.playDir < 0 ? outF : inF;
+        } else if (ui.playMode == 1 && (next > outF || next < inF)) {  // bounce
             app.playDir = -app.playDir;
-            next = f + (app.playDir < 0 ? -1 : 1);
-        } else if (ui.playMode == 2 && (next > outF || next < inF)) {  // stop at the end
+            next = (int64_t)f + (app.playDir < 0 ? -1 : 1);
+        } else if (ui.playMode >= 2 && (next > outF || next < inF)) {  // stop at the end
             app.playing = false;
             ui.measuredFps = 0;
             ui.lastAdvance = 0;
@@ -813,8 +817,6 @@ void tickPlayback(App& app, UiState& ui) {
         }
         if (next > outF) next = inF;
         if (next < inF) next = outF;
-        if (f < inF || f > outF) next = app.playDir < 0 ? outF : inF;
-        next = std::clamp(next, first, last);
         if (next != f) {
             app.frame = next;
             app.requestView();
@@ -1830,6 +1832,8 @@ void drawDialogs(App& app, UiState& ui) {
         ImGui::EndPopup();
     }
     drawFileDialog(app, ui);
+    drawViewerCaptureControls(app, ui);
+    drawFlipbook(app, ui);
 
     drawRenderDialog(app, ui);
 

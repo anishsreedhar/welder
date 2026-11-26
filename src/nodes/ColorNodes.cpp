@@ -53,30 +53,30 @@ public:
         if (idx.empty()) return;
         // the classic "(un)premult by": divide the colour by alpha before, multiply after
         const std::string up = params.str("unpremult", "none");
-        const int ua = up == "none" || up.empty() ? -1 : out.ch(up);
+        // The source can lack a channel that exists in the output after mask injection.
+        const int sourceAlpha = up == "none" || up.empty() ? -1 : src->ch(up);
+        const int outputAlpha = sourceAlpha >= 0 ? out.ch(up) : -1;
         const bool invUp = params.flag("invert_unpremult", false);
         std::vector<int> uidx;
-        if (ua >= 0)
+        if (sourceAlpha >= 0)
             for (int i : idx)
-                if (i != ua) uidx.push_back(i);
-        auto alphaAt = [&](const float* p) { return invUp ? 1.0f - p[ua] : p[ua]; };
-        if (ua >= 0)
-            for (size_t k = 0; k < (size_t)out.bounds.width() * out.bounds.height(); ++k) {
-                float* p = out.data.data() + k * out.nch();
-                float al = alphaAt(p);
-                if (al > 1e-8f)
-                    for (int i : uidx) p[i] /= al;
-            }
+                if (i != outputAlpha) uidx.push_back(i);
+        auto applyAlpha = [&](bool divide) {
+            for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
+                for (int x = out.bounds.x1; x < out.bounds.x2; ++x) {
+                    const float alpha = src->at(x, y, sourceAlpha);
+                    const float factor = invUp ? 1.0f - alpha : alpha;
+                    if (!(factor > 1e-8f)) continue;
+                    float* p = out.px(x, y);
+                    for (int i : uidx) {
+                        if (divide) p[i] /= factor;
+                        else p[i] *= factor;
+                    }
+                }
+        };
+        if (!uidx.empty()) applyAlpha(true);
         apply(a, out, idx, comps);
-        if (ua >= 0) {  // premultiply again, by the input's alpha
-            const float* sp = src->data.data();
-            for (size_t k = 0; k < (size_t)out.bounds.width() * out.bounds.height(); ++k) {
-                float* p = out.data.data() + k * out.nch();
-                float al = invUp ? 1.0f - sp[k * src->nch() + src->ch(up)] : sp[k * src->nch() + src->ch(up)];
-                if (al > 1e-8f)
-                    for (int i : uidx) p[i] *= al;
-            }
-        }
+        if (!uidx.empty()) applyAlpha(false);
 
         if (!mm.active()) return;
         for (int y = out.bounds.y1; y < out.bounds.y2; ++y)

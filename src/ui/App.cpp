@@ -877,6 +877,25 @@ std::string App::newViewer() {
     return name;
 }
 
+Node* App::viewerSource(Node* viewer, int index) const {
+    Node* source = viewer ? viewer->input(index) : nullptr;
+    if (!source || !viewer->params.flag("input_process")) return source;
+    Node* process = comp->find(viewer->params.str("input_process_node", "VIEWER_INPUT"));
+    if (!process || process->type == "Viewer" || process == source) return source;
+    bool matched = false;
+    std::vector<Node*> pending{process};
+    std::set<Node*> seen;
+    while (!pending.empty()) {
+        Node* n = pending.back();
+        pending.pop_back();
+        if (!n || !seen.insert(n).second) continue;
+        if (n == viewer) return source;
+        if (n == source) matched = true;
+        pending.insert(pending.end(), n->inputs.begin(), n->inputs.end());
+    }
+    return matched ? process : source;
+}
+
 void App::syncViewer() {
     if (!comp || !pending_.empty()) return;
     Node* v = viewerNode();
@@ -887,11 +906,12 @@ void App::syncViewer() {
         v = all.front();
     }
     const int a = pipeIndex((int)v->params.num("a_pipe", 0, 1));
-    const std::string A = v->input(a) ? v->input(a)->name : "";
+    const Node* source = viewerSource(v, a);
+    const std::string A = source ? source->name : "";
     std::string B;
     const int bp = (int)v->params.num("b_pipe", 0, -1);
     if (bp >= 0 && v->params.str("compare", "off") != "off")
-        if (Node* b = v->input(pipeIndex(bp))) B = b->name;
+        if (Node* b = viewerSource(v, pipeIndex(bp))) B = b->name;
     if (A != viewed) {
         viewed = A;
         requestView();
@@ -916,6 +936,13 @@ ViewResult App::auxResult(const std::string& viewer) {
     std::lock_guard<std::mutex> l(auxM_);
     auto it = auxRes_.find(viewer);
     return it == auxRes_.end() ? ViewResult() : it->second;
+}
+
+void App::clearAuxView(const std::string& viewer) {
+    std::lock_guard<std::mutex> lock(auxM_);
+    auxWant_.erase(viewer);
+    auxDone_.erase(viewer);
+    auxRes_.erase(viewer);
 }
 
 void App::auxLoop() {
@@ -947,6 +974,7 @@ void App::auxLoop() {
             res.serial = ++resultSerial_;
             {
                 std::lock_guard<std::mutex> l(auxM_);
+                if (!auxWant_.count(viewer)) continue;
                 auxRes_[viewer] = res;
                 auxDone_[viewer] = r;
             }
@@ -955,7 +983,15 @@ void App::auxLoop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));  // an edit: try again after it
         } catch (...) {
             std::lock_guard<std::mutex> l(auxM_);
-            auxDone_[viewer] = r;
+            if (auxWant_.count(viewer)) {
+                ViewResult res;
+                res.node = r.node;
+                res.frame = r.frame;
+                res.serial = ++resultSerial_;
+                res.error = "Viewer render failed";
+                auxRes_[viewer] = res;
+                auxDone_[viewer] = r;
+            }
         }
     }
 }
@@ -2952,8 +2988,39 @@ std::pair<double, double> App::visibleRange() const {
 }
 
 std::pair<double, double> App::playRange() const {
-    if (comp && comp->project.hasInOut) return {comp->project.inPoint, comp->project.outPoint};
+    if (!playWholeRange)
+        if (auto range = markedRange()) return *range;
     return visibleRange();
+}
+
+std::optional<App::FrameRange> App::pinnedRange() const {
+    std::lock_guard<std::mutex> lock(pinnedRangeMutex_);
+    return pinnedRange_;
+}
+
+void App::pinRange(std::optional<FrameRange> range) {
+    std::lock_guard<std::mutex> lock(pinnedRangeMutex_);
+    pinnedRange_ = range;
+}
+
+std::optional<App::FrameRange> App::markedRange() const {
+    if (auto range = pinnedRange()) return range;
+    if (comp && comp->project.hasInOut) return FrameRange{comp->project.inPoint, comp->project.outPoint};
+    return std::nullopt;
+}
+
+void App::setMarkedRange(std::optional<FrameRange> range) {
+    if (pinnedRange()) {
+        pinRange(range.value_or(visibleRange()));
+        return;
+    }
+    edit([range](Comp& c) {
+        c.project.hasInOut = range.has_value();
+        if (range) {
+            c.project.inPoint = range->first;
+            c.project.outPoint = range->second;
+        }
+    });
 }
 
 void App::renderWrites(double first, double last, std::vector<std::string> names) {
