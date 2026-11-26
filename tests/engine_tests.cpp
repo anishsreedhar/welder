@@ -1646,6 +1646,33 @@ int main(int argc, char** argv) {
         gpu::setRoute(gpu::RouteMode::Auto);
     });
 
+    test("Merge: RGB none preserves the selected matte just like disabled RGB boxes", [] {
+        auto c = comp(json::array({
+            {{"name","S"},{"type","Constant"},{"params",{{"color",{.1,.2,.3,.75}}}}},
+            {{"name","Other"},{"type","Constant"},{"params",{{"color",{.4,.5,.6,.25}}}}},
+            {{"name","Beauty"},{"type","Copy"},{"inputs",{"S","Other"}},
+             {"params",{{"from",{"R","G","B","A"}},{"to",{"beauty.R","beauty.G","beauty.B","beauty.A"}}}}},
+            {{"name","Clear"},{"type","Constant"},{"params",{{"color",{0,0,0,0}}}}},
+            {{"name","NoneA"},{"type","Merge"},{"inputs",{"Clear","Beauty"}},
+             {"params",{{"Achannels","none"},{"Achannels_alpha","A"}}}},
+            {{"name","OffA"},{"type","Merge"},{"inputs",{"Clear","Beauty"}},
+             {"params",{{"Achannels","beauty"},{"Achannels_alpha","A"},{"Achannels_off",{"R","G","B"}}}}},
+            {{"name","NoneB"},{"type","Merge"},{"inputs",{"Beauty","Clear"}},
+             {"params",{{"Bchannels","none"},{"Bchannels_alpha","A"}}}},
+            {{"name","OffB"},{"type","Merge"},{"inputs",{"Beauty","Clear"}},
+             {"params",{{"Bchannels","beauty"},{"Bchannels_alpha","A"},{"Bchannels_off",{"R","G","B"}}}}}
+        }), 8, 8);
+        for (auto route : {gpu::RouteMode::Cpu, gpu::RouteMode::Gpu}) {
+            gpu::setRoute(route);
+            for (const char* name : {"NoneA","OffA","NoneB","OffB"}) {
+                auto image = render(*c, name);
+                CHECK_NEAR(px(image,3,3,"A"), .75, 1e-6);
+                for (const char* channel : {"R","G","B"}) CHECK_NEAR(px(image,3,3,channel), 0, 1e-6);
+            }
+        }
+        gpu::setRoute(gpu::RouteMode::Auto);
+    });
+
     test("Merge: .nk custom alpha slots declare their matte layers", [] {
         const auto text = nk::exportNodes(json::array({
             {{"name","M"},{"type","Merge"},{"params",{

@@ -2465,8 +2465,9 @@ class Translator:
                 # Preserve custom alpha names even when its checkbox is disabled.
                 if len(words) == 4:
                     alpha = channel_name(words[3])
-                    if alpha != "A":
-                        params[knob + "_alpha"] = alpha
+                    # Even rgba.alpha is explicit: omitting it would fall back
+                    # to the RGB layer's alpha (for example beauty.alpha).
+                    params[knob + "_alpha"] = alpha
                     off = [ch for ch, w in zip("RGBA", words) if w.startswith("-")]
                 else:
                     off = [{"red": "R", "green": "G", "blue": "B", "alpha": "A"}.get(w.split(".")[-1], "")

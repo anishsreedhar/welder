@@ -2,9 +2,11 @@
 import json
 import os
 import subprocess
+import struct
 import sys
 import tempfile
 import unittest
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -1385,6 +1387,12 @@ class CGImport(unittest.TestCase):
 
 
 class MergeAlphaSelection(unittest.TestCase):
+    def test_beauty_rgb_keeps_explicit_rgba_alpha(self):
+        _, _, nodes = convert("Merge2 { inputs 0 name M Achannels {beauty.red beauty.green beauty.blue rgba.alpha} Bchannels {beauty.red beauty.green beauty.blue rgba.alpha} }\n")
+        for side in ("A", "B"):
+            self.assertEqual(nodes["M"]["params"][side + "channels"], "beauty")
+            self.assertEqual(nodes["M"]["params"][side + "channels_alpha"], "A")
+
     def test_custom_alpha_slots_and_disabled_boxes(self):
         _, _, nodes = convert("""Merge2 {
  inputs 0
@@ -1416,6 +1424,7 @@ class ExportRoundTrip(unittest.TestCase):
                 if os.path.isfile(os.path.join(ROOT, *p))), None)
         if not exe:
             self.skipTest("Welder CLI not built (or set WELDER_TEST_CLI)")
+        self.cli_path = exe
         with tempfile.TemporaryDirectory() as directory:
             nk = os.path.join(directory, "x.nk")
             r = subprocess.run([exe, "nk", comp_path, "-o", nk], capture_output=True, text=True)
@@ -1445,6 +1454,53 @@ class ExportRoundTrip(unittest.TestCase):
                 p = next(n for n in comp["nodes"] if n["name"] == "M")["params"]
                 for key, value in expected.items():
                     self.assertEqual(p.get(key), value, key)
+
+    def test_beauty_rgb_rgba_alpha_pixels_survive_roundtrip(self):
+        comp = {"strata": 1, "format": {"width": 1, "height": 1}, "nodes": [
+            {"name": "S", "type": "Constant", "params": {"color": [.1, .2, .3, .25]}},
+            {"name": "Matte", "type": "Constant", "params": {"color": [.3, .2, .1, .75]}},
+            {"name": "Beauty", "type": "Copy", "inputs": ["S", "Matte"],
+             "params": {"from": ["R", "G", "B", "A"], "to": ["beauty.R", "beauty.G", "beauty.B", "beauty.A"]}},
+            {"name": "Clear", "type": "Constant", "params": {"color": [0, 0, 0, 0]}},
+            {"name": "MA", "type": "Merge", "inputs": ["Clear", "Beauty"],
+             "params": {"Achannels": "beauty", "Achannels_alpha": "A"}},
+            {"name": "MB", "type": "Merge", "inputs": ["Beauty", "Clear"],
+             "params": {"Bchannels": "beauty", "Bchannels_alpha": "A"}},
+        ]}
+        with tempfile.TemporaryDirectory() as directory:
+            before = os.path.join(directory, "before.weld")
+            after = os.path.join(directory, "after.weld")
+            with open(before, "w") as out:
+                json.dump(comp, out)
+            _, back = self.roundtrip(before)
+            with open(after, "w") as out:
+                json.dump(back, out)
+            # roundtrip() has already located a runnable CLI; use the same path.
+            exe = self.cli_path
+            for node, side in (("MA", "A"), ("MB", "B")):
+                p = next(n for n in back["nodes"] if n["name"] == node)["params"]
+                self.assertEqual(p[side + "channels_alpha"], "A")
+                alphas = []
+                for path in (before, after):
+                    png = os.path.join(directory, "pixel.png")
+                    result = subprocess.run([exe, "node", path, node, "-o", png], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    with open(png, "rb") as image:
+                        data = image.read()
+                    pos, chunks = 8, []
+                    while pos < len(data):
+                        length = struct.unpack(">I", data[pos:pos+4])[0]
+                        kind, body = data[pos+4:pos+8], data[pos+8:pos+8+length]
+                        if kind == b"IHDR":
+                            self.assertEqual(struct.unpack(">IIBB", body[:10]), (1, 1, 8, 6))
+                        if kind == b"IDAT":
+                            chunks.append(body)
+                        pos += length + 12
+                    # At the first pixel, every PNG filter has zero neighbours.
+                    alpha = zlib.decompress(b"".join(chunks))[4]
+                    self.assertAlmostEqual(alpha / 255, .25, delta=1/255)
+                    alphas.append(alpha)
+                self.assertEqual(alphas[0], alphas[1])
 
     def test_groups_example(self):
         a, b = self.roundtrip(os.path.join(ROOT, "examples", "groups.weld"))

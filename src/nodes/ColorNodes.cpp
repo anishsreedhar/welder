@@ -59,7 +59,7 @@ public:
         if (rt && rt->gpu() && runGpu(out, idx, comps, ua, invUp, g)) {
             rt->done(true);
         } else {
-            cpuApply(a, out, *src, idx, comps, ua, invUp, uidx, up);
+            cpuApply(a, out, *src, idx, comps, ua, invUp, uidx, sourceAlpha);
             if (rt) rt->done(false);
         }
 
@@ -108,7 +108,7 @@ protected:
     }
 
     void cpuApply(RenderArgs& a, Image& out, const Image& srcImg, const std::vector<int>& idx, const std::vector<int>& comps, int ua,
-                  bool invUp, const std::vector<int>& uidx, const std::string& up) {
+                  bool invUp, const std::vector<int>& uidx, int sourceAlpha) {
         const Image* src = &srcImg;
         auto alphaAt = [&](const float* p) { return invUp ? 1.0f - p[ua] : p[ua]; };
         if (ua >= 0)
@@ -119,11 +119,11 @@ protected:
                     for (int i : uidx) p[i] = al != 0.0f ? p[i] / al : 0.0f;
             }
         apply(a, out, idx, comps);
-        if (ua >= 0) {  // premultiply again, by the input's alpha
+        if (ua >= 0 && sourceAlpha >= 0) {  // premultiply again, by the validated source channel
             const float* sp = src->data.data();
             for (size_t k = 0; k < (size_t)out.bounds.width() * out.bounds.height(); ++k) {
                 float* p = out.data.data() + k * out.nch();
-                float al = invUp ? 1.0f - sp[k * src->nch() + src->ch(up)] : sp[k * src->nch() + src->ch(up)];
+                float al = invUp ? 1.0f - sp[k * src->nch() + sourceAlpha] : sp[k * src->nch() + sourceAlpha];
                 if (coupledChannels() || al > 1e-8f)
                     for (int i : uidx) p[i] *= al;
             }
