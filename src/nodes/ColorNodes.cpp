@@ -176,7 +176,7 @@ public:
         if(params.flag("inject",false) && input(1)) {
             auto mask=a.fetch(input(1),a.region);
             const int mc=mask->ch(resolveChannelName(params.str("mask_channel","A"))),oc=out.ch("mask.a");
-            if(oc>=0)for(int y=out.bounds.y1;y<out.bounds.y2;++y)for(int x=out.bounds.x1;x<out.bounds.x2;++x)out.px(x,y)[oc]=mask->at(x,y,mc);
+            if(oc>=0)for(int y=out.bounds.y1;y<out.bounds.y2;++y)for(int x=out.bounds.x1;x<out.bounds.x2;++x)out.px(x,y)[oc]=mc>=0?mask->at(x,y,mc):0.0f;
         }
     }
 private:
@@ -427,7 +427,7 @@ public:
             const int mc = mask->ch(resolveChannelName(params.str("mask_channel", "A"))), oc = out.ch("mask.a");
             if (oc >= 0)
                 for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
-                    for (int x = out.bounds.x1; x < out.bounds.x2; ++x) out.px(x, y)[oc] = mask->at(x, y, mc);
+                    for (int x = out.bounds.x1; x < out.bounds.x2; ++x) out.px(x, y)[oc] = mc >= 0 ? mask->at(x, y, mc) : 0.0f;
         }
     }
 private:

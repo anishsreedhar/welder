@@ -653,11 +653,16 @@ struct Writer {
             for (std::string k : {"Achannels", "Bchannels"}) {
                 std::string layer = has(k.c_str()) && p[k].is_string() && !p[k].get<std::string>().empty() ? p[k].get<std::string>() : "rgba";
                 const json off = p.value(k + "_off", json::array());
-                if (off.is_array() && !off.empty() && (layer == "rgba" || layer == "rgb")) {  // {-rgba.red rgba.green ...}
+                const std::string alpha = p.value(k + "_alpha", std::string());
+                if (!alpha.empty() || (off.is_array() && !off.empty() && (layer == "rgba" || layer == "rgb"))) {
+                    // Nuke's Channel_Knob has four positional slots. The fourth
+                    // selects the alpha independently of the RGB layer/checkboxes.
                     std::string w = "{";
                     for (auto [ch, nm] : std::vector<std::pair<std::string, std::string>>{{"R", "red"}, {"G", "green"}, {"B", "blue"}, {"A", "alpha"}}) {
                         bool isOff = std::find(off.begin(), off.end(), json(ch)) != off.end();
-                        w += (w.size() > 1 ? " " : "") + std::string(isOff ? "-" : "") + "rgba." + nm;
+                        const std::string channel = ch == "A" && !alpha.empty() ? nkChannel(alpha) :
+                            layer == "none" ? "none" : (layer == "rgba" || layer == "rgb" ? "rgba" : layer) + "." + nm;
+                        w += (w.size() > 1 ? " " : "") + std::string(isOff && channel != "none" ? "-" : "") + channel;
                     }
                     raw(k, w + "}");
                 } else if (layer != "rgba")
@@ -1158,7 +1163,24 @@ struct Exporter {
             names.type[n.value("name", "")] = n.value("type", "");
             nodes.push_back(n);
         }
+        // Declare selected custom mattes even when their source footage is not
+        // loaded yet. Otherwise Nuke replaces an unknown alpha slot with none.
+        std::map<std::string, std::set<std::string>> matteLayers;
+        for (const auto& n : nodes) if (n.value("type", "") == "Merge") {
+            const json p = n.value("params", json::object());
+            for (const char* key : {"Achannels_alpha", "Bchannels_alpha"}) if (p.contains(key) && p[key].is_string()) {
+                const std::string channel = nkChannel(p[key].get<std::string>());
+                const auto dot = channel.find('.');
+                if (dot != std::string::npos && channel.substr(0, dot) != "rgba")
+                    matteLayers[channel.substr(0, dot)].insert(channel);
+            }
+        }
         std::string out;
+        for (const auto& [layer, channels] : matteLayers) {
+            out += "add_layer {" + word(layer);
+            for (const auto& channel : channels) out += " " + word(channel);
+            out += "}\n";
+        }
         writeLevel(out, "", "");
         return out;
     }

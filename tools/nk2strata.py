@@ -2461,8 +2461,16 @@ class Translator:
                 layer = words[0].lstrip("-").split(".")[0] if words else "rgba"
                 if layer not in ("rgba", "rgb"):
                     params[knob] = layer
-                off = [{"red": "R", "green": "G", "blue": "B", "alpha": "A"}.get(w.split(".")[-1], "")
-                       for w in words if w.startswith("-")]
+                # Four explicit slots: RGB selection and an independent alpha.
+                # Preserve custom alpha names even when its checkbox is disabled.
+                if len(words) == 4:
+                    alpha = channel_name(words[3])
+                    if alpha != "A":
+                        params[knob + "_alpha"] = alpha
+                    off = [ch for ch, w in zip("RGBA", words) if w.startswith("-")]
+                else:
+                    off = [{"red": "R", "green": "G", "blue": "B", "alpha": "A"}.get(w.split(".")[-1], "")
+                           for w in words if w.startswith("-")]
                 if any(off):
                     params[knob + "_off"] = [o for o in off if o]
             if flag("sRGB"):

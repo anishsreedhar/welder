@@ -1624,6 +1624,52 @@ int main(int argc, char** argv) {
         gpu::setRoute(gpu::RouteMode::Auto);
     });
 
+    test("Merge: .nk custom alpha slots declare their matte layers", [] {
+        const auto text = nk::exportNodes(json::array({
+            {{"name","M"},{"type","Merge"},{"params",{
+                {"Achannels_alpha","matte.A"},{"Bchannels_alpha","other.A"},
+                {"Achannels_off",{"G"}},{"Bchannels_off",{"A"}}}}}
+        })).text;
+        CHECK(text.find("add_layer {matte matte.alpha}\n") != std::string::npos);
+        CHECK(text.find("add_layer {other other.alpha}\n") != std::string::npos);
+        CHECK(text.find("add_layer {matte") < text.find("Merge2 {"));
+        CHECK(text.find(" Achannels {rgba.red -rgba.green rgba.blue matte.alpha}\n") != std::string::npos);
+        CHECK(text.find(" Bchannels {rgba.red rgba.green rgba.blue -other.alpha}\n") != std::string::npos);
+    });
+
+    test("Mask injection: Grade and ColorCorrect handle present and missing channels on CPU", [] {
+        gpu::setRoute(gpu::RouteMode::Cpu);
+        for (const char* type : {"Grade", "ColorCorrect"}) {
+            auto c = comp(json::array({
+                {{"name","S"},{"type","Constant"},{"params",{{"color",{.12,.3,.5,.5}}}}},
+                {{"name","Mask"},{"type","Constant"},{"params",{{"color",{.2,.4,.6,.8}}}}},
+                {{"name","Present"},{"type","Copy"},{"inputs",{"Mask","Mask"}},
+                 {"params",{{"from",{"G"}},{"to",{"mask.a"}}}}},
+                // An existing source mask.a must be overwritten with black when
+                // the selected channel is absent from the connected mask footage.
+                {{"name","Source"},{"type","Copy"},{"inputs",{"S","Mask"}},
+                 {"params",{{"from",{"A"}},{"to",{"mask.a"}}}}},
+                {{"name","WithMask"},{"type",type},{"inputs",{"Source","Present"}},
+                 {"params",{{"gain",2},{"mask_channel","mask.a"},{"inject",true}}}},
+                {{"name","Missing"},{"type",type},{"inputs",{"Source","Mask"}},
+                 {"params",{{"gain",2},{"mask_channel","mask.a"},{"inject",true}}}}
+            }));
+            CHECK(render(*c,"Present")->ch("mask.a") >= 0);
+            CHECK(render(*c,"Mask")->ch("mask.a") < 0);
+            for (const char* name : {"WithMask", "Missing"}) {
+                auto image = render(*c, name, 1, 8);
+                CHECK(image->ch("mask.a") >= 0);
+                const bool present = std::string(name) == "WithMask";
+                for (auto [x,y] : {std::pair{0,0}, std::pair{7,7}, std::pair{15,15}}) {
+                    CHECK_NEAR(px(image,x,y,"mask.a"), present ? .4 : 0, 1e-6);
+                    CHECK_NEAR(px(image,x,y,"R"), present ? .168 : .12, 1e-6);
+                    CHECK_NEAR(px(image,x,y,"A"), .5, 1e-6);
+                }
+            }
+        }
+        gpu::setRoute(gpu::RouteMode::Auto);
+    });
+
     test("Merge controls: independent alpha inputs, output routing and extra channel mix", [] {
         auto c=comp(json::array({
             {{"name","B"},{"type","Constant"},{"params",{{"color",{.2,.4,.6,.8}}}}},

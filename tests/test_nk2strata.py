@@ -1384,19 +1384,67 @@ class CGImport(unittest.TestCase):
 
 
 
+class MergeAlphaSelection(unittest.TestCase):
+    def test_custom_alpha_slots_and_disabled_boxes(self):
+        _, _, nodes = convert("""Merge2 {
+ inputs 0
+ name M
+ Achannels {rgba.red -rgba.green rgba.blue matte.alpha}
+ Bchannels {rgba.red rgba.green rgba.blue -other.alpha}
+}
+""")
+        p = nodes["M"]["params"]
+        self.assertEqual(p["Achannels_alpha"], "matte.A")
+        self.assertEqual(p["Bchannels_alpha"], "other.A")
+        self.assertEqual(p["Achannels_off"], ["G"])
+        self.assertEqual(p["Bchannels_off"], ["A"])
+
+    def test_none_alpha_slot(self):
+        _, _, nodes = convert("Merge2 { inputs 0 name M Achannels {rgba.red rgba.green rgba.blue none} }\n")
+        self.assertEqual(nodes["M"]["params"]["Achannels_alpha"], "none")
+
+
 class ExportRoundTrip(unittest.TestCase):
     """Welder -> .nk (welder nk) -> Welder (this importer) keeps the comp."""
 
     def roundtrip(self, comp_path):
-        exe = os.path.join(ROOT, "build", "strata")
-        if not os.path.exists(exe):
-            self.skipTest("build/welder not built")
-        d = tempfile.mkdtemp()
-        nk = os.path.join(d, "x.nk")
-        r = subprocess.run([exe, "nk", comp_path, "-o", nk], capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        back, _ = nk2strata.convert(nk)
-        return json.load(open(comp_path)), back
+        exe = os.environ.get("WELDER_TEST_CLI")
+        if not exe:
+            exe = next((os.path.join(ROOT, *p) for p in (
+                ("build", "welder"), ("build", "welder.exe"),
+                ("build", "local", "welder.exe"), ("build", "strata"))
+                if os.path.isfile(os.path.join(ROOT, *p))), None)
+        if not exe:
+            self.skipTest("Welder CLI not built (or set WELDER_TEST_CLI)")
+        with tempfile.TemporaryDirectory() as directory:
+            nk = os.path.join(directory, "x.nk")
+            r = subprocess.run([exe, "nk", comp_path, "-o", nk], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            back, _ = nk2strata.convert(nk)
+            with open(comp_path) as source:
+                return json.load(source), back
+
+    def test_merge_selected_mattes_survive_both_directions(self):
+        # Start with native Nuke slots, including a disabled checkbox, then
+        # export/import twice so neither direction can silently reset the matte.
+        _, _, imported = convert("""Merge2 {
+ inputs 0
+ name M
+ Achannels {rgba.red -rgba.green rgba.blue matte.alpha}
+ Bchannels {rgba.red rgba.green rgba.blue other.alpha}
+}
+""")
+        expected = {"Achannels_alpha": "matte.A", "Bchannels_alpha": "other.A", "Achannels_off": ["G"]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "mattes.weld")
+            comp = {"strata": 1, "nodes": [imported["M"]]}
+            for _ in range(2):
+                with open(path, "w") as out:
+                    json.dump(comp, out)
+                _, comp = self.roundtrip(path)
+                p = next(n for n in comp["nodes"] if n["name"] == "M")["params"]
+                for key, value in expected.items():
+                    self.assertEqual(p.get(key), value, key)
 
     def test_groups_example(self):
         a, b = self.roundtrip(os.path.join(ROOT, "examples", "groups.weld"))
