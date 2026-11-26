@@ -1801,7 +1801,7 @@ static void frameNodes(App& app, UiState& ui, ImVec2 winSize) {
         return;
     }
     float w = hi.x - lo.x + 120, h = hi.y - lo.y + 100;
-    ui.graph.zoom = std::clamp(std::min(winSize.x / w, winSize.y / h), kGraphMinZoom, 1.5f);
+    ui.graph.zoom = std::clamp(std::min(winSize.x / w, winSize.y / h), kGraphMinZoom, .8f);
     ImVec2 c((lo.x + hi.x) / 2, (lo.y + hi.y) / 2);
     ui.graph.pan = ImVec2(c.x - winSize.x / 2 / ui.graph.zoom, c.y - winSize.y / 2 / ui.graph.zoom);
 }
@@ -2177,7 +2177,7 @@ void drawNodeGraph(App& app, UiState& ui) {
                 const float t = 6 * std::max(0.6f, g.zoom);
                 ImVec2 b = S(ip);
                 ImVec2 tip(b.x + side * g.zoom, b.y), back(b.x + side * t * 1.3f, b.y);
-                dl->AddTriangleFilled(tip, ImVec2(back.x, back.y - t * 0.75f), ImVec2(back.x, back.y + t * 0.75f), IM_COL32(5, 5, 5, 255));
+                dl->AddTriangleFilled(tip, ImVec2(back.x, back.y - t * 0.75f), ImVec2(back.x, back.y + t * 0.75f), app.selection.count(n->name)?IM_COL32(255,190,92,255):IM_COL32(5,5,5,255));
                 handles.push_back({n, i, ImVec2(b.x + side * kStub * 0.6f * g.zoom, b.y)});
             } else if (knob) {  // an exposed knob waiting for a value: a short stub in the Value colour, named
                 ImVec2 a = S(ImVec2(ip.x - kStub * 0.6f, ip.y)), b = S(ip);
@@ -2204,7 +2204,7 @@ void drawNodeGraph(App& app, UiState& ui) {
                 float stub = isMask ? kStub * 0.6f : kStub;
                 ImVec2 end(ip.x + dir.x * stub, ip.y + dir.y * stub);
                 ImVec2 a = S(end), b = S(ip);
-                ImU32 sc = IM_COL32(5, 5, 5, 255);
+                ImU32 sc = app.selection.count(n->name)?IM_COL32(255,190,92,255):IM_COL32(5,5,5,255);
                 dl->AddLine(a, b, sc, std::max(1.3f, 1.8f * g.zoom));
                 arrow(b, a, sc);
                 handles.push_back({n, i, a});
@@ -2309,7 +2309,7 @@ void drawNodeGraph(App& app, UiState& ui) {
         }
         if (n->type == "Dot") {
             ImVec2 c((p0.x + p1.x) / 2, (p0.y + p1.y) / 2);
-            dl->AddCircleFilled(c, s.x * 0.5f * g.zoom, base);
+            dl->AddCircleFilled(c, s.x * 0.5f * g.zoom, sel?IM_COL32(255,190,92,255):base);
             dl->AddCircle(c, s.x * 0.5f * g.zoom, sel ? theme().accent : IM_COL32(20, 20, 20, 255), 0, sel ? 2.0f : 1.0f);
             continue;
         }
@@ -2317,12 +2317,14 @@ void drawNodeGraph(App& app, UiState& ui) {
         ImVec4 bc = ImGui::ColorConvertU32ToFloat4(base);
         const bool disabled = n->params.flag("disable", false);
         if (disabled) bc = ImVec4(.48f, .48f, .48f, 1);
-        if (sel) bc = ImVec4(.91f, .61f, .24f, 1);
+        // Selection keeps a blue-gray frame around the orange inset.
+        const ImU32 selectionFrame=IM_COL32(142,160,188,255);
+        const ImU32 selectionFill=IM_COL32(255,190,92,255);
         const ImU32 topColor = ImGui::GetColorU32(ImVec4(bc.x + (1 - bc.x) * .20f, bc.y + (1 - bc.y) * .20f, bc.z + (1 - bc.z) * .20f, 1));
         const ImU32 bottomColor = ImGui::GetColorU32(ImVec4(bc.x * .72f, bc.y * .72f, bc.z * .72f, 1));
         const ImU32 edge = IM_COL32(8, 8, 8, 255);
         const float rad = 0;
-        const ImU32 textColor = (.2126f * bc.x + .7152f * bc.y + .0722f * bc.z) < .18f
+        const ImU32 textColor = !sel && (.2126f * bc.x + .7152f * bc.y + .0722f * bc.z) < .18f
                                    ? IM_COL32(240, 240, 240, 255) : IM_COL32(5, 5, 5, 255);
         if (hexagonal(n)) {
             const float in = (p1.y - p0.y) * (n->type == "Viewer" ? .22f : .5f);
@@ -2331,10 +2333,23 @@ void drawNodeGraph(App& app, UiState& ui) {
             const int firstVertex = dl->VtxBuffer.Size;
             dl->AddConvexPolyFilled(pts, 6, IM_COL32_WHITE);
             ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, firstVertex, dl->VtxBuffer.Size, p0, ImVec2(p0.x, p1.y), topColor, bottomColor);
-            dl->AddPolyline(pts, 6, sel ? theme().accent : edge, ImDrawFlags_Closed, sel ? 1.5f : 1.0f);
+            if(sel){
+                dl->AddConvexPolyFilled(pts,6,selectionFrame);
+                const float pad=std::min((p1.y-p0.y)*.15f,std::max(1.5f,3.f*g.zoom));
+                ImVec2 q0(p0.x+pad,p0.y+pad),q1(p1.x-pad,p1.y-pad);
+                const float qin=(q1.y-q0.y)*(n->type=="Viewer"?.22f:.5f);
+                ImVec2 q[6]={{q0.x,(q0.y+q1.y)*.5f},{q0.x+qin,q0.y},{q1.x-qin,q0.y},{q1.x,(q0.y+q1.y)*.5f},{q1.x-qin,q1.y},{q0.x+qin,q1.y}};
+                dl->AddConvexPolyFilled(q,6,selectionFill);
+            }
+            dl->AddPolyline(pts,6,edge,ImDrawFlags_Closed,1.f);
         } else {
             dl->AddRectFilledMultiColor(p0, p1, topColor, topColor, bottomColor, bottomColor);
-            dl->AddRect(p0, p1, sel ? theme().accent : edge, 0, 0, sel ? 1.5f : 1.0f);
+            if(sel){
+                dl->AddRectFilled(p0,p1,selectionFrame);
+                const float pad=std::min((p1.y-p0.y)*.15f,std::max(1.5f,3.f*g.zoom));
+                dl->AddRectFilled(ImVec2(p0.x+pad,p0.y+pad),ImVec2(p1.x-pad,p1.y-pad),selectionFill);
+            }
+            dl->AddRect(p0,p1,edge,0,0,1.f);
         }
         if (n->type == "Group")  // a container: a second frame inside
             dl->AddRect(ImVec2(p0.x + 3 * g.zoom, p0.y + 3 * g.zoom), ImVec2(p1.x - 3 * g.zoom, p1.y - 3 * g.zoom), IM_COL32(255, 255, 255, 60), rad, 0, 1.0f);

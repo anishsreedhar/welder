@@ -467,7 +467,7 @@ void keyButton(Ctx& c, const KnobDef& k, int n, const std::vector<double>& cur, 
     ImVec2 p = ImGui::GetCursorScreenPos();
     float h = ImGui::GetFrameHeight();
     ImGui::PushID("key");
-    const bool reference=c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge";
+    const bool reference=c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked";
     const float keyWidth=reference?h:h*.8f;
     bool clicked = ImGui::InvisibleButton("##k", ImVec2(keyWidth, h));
     gKeyHovered = ImGui::IsItemHovered();
@@ -476,18 +476,18 @@ void keyButton(Ctx& c, const KnobDef& k, int n, const std::vector<double>& cur, 
     float r = h * 0.28f;
     ImVec2 pts[4] = {{ctr.x, ctr.y - r}, {ctr.x + r, ctr.y}, {ctr.x, ctr.y + r}, {ctr.x - r, ctr.y}};
     ImU32 col = onKey ? IM_COL32(90, 170, 255, 255) : anim ? IM_COL32(90, 170, 255, 120) : IM_COL32(110, 110, 110, 255);
-    if((c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge")) {
+    if(reference) {
         dl->AddRectFilled(p,ImVec2(p.x+h,p.y+h),ImGui::IsItemHovered()?IM_COL32(75,75,75,255):IM_COL32(62,62,62,255));
         dl->AddRect(p,ImVec2(p.x+h,p.y+h),IM_COL32(25,25,25,255));
         dl->AddBezierCubic(ImVec2(p.x+3,p.y+h-4),ImVec2(p.x+h*.6f,p.y+h),ImVec2(p.x+h*.4f,p.y),ImVec2(p.x+h-3,p.y+4),col,1.5f);
     } else if (onKey || anim) dl->AddConvexPolyFilled(pts, 4, col);
     else dl->AddPolyline(pts, 4, col, ImDrawFlags_Closed, 1.2f);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip((c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge") ? "Click or right-click: animation menu (keys and expressions)" : onKey ? "Click: delete key at this frame\nRight-click: animation menu\n(Alt+click a value: set a key)"
+        ImGui::SetTooltip(reference ? "Click or right-click: animation menu (keys and expressions)" : onKey ? "Click: delete key at this frame\nRight-click: animation menu\n(Alt+click a value: set a key)"
                                 : "Click: set key at this frame\nRight-click: animation menu\n(Alt+click a value: set a key)");
     double frame = c.frame;
-    if(clicked && (c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge"))ImGui::OpenPopup("##keymenu");
-    if (clicked && (c.node->type!="Grade" && c.node->type!="ColorCorrect" && c.node->type!="Merge")) {
+    if(clicked && reference)ImGui::OpenPopup("##keymenu");
+    if (clicked && !reference) {
         c.app.checkpoint();
         change(c, k.name, [n, cur, defs, frame, onKey](json& val) {
             json& a = expand(val, n, defs);
@@ -625,7 +625,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
     // expression-driven: purple (red when it fails); animated: blue
     if (hasX) ImGui::PushStyleColor(ImGuiCol_FrameBg, exprErr.empty() ? ImVec4(0.33f, 0.2f, 0.45f, 1.0f) : ImVec4(0.5f, 0.16f, 0.16f, 1.0f));
     else if (anim) ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.16f, 0.27f, 0.42f, 1.0f));
-    const bool referenceControls=c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge";
+    const bool referenceControls=c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked";
     float avail = ImGui::GetContentRegionAvail().x - (k.noAnim ? 0 : ImGui::GetFrameHeight() * (referenceControls?1.f:.8f) + ImGui::GetStyle().ItemSpacing.x);
     if (k.half) {  // half the row, when both halves have room for a field and a slider; else the whole row
         const float half = (ImGui::GetContentRegionAvail().x - kit::labelWidth() * 0.55f) * 0.5f - 8;
@@ -633,6 +633,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
     }
 
     auto commit = [&](int comp, double val) {
+        if(ImGui::GetIO().MouseWheel!=0 && ImGui::IsItemHovered())c.app.checkpoint();
         change(c, k.name, [n, comp, val, frame, defs](json& j) { setComp(j, n, comp, val, frame, defs); });
     };
     auto startGesture = [&]() {
@@ -645,7 +646,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
     const double dragSpeed = k.type == Knob::Int ? 0.2 : std::max(0.001, (k.hi - k.lo) / 400.0);
     // a value field (drag it, or click to type), then (unless noSlider) a slider with ticks filling the row
     auto scalarRow = [&](int comp, bool isInt, float sliderRoom) {
-        const float fw = k.width > 0 ? k.width : (c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge") ? 72.f : std::round(ImGui::GetFontSize() * 5.6f);
+        const float fw = k.width > 0 ? k.width : (c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked") ? 72.f : std::round(ImGui::GetFontSize() * 5.6f);
         double fv = cur[std::max(0, comp)];
         if (kit::valueField("##v", &fv, k.noSlider ? fw : fw, nullptr, isInt, dragSpeed)) commit(comp, fv);
         const char* tk = std::getenv("STRATA_TEST_ALTKEY");
@@ -663,6 +664,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
         const bool cc = c.node->type == "ColorCorrect" && k.type == Knob::Color;
         if (c.node->type=="Grade" && k.type==Knob::Color ? kit::gradeSlider("##s",&sv,defs[0],k.name=="gamma",sw)
                : cc ? kit::colorCorrectSlider("##s", &sv, defs[0], k.hi - defs[0], sw)
+               : (c.node->type=="Transform" || c.node->type=="TransformMasked") && k.name=="motionblur" ? kit::gradeSlider("##s",&sv,1,false,sw)
                : kit::tickSlider("##s", &sv, k.lo, k.hi, sw, k.logSlider, isInt))
             commit(comp, sv);
         startGesture();
@@ -711,7 +713,19 @@ void numericKnob(Ctx& c, const KnobDef& k) {
             }
         };
         const float buttonW = k.button.empty() ? 0 : ImGui::CalcTextSize(k.button.c_str()).x + ImGui::GetStyle().FramePadding.x * 2 + sp;
-        if (uniformMode) {
+        if ((c.node->type=="Transform" || c.node->type=="TransformMasked") && uniformMode) {
+            scalarRow(-1,false,avail-icon-sp);
+            ImGui::SameLine();
+            if(ImGui::Button("2",ImVec2(icon,icon)))splitOpen.insert(ek);
+        } else if ((c.node->type=="Transform" || c.node->type=="TransformMasked") && !k.splittable) {
+            for(int i=0;i<n;++i){
+                if(i)ImGui::SameLine();
+                ImGui::AlignTextToFramePadding();ImGui::TextUnformatted(cl[i].c_str());ImGui::SameLine();
+                ImGui::PushID(i);double fv=cur[i];
+                if(kit::valueField("##c",&fv,72,nullptr,false,dragSpeed))commit(i,fv);
+                startGesture();ImGui::PopID();
+            }
+        } else if (uniformMode) {
             chain();
             ImGui::SameLine();
             scalarRow(-1, false, avail - icon - sp);
@@ -958,13 +972,13 @@ void numericKnob(Ctx& c, const KnobDef& k) {
         ImGui::SameLine();
         float rest = avail - ImGui::GetFrameHeight() * 2 - 30 - ImGui::GetStyle().ItemSpacing.x * 2;  // room for "1|4" and the pipette
         if (split) {
-            ImGui::SetNextItemWidth(rest);
-            float fv[4] = {col[0], col[1], col[2], col[3]};
-            if (ImGui::DragFloat4("##v", fv, 0.005f, 0, 0, "%.3f") && !ImGui::GetIO().KeyAlt)
-                for (int i = 0; i < 4; ++i)
-                    if (fv[i] != (float)cur[i]) commit(i, fv[i]);
-            kit::altClickItem();
-            startGesture();
+            const float componentWidth=std::max(20.f,(rest-3*ImGui::GetStyle().ItemSpacing.x)/4);
+            for(int i=0;i<4;++i){
+                if(i)ImGui::SameLine();
+                ImGui::PushID(i);double fv=cur[i];
+                if(kit::valueField("##v",&fv,componentWidth,nullptr,false,.005))commit(i,fv);
+                startGesture();ImGui::PopID();
+            }
         } else {
             double fv = col[0];
             const float fw = std::round(ImGui::GetFontSize() * 4.6f);
@@ -3663,6 +3677,24 @@ void buttonAction(Ctx& c, const std::string& action) {
 // holds the knobs up to the next divider; "@card" opens one with no title; an
 // untitled divider is a line.
 void drawKnobs(Ctx& c, const NodeDef& def, const std::string& tab) {
+    if(c.node->type=="Transform" || c.node->type=="TransformMasked") {
+        for(const char* name:{"translate","rotate","scale","skewX","skewY","skew_order","center","invert","filter","clamp","black_outside","motionblur","shutter","shutteroffset","shuttercustomoffset","mask_channel","invert_mask"}) {
+            auto it=std::find_if(def.knobs.begin(),def.knobs.end(),[&](const KnobDef& k){return k.name==name;});
+            if(it==def.knobs.end() || it->tab!=tab || !whenOk(c.node,def,*it))continue;
+            auto k=*it;k.half=false;k.sameLine=false;
+            if(k.name=="center")k.button.clear();
+            if(k.name=="scale")k.logSlider=true;
+            if(k.name=="skew_order")k.width=44;
+            if(k.name=="filter")k.width=78;
+            if(k.name=="invert")k.hideLabel=false;
+            if(k.name=="clamp" || k.name=="black_outside"){k.sameLine=true;k.hideLabel=false;}
+            if(k.name=="shutter")k.label="Shutter";
+            if(k.name=="shutteroffset")k.width=72;
+            if(k.name=="shuttercustomoffset"){k.sameLine=true;k.hideLabel=true;}
+            knob(c,k);
+        }
+        return;
+    }
     if(c.node->type=="Merge" || c.node->type=="Grade") {
         for(auto k:def.knobs) {
             if(k.tab!=tab || !whenOk(c.node,def,k))continue;
@@ -3679,7 +3711,6 @@ void drawKnobs(Ctx& c, const NodeDef& def, const std::string& tab) {
             if(k.name=="unpremult" && c.node->type=="Grade")k.width=std::max(100.f,ImGui::GetContentRegionAvail().x-kit::labelWidth()-90);
             if(k.name=="mask_channel")k.width=std::max(100.f,ImGui::GetContentRegionAvail().x-kit::labelWidth()-(c.node->type=="Merge"?218:222));
             knob(c,k);
-            if(c.node->type=="Merge" && k.name=="mix")ImGui::Dummy(ImVec2(1,12));
         }
         return;
     }
@@ -3907,7 +3938,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
             ImGui::PushStyleColor(ImGuiCol_FrameBg,IM_COL32(58,58,58,255));
         }}
         ~CompactMerge(){if(enabled){theme().muted=muted;kit::setReferenceFields(previousReference);kit::setLabelWidth(label);ImGui::PopStyleColor();ImGui::PopStyleVar(4);ImGui::PopFont();}}
-    } compactMerge(n->type=="Merge" || n->type=="Grade" || n->type=="ColorCorrect",n->type=="Merge" || n->type=="Grade" || n->type=="ColorCorrect",n->type=="Merge");
+    } compactMerge(n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked"),n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked"),n->type=="Merge");
     // the header: a card with the category colour as a strip down its left side, the name in
     // the medium weight, the type muted after it
     const ImU32 cc = categoryColor(categoryOf(n->type));
@@ -3944,7 +3975,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
     }
     if (keepOpen && ImGui::IsItemHovered() && !ImGui::IsPopupOpen("panel_menu"))
         ImGui::SetTooltip("Right-click: float this panel in a window of its own, or reset all its knobs to default");
-    if((n->type!="Merge" && n->type!="Grade" && n->type!="ColorCorrect")) {
+    if((n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && n->type!="TransformMasked"))) {
         const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(mn, ImVec2(mn.x + 3, mx.y), cc, 2.0f, ImDrawFlags_RoundCornersLeft);
@@ -3963,17 +3994,17 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
 
     // Name (rename on Enter). Merge keeps its name field in the panel header.
     const ImVec2 bodyCursor=ImGui::GetCursorScreenPos();
-    if((n->type=="Merge" || n->type=="Grade" || n->type=="ColorCorrect"))ImGui::SetCursorScreenPos(ImVec2(headerMin.x+22,headerMin.y+1));
+    if((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked")))ImGui::SetCursorScreenPos(ImVec2(headerMin.x+22,headerMin.y+1));
     {
         static std::string nameBuf;
-        if((n->type!="Merge" && n->type!="Grade" && n->type!="ColorCorrect")){
+        if((n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && n->type!="TransformMasked"))){
             kit::rowLabel("name");
         }
         if (ImGui::GetActiveID() != ImGui::GetID("##name")) nameBuf = n->name;
         char tmp[128];
         std::strncpy(tmp, nameBuf.c_str(), sizeof(tmp) - 1);
         tmp[sizeof(tmp) - 1] = 0;
-        ImGui::SetNextItemWidth((n->type=="Merge" || n->type=="Grade" || n->type=="ColorCorrect")?headerMax.x-headerMin.x-50:std::min(220.0f, ImGui::GetContentRegionAvail().x));
+        ImGui::SetNextItemWidth((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked"))?headerMax.x-headerMin.x-50:std::min(220.0f, ImGui::GetContentRegionAvail().x));
         bool enter = ImGui::InputText("##name", tmp, sizeof(tmp), ImGuiInputTextFlags_EnterReturnsTrue);
         if (ImGui::GetActiveID() == ImGui::GetID("##name")) nameBuf = tmp;
         if ((enter || ImGui::IsItemDeactivatedAfterEdit()) && std::string(tmp) != n->name) {
@@ -3987,7 +4018,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
         }
     }
 
-    if((n->type=="Merge" || n->type=="Grade" || n->type=="ColorCorrect"))ImGui::SetCursorScreenPos(bodyCursor);
+    if((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked")))ImGui::SetCursorScreenPos(bodyCursor);
     const NodeDef* def = nodeDef(n->type);
     gDef = def;
     // Tabs, as is standard: the node's own (named after it), any others its knobs
@@ -4263,7 +4294,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
                 ImGui::EndTabItem();
             }
         const bool nodeOpen = ImGui::BeginTabItem("Node", nullptr, tabFlags("Node"));
-        if (def && !def->help.empty() && (n->type!="Merge" && n->type!="Grade" && n->type!="ColorCorrect")) {  // the node's help on the tab row, cut to fit (all of it on hover)
+        if (def && !def->help.empty() && (n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && n->type!="TransformMasked"))) {  // the node's help on the tab row, cut to fit (all of it on hover)
             ImVec2 r0 = ImGui::GetItemRectMin(), r1 = ImGui::GetItemRectMax();
             ImGuiWindow* w = ImGui::GetCurrentWindow();
             const float x0 = r1.x + 12, x1 = w->WorkRect.Max.x - 4;
@@ -4285,7 +4316,6 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
     gDef = nullptr;
     ImGui::Unindent(6);
     ImGui::Spacing();
-    if((n->type=="Merge" || n->type=="Grade" || n->type=="ColorCorrect"))ImGui::GetWindowDrawList()->AddRect(headerMin,ImVec2(headerMax.x,ImGui::GetCursorScreenPos().y),IM_COL32(105,125,160,255));
     ImGui::PopID();
 }
 
@@ -4297,7 +4327,38 @@ void nodePanel(App& app, UiState& ui, Node* n, bool* keepOpen) {
     const bool clicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right);
     // (hover read before drawing: a click on a knob makes it the active item, which hides the window's hover after)
     const bool overWindow = clicked && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    struct PanelSize {float height=0,natural=0;};
+    static std::map<std::string,PanelSize> sizes;
+    auto& size=sizes[name];
+    const float width=ImGui::GetContentRegionAvail().x;
+    ImGui::PushID(name.c_str());
+    const bool collapsed=app.panelsCollapsed.count(name)>0;
+    const float height=collapsed?ImGui::GetFrameHeight()+16:size.height>0?std::max(size.height,size.natural):size.natural>0?size.natural:0;
+    // This child has an externally drawn border. Without AlwaysUseWindowPadding,
+    // ImGui gives borderless children zero padding, letting the last control touch
+    // or cross that border. Reserve the inset before measuring any knob widths.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(10,8));
+    ImGui::BeginChild("##resizableProperties",ImVec2(width,height),ImGuiChildFlags_AlwaysUseWindowPadding | (height>0?ImGuiChildFlags_None:ImGuiChildFlags_AutoResizeY),
+                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleVar();
+    const float top=ImGui::GetCursorPosY();
     nodePanelBody(app, ui, n, keepOpen);
+    const float natural=ImGui::GetCursorPosY()-top+ImGui::GetCurrentWindow()->WindowPadding.y*2;
+    size.natural=natural;
+    ImGui::EndChild();
+    const ImVec2 bottom=ImGui::GetItemRectMax(),left=ImGui::GetItemRectMin();
+    ImGui::GetWindowDrawList()->AddRect(left,ImVec2(bottom.x,bottom.y+10),IM_COL32(105,125,160,255));
+    const auto resume=ImGui::GetCursorScreenPos();
+    ImGui::SetCursorScreenPos(ImVec2(bottom.x-14,bottom.y));
+    ImGui::InvisibleButton("##resizeProperties",ImVec2(14,10));
+    if(ImGui::IsItemHovered() || ImGui::IsItemActive())ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+    if(ImGui::IsItemActivated())size.height=bottom.y-left.y;
+    if(ImGui::IsItemActive())size.height=std::clamp(size.height+ImGui::GetIO().MouseDelta.y,std::max(70.f,size.natural),std::max(2000.f,size.natural));
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("Drag to resize; stops below the last control. Double-click to fit");
+    if(ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))size.height=0;
+    auto* dl=ImGui::GetWindowDrawList();
+    for(int i=0;i<3;++i)for(int j=0;j<=i;++j)dl->AddRectFilled(ImVec2(bottom.x-3-j*3,bottom.y+7-(i-j)*3),ImVec2(bottom.x-2-j*3,bottom.y+8-(i-j)*3),IM_COL32(160,160,160,255));
+    ImGui::SetCursorScreenPos(ImVec2(resume.x,bottom.y+12));ImGui::Dummy(ImVec2(0,0));ImGui::PopID();
     const float y1 = ImGui::GetCursorScreenPos().y, my = ImGui::GetIO().MousePos.y;
     if (overWindow && my >= y0 && my < y1) {
         app.panelFocus = name;
@@ -4328,29 +4389,26 @@ void drawProperties(App& app, UiState& ui) {
     // the classic bin toolbar: how many panels stay open, and clear them all.
     {
         ImGui::AlignTextToFramePadding();
-        ImGui::TextDisabled("max panels");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(80);
-        int mp = app.maxPanels;
-        if (ImGui::InputInt("##maxpanels", &mp, 1, 1)) {
-            app.maxPanels = std::clamp(mp, 1, 50);
-            while ((int)app.panels.size() > app.maxPanels) app.panels.pop_back();
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("How many properties panels stay open; opening one more closes the oldest");
-        ImGui::SameLine();
-        ImGui::BeginDisabled(app.panels.empty());
-        if (ImGui::Button("clear all")) app.panels.clear();
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Close every panel in the properties bin");
-        ImGui::SameLine();
-        kit::checkbox("float new panels", &app.floatNewPanels);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Locks the bin: nodes opened from now on get floating windows of their own instead\n"
-                              "(the panels already here stay). While Welder is in front, floating panels stay\n"
-                              "above its other windows.");
-        ImGui::Separator();
+        ImGui::SetNextItemWidth(24);
+        int mp=app.maxPanels;
+        if(ImGui::InputInt("##maxpanels",&mp,0,0)){app.maxPanels=std::clamp(mp,1,50);while((int)app.panels.size()>app.maxPanels)app.panels.pop_back();}
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Maximum number of open property panels");
+        auto glyph=[&](const char* id,int kind){
+            ImGui::SameLine(0,4);const auto p=ImGui::GetCursorScreenPos();
+            const bool clicked=ImGui::InvisibleButton(id,ImVec2(16,18));auto* d=ImGui::GetWindowDrawList();const ImU32 c=IM_COL32(155,155,155,255),dark=IM_COL32(24,24,24,255);
+            if(kind==0){d->AddRectFilled(ImVec2(p.x+3,p.y+8),ImVec2(p.x+13,p.y+16),dark);d->AddCircle(ImVec2(p.x+8,p.y+7),4,dark,16,1.5f);}
+            if(kind==1){d->AddLine(ImVec2(p.x+3,p.y+5),ImVec2(p.x+13,p.y+15),c,2);d->AddLine(ImVec2(p.x+13,p.y+5),ImVec2(p.x+3,p.y+15),c,2);}
+            if(kind==2){ImVec2 q[]={ImVec2(p.x+2,p.y+13),ImVec2(p.x+11,p.y+3),ImVec2(p.x+14,p.y+6),ImVec2(p.x+5,p.y+16)};d->AddConvexPolyFilled(q,4,c);}
+            return clicked;
+        };
+        if(glyph("##lock",0))app.floatNewPanels=!app.floatNewPanels;
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Lock the properties bin; open new panels as floating windows");
+        if(glyph("##clear",1))app.panels.clear();
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Close all property panels");
+        if(glyph("##settings",2))ImGui::OpenPopup("properties_options");
+        if(ImGui::BeginPopup("properties_options")){kit::checkbox("Float new panels",&app.floatNewPanels);ImGui::EndPopup();}
+        ImGui::Dummy(ImVec2(1,4));
     }
-    if (app.panels.empty()) ImGui::TextDisabled("Double-click a node to edit it. S over the node graph: project settings.");
     std::vector<std::string> close;
     for (auto& name : std::vector<std::string>(app.panels.begin(), app.panels.end())) {
         if (name == App::kProjectPanel) {

@@ -23,7 +23,7 @@ namespace {
 constexpr ImU32 kKey = IM_COL32(90, 170, 255, 255);
 constexpr ImU32 kCache = IM_COL32(80, 200, 110, 230);
 
-float rulerHeight() { return std::round(ImGui::GetFontSize() * 2.8f); }
+float rulerHeight() { return 34.f*theme().uiScale; }
 float smallFont() { return std::round(ImGui::GetFontSize() * 0.85f); }
 
 std::string timecode(int frame, double fps) {
@@ -199,6 +199,19 @@ bool iconButton(const char* id, Icon ic, float w, bool on = false, const char* t
     return r;
 }
 
+bool captureActionButton(const char* id,int kind,float width,const char* tip) {
+    const ImVec2 p=ImGui::GetCursorScreenPos();const float h=ImGui::GetFrameHeight();
+    const bool clicked=ImGui::InvisibleButton(id,ImVec2(width,h));auto* d=ImGui::GetWindowDrawList();
+    const ImU32 gray=IM_COL32(150,150,150,255),dark=IM_COL32(50,50,50,255);
+    if(ImGui::IsItemHovered())d->AddRectFilled(p,ImVec2(p.x+width,p.y+h),IM_COL32(75,75,75,255));
+    const ImVec2 c(p.x+width*.5f,p.y+h*.5f);
+    d->AddRectFilled(ImVec2(c.x-7,c.y-5),ImVec2(c.x+7,c.y+5),gray);
+    if(kind==0)d->AddTriangleFilled(ImVec2(c.x-3,c.y-4),ImVec2(c.x-3,c.y+4),ImVec2(c.x+4,c.y),dark);
+    else d->AddCircleFilled(c,3.5f,dark,20);
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",tip);
+    return clicked;
+}
+
 bool textButton(const char* label, float w, bool on = false, const char* tip = nullptr) {
     if (on) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(kAccent));
     bool r = ImGui::Button(label, ImVec2(w, ImGui::GetFrameHeight()));
@@ -248,7 +261,7 @@ std::vector<double> openKeys(App& app) {
 
 float timelineHeight() {
     const ImGuiStyle& st = ImGui::GetStyle();
-    return std::round(6 * 2 + rulerHeight() + st.ItemSpacing.y + ImGui::GetFrameHeight());
+    return std::round(8 + rulerHeight() + st.ItemSpacing.y + ImGui::GetFrameHeight());
 }
 
 // Called before the dockspace each frame: the timeline's node keeps its height when the
@@ -317,7 +330,7 @@ void drawTimeline(App& app, UiState& ui) {
     // floating: the same fixed height; under a maximized viewer: that plus its title bar
     const float H = timelineHeight() + (ui.maximized == "Viewer" ? ImGui::GetFrameHeight() : 0.0f);
     ImGui::SetNextWindowSizeConstraints(ImVec2(160, H), ImVec2(FLT_MAX, FLT_MAX));  // at least tall enough; taller when dragged
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 6));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
     ImGui::Begin(ui.win("Timeline").c_str(), nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
     ui.noteHover("Timeline");
@@ -381,9 +394,9 @@ void drawTimeline(App& app, UiState& ui) {
     // ---------------------------------------------------------- row 1: [first] ruler [last]
     // First / last fields: edit the project range (Global, unless locked) or the
     // custom range; Input shows the input's range read-only.
-    const float fieldW = std::max(44.0f, ImGui::CalcTextSize(tc ? "00:00:00:00" : "000000").x + 10);
+    const float fieldW = std::max(40.0f, ImGui::CalcTextSize(tc ? "00:00:00:00" : "000000").x + 10);
     auto rangeField = [&](const char* id, int value, bool isFirst, float x) {
-        ImGui::SetCursorScreenPos(ImVec2(x, origin.y + RH - ImGui::GetFrameHeight()));
+        ImGui::SetCursorScreenPos(ImVec2(x, origin.y + 3));
         ImGui::SetNextItemWidth(fieldW);
         ImGui::BeginDisabled(inputMode || (!customMode && c.project.lockRange));
         int v = value;
@@ -564,16 +577,16 @@ void drawTimeline(App& app, UiState& ui) {
 
     // ---------------------------------------------------------- row 2
     const float y2 = origin.y + RH + st.ItemSpacing.y;
-    const float bw = std::round(ImGui::GetFrameHeight() * 1.25f);  // transport buttons
+    const float bw = 28.f*theme().uiScale;  // transport buttons
     const float sp = 2;                                               // between transport buttons
     const float frameW = std::max(48.0f, ImGui::CalcTextSize(tc ? "00:00:00:00" : "000000").x + 12);
-    const float fpsW = ImGui::CalcTextSize("000.00").x + ImGui::GetFrameHeight() + 6;
-    const float tfW = ImGui::CalcTextSize("TF").x + ImGui::GetFrameHeight() + 8;
-    const float modeW = ImGui::CalcTextSize("Custom").x + ImGui::GetFrameHeight() + 10;
+    const float fpsW = 58*theme().uiScale;
+    const float tfW = 35*theme().uiScale;
+    const float modeW = 70*theme().uiScale;
     const float incW = ImGui::CalcTextSize("000").x + 8;
     const float countW = ImGui::CalcTextSize("000000").x + 10;
-    const float flipW = ImGui::CalcTextSize("Flipbook").x + st.FramePadding.x * 2;
-    const float captureW = ImGui::CalcTextSize("Capture").x + st.FramePadding.x * 2;
+    const float flipW = 22*theme().uiScale;
+    const float captureW = 22*theme().uiScale;
 
     // What fits: the less-used parts drop out as the panel narrows.
     struct Show { bool tf = true, inc = true, loop = true, keys = true, io = true, ends = true, actions = true, duration = true, steps = true; } show;
@@ -724,10 +737,10 @@ void drawTimeline(App& app, UiState& ui) {
     // The overflow keeps secondary actions available at every panel width.
     ImGui::SetCursorScreenPos(ImVec2(origin.x + W - rwid, y2));
     if (show.actions && leftFits) {
-        if (textButton("Flipbook", flipW, false, "Render a preview of the current Viewer input over the playback range"))
+        if (captureActionButton("##Flipbook",0,flipW, "Render a preview of the current Viewer input over the playback range"))
             openFlipbook(app, ui);
         next();
-        if (textButton("Capture", captureW, false, "Save the visible Viewer image area as a PNG"))
+        if (captureActionButton("##Capture",1,captureW, "Save the visible Viewer image area as a PNG"))
             openViewerCapture(app, ui);
         next();
     }

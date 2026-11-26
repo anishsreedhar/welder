@@ -670,27 +670,27 @@ static void viewerRuler(const char* label, float& value, float width, int kind) 
     ImGui::PushID(label);
     const float startX = ImGui::GetCursorScreenPos().x;
     auto stepArrow = [&](bool up) {
-        if (ImGui::InvisibleButton(up ? "##up" : "##down", ImVec2(10,20))) value=std::clamp(value*(up?2.f:.5f),1.f/64,64.f);
+        if (ImGui::InvisibleButton(up ? "##up" : "##down", ImVec2(8,18))) value=std::clamp(value*(up?2.f:.5f),1.f/64,64.f);
         ImVec2 p=ImGui::GetItemRectMin();
         ImDrawList* d=ImGui::GetWindowDrawList();
-        d->AddTriangleFilled(ImVec2(p.x+(up?8:2),p.y+10),ImVec2(p.x+(up?2:8),p.y+5),ImVec2(p.x+(up?2:8),p.y+15),IM_COL32(170,170,170,255));
+        d->AddTriangleFilled(ImVec2(p.x+(up?6:2),p.y+9),ImVec2(p.x+(up?2:6),p.y+4),ImVec2(p.x+(up?2:6),p.y+14),IM_COL32(170,170,170,255));
         if(ImGui::IsItemHovered())ImGui::SetTooltip(up?"Increase exposure by one stop":"Decrease exposure by one stop");
         ImGui::SameLine(0,2);
     };
-    if(kind==0)stepArrow(false);
+    if(kind==0){stepArrow(false);ImGui::SetCursorScreenPos(ImVec2(startX+18,ImGui::GetCursorScreenPos().y));}
     ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(label);
-    if(kind==0){ImGui::SameLine(0,2);stepArrow(true);}
-    ImGui::SameLine(0,3); ImGui::SetNextItemWidth(44);
+    if(kind==0){ImGui::SameLine(0,2);ImGui::SetCursorScreenPos(ImVec2(startX+44,ImGui::GetCursorScreenPos().y));stepArrow(true);}
+    ImGui::SameLine(0,3); ImGui::SetNextItemWidth(40);
     ImGui::InputFloat("##value", &value, 0, 0, "%.3g");
     value = std::clamp(value, kind == 0 ? 1.f/64 : kind == 1 ? .01f : -4.f, kind == 0 ? 64.f : 8.f);
     ImGui::SameLine(0,3);
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const float w = std::max(80.f,width - (p.x-startX) - 8);
-    ImGui::InvisibleButton("##scale",ImVec2(w,24));
+    ImGui::InvisibleButton("##scale",ImVec2(w,18));
     const std::vector<float> values = kind == 0 ? std::vector<float>{1.f/64,.1f,1,10,64} :
-        kind == 1 ? std::vector<float>{.2f,.3f,.5f,.7f,1,2,3,4,5} : std::vector<float>{0,.1f,.4f,.7f,1,2,3,4};
+        kind == 1 ? std::vector<float>{0,.1f,.4f,.7f,1,2,3,4} : std::vector<float>{0,.1f,.4f,.7f,1,2,3,4};
     const std::vector<float> positions = kind == 0 ? std::vector<float>{0,.22f,.5f,.82f,1} :
-        kind == 1 ? std::vector<float>{0,.1f,.2f,.3f,.5f,.67f,.79f,.9f,1} : std::vector<float>{0,.17f,.32f,.43f,.5f,.68f,.84f,1};
+        kind == 1 ? std::vector<float>{0,.17f,.32f,.43f,.5f,.68f,.84f,1} : std::vector<float>{0,.17f,.32f,.43f,.5f,.68f,.84f,1};
     auto map = [](float x, const std::vector<float>& from, const std::vector<float>& to) {
         x=std::clamp(x,from.front(),from.back());
         size_t i=1; while(i+1<from.size() && x>from[i])++i;
@@ -702,26 +702,26 @@ static void viewerRuler(const char* label, float& value, float width, int kind) 
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) value=1;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s: drag ruler or type a value; double-click resets to 1",kind==0?"Brightness (gain)":kind==1?"Gamma":"Saturation");
     ImDrawList* d=ImGui::GetWindowDrawList();
-    d->AddLine(ImVec2(p.x,p.y+10),ImVec2(p.x+w,p.y+10),IM_COL32(12,12,12,255));
+    d->AddLine(ImVec2(p.x,p.y+8),ImVec2(p.x+w,p.y+8),IM_COL32(12,12,12,255));
     for(int i=0;i<=32;++i) {
         const float x=p.x+w*i/32.f;
-        d->AddLine(ImVec2(x,p.y+(i%4?5:2)),ImVec2(x,p.y+10),IM_COL32(19,19,19,255));
+        d->AddLine(ImVec2(x,p.y+(i%4?4:1)),ImVec2(x,p.y+8),IM_COL32(19,19,19,255));
     }
     for(float tick:values) {
         char b[16]; std::snprintf(b,sizeof b,"%g",tick);
         const float x=p.x+w*toT(tick);
         const float tw=ImGui::CalcTextSize(b).x*.75f;
-        d->AddText(ImGui::GetFont(),9,ImVec2(std::clamp(x-tw*.5f,p.x,p.x+w-tw),p.y+12),IM_COL32(17,17,17,255),b);
+        d->AddText(ImGui::GetFont(),9,ImVec2(std::clamp(x-tw*.5f,p.x,p.x+w-tw),p.y+10),IM_COL32(17,17,17,255),b);
     }
     const float x=p.x+w*std::clamp(toT(value),0.f,1.f);
-    d->AddRectFilled(ImVec2(x-2,p.y+3),ImVec2(x+2,p.y+14),IM_COL32(124,111,58,255));
-    d->AddRect(ImVec2(x-2,p.y+3),ImVec2(x+2,p.y+14),IM_COL32(12,12,12,255));
+    d->AddRectFilled(ImVec2(x-2,p.y+1),ImVec2(x+2,p.y+12),IM_COL32(124,111,58,255));
+    d->AddRect(ImVec2(x-2,p.y+1),ImVec2(x+2,p.y+12),IM_COL32(12,12,12,255));
     ImGui::PopID();
 }
 
 static void drawReferenceToolbar(App& app, UiState& ui, ViewerState& v, Node* vn, int aPipe, int bPipe, bool active) {
-    ImGui::PushFont(theme().regular,14);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(4,2));
+    ImGui::PushFont(theme().regular,13);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(3,2));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(2,1));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,0);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(2,1));
@@ -730,9 +730,9 @@ static void drawReferenceToolbar(App& app, UiState& ui, ViewerState& v, Node* vn
     ImGui::PushStyleColor(ImGuiCol_FrameBg,IM_COL32(43,43,43,255));
     ImGui::PushStyleColor(ImGuiCol_Button,IM_COL32(49,49,49,255));
     ImGui::PushStyleColor(ImGuiCol_Border,IM_COL32(25,25,25,255));
-    const float width=std::max(1120.f,ImGui::GetContentRegionAvail().x-4);
-    ImGui::SetNextWindowContentSize(ImVec2(width,51));
-    ImGui::BeginChild("##viewerTop",ImVec2(0,ImGui::GetContentRegionAvail().x<1124?72:55),ImGuiChildFlags_None,ImGuiWindowFlags_HorizontalScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
+    const float width=std::max(1120.f,ImGui::GetContentRegionAvail().x);
+    ImGui::SetNextWindowContentSize(ImVec2(width,47));
+    ImGui::BeginChild("##viewerTop",ImVec2(0,ImGui::GetContentRegionAvail().x<1120?65:47),ImGuiChildFlags_None,ImGuiWindowFlags_HorizontalScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::SetNextItemWidth(64);
     if(ImGui::BeginCombo("##layer",v.layer.c_str())) {
         for(const char* layer:{"none","rgb","rgba"}) if(ImGui::Selectable(layer,v.layer==layer)) {v.layer=layer;v.dirtyTexture=true;}
@@ -786,8 +786,8 @@ static void drawReferenceToolbar(App& app, UiState& ui, ViewerState& v, Node* vn
     ImGui::SameLine();ImGui::SetNextItemWidth(65);
     char r[12];std::snprintf(r,sizeof r,"1:%d",std::max(1,v.resolutionDivisor));
     if(ImGui::BeginCombo("##res",r)){for(int i:{1,2,4,8,16,32}){char b[12];std::snprintf(b,sizeof b,"1:%d",i);if(ImGui::Selectable(b,v.resolutionDivisor==i)){v.resolutionDivisor=i;v.proxy=i>1;v.reqScale=0;}}ImGui::EndCombo();}
-    ImGui::SameLine();if(viewerToolIcon("settings",8,v.openSettings,"Viewer settings"))v.openSettings=true;
-    ImGui::SetCursorPos(ImVec2(2,26));
+    ImGui::SameLine();if(viewerToolIcon("settings",8,v.openSettings,"Viewer tools and display settings"))v.openSettings=true;
+    ImGui::SetCursorPos(ImVec2(2,24));
     const float rulerWidth=(width-125)/3;
     float gain=std::pow(2.f,v.fstop);viewerRuler("f/8",gain,rulerWidth,0);v.fstop=std::log2(gain);
     ImGui::SameLine(rulerWidth+2);viewerRuler("\xCE\xB3",v.gamma,rulerWidth,1);
@@ -809,7 +809,7 @@ static void drawReferenceToolbar(App& app, UiState& ui, ViewerState& v, Node* vn
 // it is the active viewer (main renderer, overlays, tools).
 static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, bool active, const std::string& winName) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::Begin(winName.c_str(), nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::Begin(((vn?vn->name:std::string("Viewer1"))+"###"+winName).c_str(), nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
     ui.noteHover("Viewer");
     const std::string vname = vn ? vn->name : "";
@@ -896,7 +896,8 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
     }
 
     drawReferenceToolbar(app, ui, v, vn, aPipe, bPipe, active);
-    if(ImGui::CollapsingHeader("Viewer tools")) {
+    if(v.openSettings){ImGui::OpenPopup("viewer_tools");v.openSettings=false;}
+    if(ImGui::BeginPopup("viewer_tools")) {
     // ---- toolbar: grouped segments (what's viewed | channels | display | view), status on the right
     ImGui::SetCursorPos(ImVec2(8, ImGui::GetCursorPosY() + 6));
     ImDrawList* tdl = ImGui::GetWindowDrawList();
@@ -1121,6 +1122,7 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
         ImGui::TextDisabled("%.0f ms", active ? app.lastRenderMs() : v.res.ms);
     }
     ImGui::Dummy(ImVec2(0, 2));
+        ImGui::EndPopup();
     }
 
     // ---- a viewer tool's own row (the Tracker's toolbar)
@@ -1162,6 +1164,7 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
         if (!v.res.bbox.empty()) shown = shown.unite(v.res.bbox);
         if (seen.intersect(shown).empty()) v.fitPending = true;
     }
+    if(nodeA.empty() && v.fitPending){v.res.format=app.comp->format;v.zoom=.25f;v.pan=ImVec2(v.res.format.width*.5f,v.res.format.height*.5f);v.fitPending=false;}
     if (v.fitPending && v.res.format.width > 0) viewerFit(v, size);
 
     ImVec2 center(p0.x + size.x * 0.5f, p0.y + size.y * 0.5f);
@@ -1399,10 +1402,11 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
         drawViewerGuides(dl, v, viewXf());
         }
     } else {
-        const char* msg = nodeA.empty() ? "Select a node and press 1 to view it" : "";
-        if (!res.error.empty()) msg = "";
-        ImVec2 ts = ImGui::CalcTextSize(msg);
-        dl->AddText(ImVec2(center.x - ts.x / 2, center.y - ts.y / 2), IM_COL32(120, 120, 120, 255), msg);
+        if(nodeA.empty()) {
+            const auto& f=app.comp->format;
+            dl->AddRect(toScreen(0,f.height),toScreen(f.width,0),IM_COL32(90,90,90,255));
+        }
+
     }
     if (v.roiEnabled || v.roiDragging) {
         const Box box = v.roiDragging ? roiEdit() : v.roi;
@@ -1582,9 +1586,11 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
     dl->PopClipRect();
 
     // ---- info bar: format, bbox, pixel under the cursor
+    dl->AddRectFilled(ImVec2(p0.x,p1.y),ImVec2(p1.x,p1.y+infoH+4),IM_COL32(0,0,0,255));
     ImGui::SetCursorScreenPos(ImVec2(p0.x + 6, p1.y + 4));
+    if(!res.image){const auto& f=app.comp->format;ImGui::Text("%dx%d  bbox: 0 0 1 1 channels: none",f.width,f.height);}
     if (res.image) {
-        ImGui::TextDisabled("%dx%d  bbox %d %d %d %d  %d ch  frame %g", res.format.width, res.format.height,
+        ImGui::Text("%dx%d  bbox %d %d %d %d  %d ch  frame %g", res.format.width, res.format.height,
                             res.bbox.x1, res.bbox.y1, res.bbox.x2, res.bbox.y2, (int)res.image->channels.size(),
                             res.frame);
         if (v.hovered || !v.sampleBox.empty()) {

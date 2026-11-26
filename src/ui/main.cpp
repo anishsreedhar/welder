@@ -57,6 +57,8 @@ namespace fs = std::filesystem;
 using namespace strata;
 using namespace strata::ui;
 
+namespace strata::ui {bool messagePanelVisible();}
+
 namespace {
 
 struct Options {
@@ -111,13 +113,13 @@ void buildLayout(ImGuiID dock, ImVec2 size) {
     ImGui::DockBuilderAddNode(dock, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(dock, size);
     ImGuiID left, main;
-    ImGui::DockBuilderSplitNode(dock, ImGuiDir_Left, 46.0f / size.x, &left, &main);
+    ImGui::DockBuilderSplitNode(dock, ImGuiDir_Left, 42.0f / size.x, &left, &main);
     ImGuiID right, center;
-    ImGui::DockBuilderSplitNode(main, ImGuiDir_Right, 0.30f, &right, &center);
+    ImGui::DockBuilderSplitNode(main, ImGuiDir_Right, 0.328f, &right, &center);
     ImGuiID top, bottom;
-    ImGui::DockBuilderSplitNode(center, ImGuiDir_Up, 0.60f, &top, &bottom);
+    ImGui::DockBuilderSplitNode(center, ImGuiDir_Up, 0.568f, &top, &bottom);
     ImGuiID viewer, timeline;
-    ImGui::DockBuilderSplitNode(top, ImGuiDir_Down, timelineHeight() / (size.y * 0.6f), &timeline, &viewer);
+    ImGui::DockBuilderSplitNode(top, ImGuiDir_Down, timelineHeight() / (size.y * 0.568f), &timeline, &viewer);
     ImGui::DockBuilderDockWindow("Nodes", left);
     ImGui::DockBuilderDockWindow("Viewer", viewer);
     ImGui::DockBuilderDockWindow("Timeline", timeline);
@@ -125,6 +127,8 @@ void buildLayout(ImGuiID dock, ImVec2 size) {
     ImGui::DockBuilderDockWindow("Curve Editor", bottom);
     ImGui::DockBuilderDockWindow("Dope Sheet", bottom);
     ImGui::DockBuilderDockWindow("Node Graph", bottom);
+    ImGui::DockBuilderDockWindow("Background Renders", right);
+    ImGui::DockBuilderDockWindow("Scene Graph", right);
     ImGui::DockBuilderDockWindow("Properties", right);
     for (ImGuiID id : {left, timeline}) {  // no tab bars; every edge can still be dragged
         if (ImGuiDockNode* n = ImGui::DockBuilderGetNode(id)) n->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
@@ -132,7 +136,7 @@ void buildLayout(ImGuiID dock, ImVec2 size) {
     ImGui::DockBuilderFinish(dock);
 }
 
-const char* const kPanelNames[] = {"Nodes", "Viewer", "Timeline", "Node Graph", "Properties", "Messages", "Curve Editor", "Dope Sheet"};
+const char* const kPanelNames[] = {"Nodes", "Viewer", "Timeline", "Node Graph", "Properties", "Messages", "Curve Editor", "Dope Sheet", "Background Renders", "Scene Graph"};
 
 // Reset Workspace: forget every dock node (floating ones too) and where each panel was, then
 // build the default layout.
@@ -315,6 +319,12 @@ int main(int argc, char** argv) {
         startupDone();
         return 1;
     }
+    if (const char* preview = std::getenv("WELDER_SPLASH_PREVIEW"); preview && *preview) {
+        const bool ok = splash::preview(preview);
+        glfwTerminate();
+        startupDone();
+        return ok ? 0 : 1;
+    }
     // The splash stays up while plug-ins are found and the file loads (not for scripted screenshots).
     const bool useSplash = opt.screenshot.empty() && !opt.idScan && !safeMode && !envFlag("WELDER_NO_SPLASH") &&
                            !envFlag("STRATA_NO_SPLASH");
@@ -390,6 +400,7 @@ int main(int argc, char** argv) {
         fs::rename(iniPath, iniPath + ".bak", ec);  // kept beside it, just in case
     }
     App app;
+    app.maxPanels=10;
     app.exeDir = fs::path(absolutePath(argv[0])).parent_path().string();
 #if defined(__APPLE__)
     setenv("PYTHONDONTWRITEBYTECODE", "1", 0);  // Python helpers run from inside the signed app: write nothing there
@@ -426,10 +437,18 @@ int main(int argc, char** argv) {
         const bool haveRegular = fs::exists(regular);
         ImFontConfig cfg;
         cfg.OversampleH = 2;
-        theme().regular = io.Fonts->AddFontFromFileTTF(haveRegular ? regular.c_str() : font.c_str(), 14.5f * scale, &cfg);
-        theme().medium = io.Fonts->AddFontFromFileTTF(font.c_str(), 14.5f * scale, &cfg);
+        theme().regular = io.Fonts->AddFontFromFileTTF(haveRegular ? regular.c_str() : font.c_str(), 13.f * scale, &cfg);
+        theme().medium = io.Fonts->AddFontFromFileTTF(font.c_str(), 13.f * scale, &cfg);
         theme().small = io.Fonts->AddFontFromFileTTF(font.c_str(), 11.5f * scale, &cfg);
     }
+#ifdef _WIN32
+    if(fs::exists("C:/Windows/Fonts/arial.ttf")) {
+        ImFontConfig cfg;cfg.OversampleH=2;cfg.OversampleV=2;
+        theme().regular=io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/arial.ttf",13.f*scale,&cfg);
+        theme().medium=io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/arial.ttf",13.f*scale,&cfg);
+        io.FontDefault=theme().regular;
+    }
+#endif
     theme().uiScale = scale;
     loadNodeLabelFonts();
     applyTheme(app.themeName);
@@ -546,9 +565,12 @@ int main(int argc, char** argv) {
                 static ImVec2 at(-100, -100);
                 static bool down = false;
                 if (events.is_array()) {
-                    for (const auto& e : events) if (e.is_array() && e.size() == 4 && e[0] == frameCount) {
+                    for (const auto& e : events) if (e.is_array() && e.size() >= 4 && e[0] == frameCount) {
                         at = ImVec2(e[1].get<float>(), e[2].get<float>());
                         down = e[3].get<bool>();
+                        if(e.size()>4)ImGui::GetIO().AddMouseWheelEvent(0,e[4].get<float>());
+                        if(e.size()>5)ImGui::GetIO().AddKeyEvent(ImGuiMod_Shift,e[5].get<bool>());
+                        if(e.size()>6)ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl,e[6].get<bool>());
                     }
                     auto& input = ImGui::GetIO();
                     input.ConfigInputTrickleEventQueue = false;
@@ -626,7 +648,7 @@ int main(int argc, char** argv) {
             struct PanelFn { const char* name; void (*fn)(App&, UiState&); };
             static const PanelFn kPanels[] = {{"Nodes", drawToolbar},       {"Viewer", drawViewer},
                                               {"Timeline", drawTimeline},   {"Node Graph", drawNodeGraph},
-                                              {"Properties", drawProperties}, {"Messages", drawMessages},
+                                              {"Properties", drawProperties}, {"Background Renders", drawBackgroundRenders}, {"Scene Graph", drawSceneGraph}, {"Messages", drawMessages},
                                               {"Curve Editor", drawCurveEditor}, {"Dope Sheet", drawDopeSheet}};
             static std::string lastMax;
             static std::vector<std::string> shownTabs;  // the tab each dock area showed before maximizing
@@ -652,6 +674,7 @@ int main(int argc, char** argv) {
             const bool viewerMax = ui.maximized == "Viewer";
             const float tlH = viewerMax ? std::min(timelineHeight() + ImGui::GetFrameHeight(), vp->WorkSize.y * 0.5f) : 0.0f;  // (+ its title bar)
             for (auto& p : kPanels) {
+                if(std::string(p.name)=="Messages" && !messagePanelVisible())continue;
                 const bool timelineUnder = viewerMax && std::string(p.name) == "Timeline";
                 if (!ui.maximized.empty() && ui.maximized != p.name && !timelineUnder) continue;
                 if (timelineUnder) {

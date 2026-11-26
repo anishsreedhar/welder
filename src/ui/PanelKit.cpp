@@ -131,6 +131,25 @@ bool valueField(const char* id, double* v, float width, const char* prefix, bool
         changed = ImGui::DragScalar(id, ImGuiDataType_Double, v, (float)speed, nullptr, nullptr, gReferenceFields ? "%.6g" : whole ? "%.0f" : twoDp ? "%.2f" : "%.4g", fl);
     }
     if(idleReference)ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered() && !(GImGui->CurrentItemFlags & ImGuiItemFlags_Disabled)) {
+        // Claim the wheel for this field so the Properties bin stays still.
+        ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+        const auto& io=ImGui::GetIO();
+        if(io.MouseWheel!=0 && !io.KeyAlt) {
+            double step=isInt?1.:.1;
+            if(io.KeyShift)step*=.1;
+            if(io.KeyCtrl)step*=10.;
+            if(isInt)step=std::max(1.,step);
+            double next=*v+io.MouseWheel*step;
+            if(isInt){next=std::round(next);if(hi>lo)next=std::clamp(next,lo,hi);}
+            if(std::isfinite(next) && next!=*v){
+                *v=next;changed=true;ImGui::MarkItemEdited(ImGui::GetItemID());
+                // Keep a selected text field in sync instead of restoring its old
+                // editing buffer on the next frame after a wheel adjustment.
+                if(auto* input=ImGui::GetInputTextState(ImGui::GetItemID()))input->ReloadUserBufAndSelectAll();
+            }
+        }
+    }
     if(gReferenceFields && !ImGui::TempInputIsActive(ImGui::GetID(id))) {
         char text[48];std::snprintf(text,sizeof text,isInt?"%.0f":"%.6g",*v);
         const ImVec2 p=ImGui::GetItemRectMin();
@@ -166,7 +185,7 @@ static void referenceRail(ImVec2 p,float width,float height,double t,
     d->AddRectFilled(ImVec2(left+width-2,y-8),ImVec2(left+width-1,y+12),IM_COL32(33,33,33,255));
     float lastRight=-1e9f;
     for(auto [value,position]:labels) {
-        char text[24];std::snprintf(text,sizeof text,"%.2g",std::fabs(value)<1e-9?0:value);
+        char text[24];std::snprintf(text,sizeof text,"%.3g",std::fabs(value)<1e-9?0:value);
         const float w=ImGui::GetFont()->CalcTextSizeA(9,FLT_MAX,0,text).x;
         const float x=std::min(xAt(position),left+width-w);
         if(x>=lastRight+2){d->AddText(ImGui::GetFont(),9,ImVec2(x,y+3),IM_COL32(0,0,0,255),text);lastRight=x+w;}
@@ -222,6 +241,21 @@ bool tickSlider(const char* id, double* v, double lo, double hi, float width, bo
         for(int i=0;i<=50;++i)ticks.emplace_back(i/50.,i%5==0);
         for(int i=0;i<=10;++i)labels.emplace_back(i/10.,i/10.);
         referenceRail(p,width,h,*v,ticks,labels);
+        if(active)ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        return changed;
+    }
+    if(gReferenceFields) {
+        std::vector<std::pair<double,bool>> ticks;std::vector<std::pair<double,double>> labels;
+        for(int i=0;i<=60;++i)ticks.emplace_back(i/60.,i%10==0);
+        if(log && lo>0) {
+            ticks.clear();
+            for(double v=.1;v<=10.001;v+=v<1?.02:.2)ticks.emplace_back(toT(v,lo,hi,log),false);
+            for(double v:{.1,.2,.3,.4,.6,.8,1.,2.,3.,4.,6.,8.,10.})labels.emplace_back(v,toT(v,lo,hi,log));
+        } else {
+            const int divisions=lo==-180?8:10;
+            for(int i=0;i<=divisions;++i){double v=lo+(hi-lo)*i/divisions;labels.emplace_back(v,toT(v,lo,hi,log));}
+        }
+        referenceRail(p,width,h,toT(*v,lo,hi,log),ticks,labels);
         if(active)ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         return changed;
     }

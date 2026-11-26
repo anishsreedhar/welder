@@ -33,6 +33,9 @@
 namespace fs = std::filesystem;
 
 namespace strata::ui {
+static bool gMessagesVisible=false;
+bool messagePanelVisible(){return gMessagesVisible;}
+
 
 bool typingInText() { return ImGui::GetIO().WantTextInput; }
 
@@ -435,39 +438,38 @@ void drawMenuBar(App& app, UiState& ui) {
         if (ImGui::MenuItem("Preferences...", "Shift+S")) ui.showPrefs = true;
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("Render")) {
-        if (ImGui::MenuItem("Render All...", "F5")) openRenderDialog(app, ui, false);
-        if (ImGui::MenuItem("Render Selected...", "F7")) openRenderDialog(app, ui, true);
-        ImGui::Separator();
-        bool pm = app.comp->project.proxyMode;
-        if (ImGui::MenuItem("Proxy Mode", "Ctrl+P", pm)) app.edit([pm](Comp& c) { c.project.proxyMode = !pm; });
-        if (ImGui::MenuItem("Clear Buffers", "F12")) app.clearCaches();
-        if (ImGui::BeginMenu("Disk Cache")) {
-            DiskCache* dc = app.diskCache();
-            if (dc) {
-                char b[128];
-                std::snprintf(b, sizeof b, "%.1f of %.0f GB used", dc->bytes() / 1073741824.0, dc->budget() / 1073741824.0);
-                ImGui::TextDisabled("%s", b);
-                ImGui::TextDisabled("%s", dc->dir().c_str());
-            } else
-                ImGui::TextDisabled("off");
-            ImGui::Separator();
-            const double sizes[] = {0, 5, 10, 20, 50, 100};
-            for (double gb : sizes) {
-                std::string label = gb == 0 ? std::string("Off") : std::to_string((int)gb) + " GB";
-                if (ImGui::MenuItem(label.c_str(), nullptr, app.diskCacheGB == gb)) {
-                    app.diskCacheGB = gb;
-                    app.setDiskCacheGB(gb);
-                    app.saveSettings();
+    if (ImGui::BeginMenu("Workspace")) {
+        for (int i = 1; i <= kWorkspaceSlots; ++i) {
+            const bool saved = workspaceSaved(i);
+            if (!saved && i > 1) continue;
+            const std::string label = workspaceName(i) + (i == 1 && !saved ? " (default)" : "") + "##ws" + std::to_string(i);
+            if (ImGui::MenuItem(label.c_str(), ("Shift+F" + std::to_string(i)).c_str())) ui.loadWorkspace = i;
+        }
+        if (ImGui::MenuItem("Save Workspace...")) ui.openSaveWorkspace = true;
+        bool any = false;
+        for (int i = 1; i <= kWorkspaceSlots; ++i) any = any || workspaceSaved(i);
+        if (ImGui::BeginMenu("Delete Workspace", any)) {
+            for (int i = 1; i <= kWorkspaceSlots; ++i)
+                if (workspaceSaved(i) && ImGui::MenuItem((workspaceName(i) + (i == 1 ? " (back to the default)" : "") + "##del" + std::to_string(i)).c_str())) {
+                    std::error_code ec;
+                    fs::remove(fs::path(brand::configDir()) / "workspaces" / ("workspace" + std::to_string(i) + ".ini"), ec);
                 }
-            }
-            ImGui::Separator();
-            if (ImGui::MenuItem("Clear Disk Cache", nullptr, false, dc != nullptr)) {
-                dc->clear();
-                app.message("cleared the disk cache");
-            }
             ImGui::EndMenu();
         }
+        if (ImGui::MenuItem("Reset Workspace", "Shift+F12")) ui.resetWorkspace = true;
+        ImGui::Separator();
+        // bring a panel to the front (a tab hidden behind others, or a floating one)
+        if (ImGui::MenuItem("Script Editor")) {
+            ui.showScriptEditor = true;
+            ImGui::SetWindowFocus("Script Editor");
+        }
+        if(ImGui::MenuItem("Messages",nullptr,gMessagesVisible))gMessagesVisible=!gMessagesVisible;
+        for (const char* w : {"Viewer", "Node Graph", "Properties", "Curve Editor", "Dope Sheet", "Timeline", "Nodes", "Background Renders", "Scene Graph"})
+            if (ImGui::MenuItem(w)) {
+                if (!ui.maximized.empty() && ui.maximized != w) ui.maximized.clear();
+                ImGui::SetWindowFocus(w);
+            }
+        drawScriptsMenu(app,ui);
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Viewer")) {
@@ -521,39 +523,46 @@ void drawMenuBar(App& app, UiState& ui) {
         }
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("Workspace")) {
-        for (int i = 1; i <= kWorkspaceSlots; ++i) {
-            const bool saved = workspaceSaved(i);
-            if (!saved && i > 1) continue;
-            const std::string label = workspaceName(i) + (i == 1 && !saved ? " (default)" : "") + "##ws" + std::to_string(i);
-            if (ImGui::MenuItem(label.c_str(), ("Shift+F" + std::to_string(i)).c_str())) ui.loadWorkspace = i;
-        }
-        if (ImGui::MenuItem("Save Workspace...")) ui.openSaveWorkspace = true;
-        bool any = false;
-        for (int i = 1; i <= kWorkspaceSlots; ++i) any = any || workspaceSaved(i);
-        if (ImGui::BeginMenu("Delete Workspace", any)) {
-            for (int i = 1; i <= kWorkspaceSlots; ++i)
-                if (workspaceSaved(i) && ImGui::MenuItem((workspaceName(i) + (i == 1 ? " (back to the default)" : "") + "##del" + std::to_string(i)).c_str())) {
-                    std::error_code ec;
-                    fs::remove(fs::path(brand::configDir()) / "workspaces" / ("workspace" + std::to_string(i) + ".ini"), ec);
+    if (ImGui::BeginMenu("Render")) {
+        if (ImGui::MenuItem("Render All...", "F5")) openRenderDialog(app, ui, false);
+        if (ImGui::MenuItem("Render Selected...", "F7")) openRenderDialog(app, ui, true);
+        ImGui::Separator();
+        bool pm = app.comp->project.proxyMode;
+        if (ImGui::MenuItem("Proxy Mode", "Ctrl+P", pm)) app.edit([pm](Comp& c) { c.project.proxyMode = !pm; });
+        if (ImGui::MenuItem("Clear Buffers", "F12")) app.clearCaches();
+        if (ImGui::BeginMenu("Disk Cache")) {
+            DiskCache* dc = app.diskCache();
+            if (dc) {
+                char b[128];
+                std::snprintf(b, sizeof b, "%.1f of %.0f GB used", dc->bytes() / 1073741824.0, dc->budget() / 1073741824.0);
+                ImGui::TextDisabled("%s", b);
+                ImGui::TextDisabled("%s", dc->dir().c_str());
+            } else
+                ImGui::TextDisabled("off");
+            ImGui::Separator();
+            const double sizes[] = {0, 5, 10, 20, 50, 100};
+            for (double gb : sizes) {
+                std::string label = gb == 0 ? std::string("Off") : std::to_string((int)gb) + " GB";
+                if (ImGui::MenuItem(label.c_str(), nullptr, app.diskCacheGB == gb)) {
+                    app.diskCacheGB = gb;
+                    app.setDiskCacheGB(gb);
+                    app.saveSettings();
                 }
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Clear Disk Cache", nullptr, false, dc != nullptr)) {
+                dc->clear();
+                app.message("cleared the disk cache");
+            }
             ImGui::EndMenu();
         }
-        if (ImGui::MenuItem("Reset Workspace", "Shift+F12")) ui.resetWorkspace = true;
-        ImGui::Separator();
-        // bring a panel to the front (a tab hidden behind others, or a floating one)
-        if (ImGui::MenuItem("Script Editor")) {
-            ui.showScriptEditor = true;
-            ImGui::SetWindowFocus("Script Editor");
-        }
-        for (const char* w : {"Viewer", "Node Graph", "Properties", "Curve Editor", "Dope Sheet", "Messages", "Timeline", "Nodes"})
-            if (ImGui::MenuItem(w)) {
-                if (!ui.maximized.empty() && ui.maximized != w) ui.maximized.clear();
-                ImGui::SetWindowFocus(w);
-            }
         ImGui::EndMenu();
     }
-    drawScriptsMenu(app, ui);
+    if(ImGui::BeginMenu("Cache")){
+        if(ImGui::MenuItem("Clear cached buffers"))app.clearCaches();
+        if(ImGui::MenuItem("Cache playback range",nullptr,app.precaching()))app.setPrecache(!app.precaching());
+        ImGui::EndMenu();
+    }
     if (ImGui::BeginMenu("Help")) {
         if (ImGui::MenuItem("User Manual")) {
             // the manual next to the app (packages), inside a macOS app, or beside a dev build
@@ -605,6 +614,16 @@ void drawMenuBar(App& app, UiState& ui) {
     ImGui::SameLine(ImGui::GetWindowWidth() - w - 16);
     ImGui::TextDisabled("%s", title.c_str());
     ImGui::EndMainMenuBar();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(4,0));
+    if(ImGui::BeginViewportSideBar("##workspaceStatus",ImGui::GetMainViewport(),ImGuiDir_Down,18*theme().uiScale,ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoNav)) {
+        const auto result=app.result();
+        char status[160];std::snprintf(status,sizeof status,"Channel Count: %zu    Render: %.0f ms",result.image?result.image->channels.size():size_t(0),app.lastRenderMs());
+        const float width=ImGui::CalcTextSize(status).x;
+        ImGui::SetCursorPosX(std::max(4.f,ImGui::GetWindowWidth()-width-44));ImGui::TextUnformatted(status);ImGui::SameLine();
+        ImGui::TextColored(app.rendering()?ImVec4(.9f,.6f,.1f,1):ImVec4(.2f,.75f,.2f,1),app.rendering()?"BUSY":"OK");
+    }
+    ImGui::End();ImGui::PopStyleVar();
+
 }
 
 // ------------------------------------------------------------------ toolbar
@@ -616,47 +635,36 @@ void categoryIcon(ImDrawList* dl, const std::string& cat, ImVec2 c, float s, ImU
     const float rr = s * 0.14f;                  // corner radius
     auto P = [&](float x, float y) { return ImVec2(c.x + x * s, c.y + y * s); };
     auto poly = [&](std::initializer_list<ImVec2> q, bool closed) {
-        dl->AddPolyline(q.begin(), (int)q.size(), col, closed ? ImDrawFlags_Closed : 0, t);
+        if(closed)dl->AddConvexPolyFilled(q.begin(),(int)q.size(),col);
+        else dl->AddPolyline(q.begin(),(int)q.size(),col,0,t);
     };
-    if (cat == "Image") {  // a picture: frame, mountains, sun
-        dl->AddRect(P(-1, -0.8f), P(1, 0.8f), col, rr, 0, t);
-        poly({P(-0.8f, 0.6f), P(-0.25f, -0.05f), P(0.12f, 0.35f), P(0.4f, 0.1f), P(0.8f, 0.6f)}, false);
-        dl->AddCircle(P(0.45f, -0.35f), s * 0.17f, col, 0, t);
-    } else if (cat == "Draw") {  // a pencil
-        poly({P(-0.85f, 0.85f), P(-0.75f, 0.45f), P(0.45f, -0.75f), P(0.75f, -0.45f), P(-0.45f, 0.75f)}, true);
-        dl->AddLine(P(0.25f, -0.55f), P(0.55f, -0.25f), col, t);
+    if (cat == "Image") {
+        dl->AddRectFilled(P(-1,-.8f),P(1,.8f),col);
+        dl->AddLine(P(-.8f,0),P(.65f,0),IM_COL32(50,50,50,255),t);
+        dl->AddLine(P(.2f,-.45f),P(.7f,0),IM_COL32(50,50,50,255),t);
+        dl->AddLine(P(.2f,.45f),P(.7f,0),IM_COL32(50,50,50,255),t);
+    } else if (cat == "Draw") {
+        ImVec2 body[]={P(-.65f,.4f),P(.25f,-.7f),P(.75f,-.2f),P(-.15f,.9f)};dl->AddConvexPolyFilled(body,4,col);
+        dl->AddTriangleFilled(P(-.9f,1),P(-.65f,.4f),P(-.15f,.9f),col);
+        dl->AddLine(P(-.5f,.22f),P(.1f,.8f),IM_COL32(50,50,50,255),1);
     } else if (cat == "Time") {  // a clock
         dl->AddCircle(c, s * 0.9f, col, 0, t);
-        poly({P(0, -0.55f), c, P(0.4f, 0.25f)}, false);
-    } else if (cat == "Channel") {  // three overlapping channels (R, G, B)
-        const float r = s * 0.5f;
-        dl->AddCircle(P(0, -0.36f), r, col, 0, t);
-        dl->AddCircle(P(-0.38f, 0.3f), r, col, 0, t);
-        dl->AddCircle(P(0.38f, 0.3f), r, col, 0, t);
-    } else if (cat == "Color") {  // a paint drop
-        const ImVec2 o = P(0, 0.28f);
-        const float r = s * 0.62f;
-        dl->PathArcTo(o, r, -0.35f, 3.14159f + 0.35f, 20);
-        dl->PathLineTo(P(0, -0.98f));
-        dl->PathStroke(col, ImDrawFlags_Closed, t);
-        dl->PathArcTo(o, r * 0.55f, 0.35f, 1.25f, 8);
-        dl->PathStroke(col, 0, t);
-    } else if (cat == "Filter") {  // a blur: a sharp step softened into a bell curve
-        ImVec2 pts[25];
-        for (int i = 0; i < 25; ++i) {
-            const float x = -1 + 2.0f * i / 24;
-            pts[i] = P(x, 0.62f - 1.25f * std::exp(-x * x * 4.5f));
-        }
-        dl->AddPolyline(pts, 25, col, 0, t);
-        dl->AddLine(P(-1, 0.8f), P(1, 0.8f), col, t);
-    } else if (cat == "Keyer") {  // a key
-        dl->AddCircle(P(-0.5f, 0), s * 0.38f, col, 0, t);
-        dl->AddLine(P(-0.12f, 0), P(0.95f, 0), col, t);
-        dl->AddLine(P(0.55f, 0), P(0.55f, 0.36f), col, t);
-        dl->AddLine(P(0.85f, 0), P(0.85f, 0.3f), col, t);
-    } else if (cat == "Merge") {  // two layers over each other
-        dl->AddRect(P(-0.9f, -0.9f), P(0.35f, 0.35f), col, rr, 0, t);
-        dl->AddRect(P(-0.35f, -0.35f), P(0.9f, 0.9f), col, rr, 0, t);
+        poly({P(-.4f,-.15f),P(0,.3f),P(.4f,-.25f)},false);
+    } else if (cat == "Channel") {
+        for(int row=-1;row<=1;++row)dl->AddRectFilled(P(-1,row*.65f-.22f),P(1,row*.65f+.22f),col,1);
+    } else if (cat == "Color") {
+        dl->AddCircleFilled(c,s*.95f,col,32);
+        dl->AddLine(c,P(0,-1),IM_COL32(50,50,50,255),1);
+        dl->AddLine(c,P(-.9f,.5f),IM_COL32(50,50,50,255),1);
+        dl->AddLine(c,P(.9f,.5f),IM_COL32(50,50,50,255),1);
+    } else if (cat == "Filter") {
+        for(int i=1;i<=6;++i)dl->AddCircle(c,s*i/6.f,col,32,.65f);
+    } else if (cat == "Keyer") {
+        ImVec2 body[]={P(-.9f,1),P(-.8f,-.4f),P(-.4f,-.15f),P(.35f,-1),P(.65f,-.75f),P(-.05f,0),P(.4f,.3f)};dl->AddConvexPolyFilled(body,7,col);
+        dl->AddLine(P(.1f,-.65f),P(.95f,.2f),col,2);
+    } else if (cat == "Merge") {
+        for(float y:{.65f,.15f,-.35f}){ImVec2 q[]={P(-1,y),P(0,y-.4f),P(1,y),P(0,y+.4f)};dl->AddConvexPolyFilled(q,4,col);}
+
     } else if (cat == "Transform") {  // move: arrows in four directions
         dl->AddLine(P(-0.9f, 0), P(0.9f, 0), col, t);
         dl->AddLine(P(0, -0.9f), P(0, 0.9f), col, t);
@@ -674,17 +682,24 @@ void categoryIcon(ImDrawList* dl, const std::string& cat, ImVec2 c, float s, ImU
         };
         star(-0.2f, 0.15f, 0.8f);
         star(0.62f, -0.6f, 0.36f);
-    } else if (cat == "3D") {  // a cube
-        const ImVec2 top = P(0, -0.95f), l = P(-0.85f, -0.48f), r = P(0.85f, -0.48f), m = P(0, -0.02f);
-        const ImVec2 bl = P(-0.85f, 0.5f), br = P(0.85f, 0.5f), b = P(0, 0.97f);
-        poly({top, r, br, b, bl, l}, true);
-        poly({l, m, r}, false);
-        dl->AddLine(m, b, col, t);
-    } else if (cat == "Deep") {  // samples stacked in depth: three offset cards
-        for (int i = 2; i >= 0; --i) {
-            const float o = -0.45f + i * 0.45f;
-            dl->AddRect(P(-0.95f + o + 0.45f, -0.95f + 0.45f - o), P(0.05f + o + 0.45f, 0.05f + 0.45f - o), col, rr, 0, t);
-        }
+    } else if (cat == "3D") {
+        const ImU32 dark=IM_COL32(50,50,50,255);
+        const ImVec2 q[]={P(0,-1),P(1,-.5f),P(1,.55f),P(0,1),P(-1,.55f),P(-1,-.5f)};
+        dl->AddConvexPolyFilled(q,6,col);
+        dl->AddLine(P(-1,-.5f),P(0,0),dark,1);dl->AddLine(P(1,-.5f),P(0,0),dark,1);dl->AddLine(P(0,0),P(0,1),dark,1);
+    } else if (cat == "Deep") {
+        dl->AddCircleFilled(c,s,col,32);
+        dl->AddText(ImGui::GetFont(),s*1.8f,P(-.62f,-.95f),IM_COL32(50,50,50,255),"D");
+    } else if(cat=="Views") {
+        dl->AddTriangleFilled(P(-1,0),P(0,-.6f),P(1,0),col);dl->AddTriangleFilled(P(-1,0),P(0,.6f),P(1,0),col);dl->AddCircleFilled(c,s*.33f,IM_COL32(50,50,50,255),24);
+    } else if(cat=="Metadata") {
+        ImVec2 q[]={P(-1,-.15f),P(.3f,-.9f),P(1,-.6f),P(.75f,.55f),P(.25f,1)};dl->AddConvexPolyFilled(q,5,col);dl->AddCircleFilled(P(.55f,-.55f),s*.12f,IM_COL32(50,50,50,255),12);
+    } else if(cat=="Tools") {
+        dl->AddLine(P(-.5f,1),P(.45f,-.6f),col,s*.5f);dl->AddCircle(P(.4f,-.65f),s*.4f,col,16,3);dl->AddLine(P(.3f,-.95f),P(.6f,-.6f),IM_COL32(50,50,50,255),4);
+    } else if(cat=="Toolsets") {
+        dl->AddRectFilled(P(-1,-.45f),P(1,.85f),col);dl->AddRect(P(-.65f,-.9f),P(.65f,-.25f),col,0,0,1.5f);
+    } else if(cat=="OFX" || cat=="Extensions") {
+        dl->AddCircleFilled(c,s,col,32);dl->AddCircle(c,s*.65f,IM_COL32(50,50,50,255),24,1.5f);dl->AddLine(P(-1,.1f),P(1,-.2f),IM_COL32(50,50,50,255),1.5f);
     } else if (cat == "Value") {  // a graph: axes and a wave
         poly({P(-0.9f, -0.9f), P(-0.9f, 0.9f), P(0.95f, 0.9f)}, false);
         ImVec2 pts[21];
@@ -730,6 +745,26 @@ void categoryIcon(ImDrawList* dl, const std::string& cat, ImVec2 c, float s, ImU
     }
 }
 
+void drawBackgroundRenders(App& app,UiState& ui) {
+    ImGui::Begin(ui.win("Background Renders").c_str());
+    const auto status=app.batchStatus();
+    if(status.total>0) {
+        ImGui::Text("%s",status.currentNode.c_str());
+        ImGui::ProgressBar(status.total?float(status.done)/status.total:0,ImVec2(-1,18));
+        ImGui::Text("%d / %d frames",status.done,status.total);
+        if(status.running && ImGui::Button("Cancel render"))app.cancelBatch();
+        if(!status.error.empty())ImGui::TextWrapped("%s",status.error.c_str());
+    }
+    ImGui::End();
+}
+void drawSceneGraph(App& app,UiState& ui) {
+    ImGui::Begin(ui.win("Scene Graph").c_str());
+    for(const auto& n:app.comp->nodes)if(categoryOf(n->type)=="3D") {
+        if(ImGui::Selectable(n->name.c_str(),app.selection.count(n->name))){app.selection={n->name};app.openPanel(n->name);}
+    }
+    ImGui::End();
+}
+
 void drawToolbar(App& app, UiState& ui) {
     if (!ui.ofxScanned) {
         ui.ofxScanned = true;
@@ -739,20 +774,21 @@ void drawToolbar(App& app, UiState& ui) {
                         " skipped because it crashed Welder while loading (Edit > Preferences > OFX to retry): " +
                         fs::path(blocked.front()).filename().string() + (blocked.size() > 1 ? ", ..." : ""));
     }
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 6));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(1, 8));
     ImGui::Begin(ui.win("Nodes").c_str(), nullptr, ImGuiWindowFlags_NoScrollbar);  // floating, it keeps a title bar to move it by
     ui.noteHover("Nodes");
     ImGui::PopStyleVar();
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
     float w = ImGui::GetContentRegionAvail().x;
-    for (auto& cat : categories()) {
-        if (cat == "OFX" && ui.ofxPlugins.empty()) continue;
+    const std::vector<std::string> tools={"Image","Draw","Time","Channel","Color","Filter","Keyer","Merge","Transform","3D","Stylize","Deep","Views","Metadata","Tools","Toolsets","OFX","MoGraph","AI","Value","Other","Extensions"};
+    for (const auto& cat : tools) {
         // flat buttons: a line icon, a soft tile when hovered, an accent bar while its menu is open
         const std::string pop = "tb_" + cat;
         const bool open = ImGui::IsPopupOpen(pop.c_str());
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_FrameBgHovered));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::GetStyleColorVec4(ImGuiCol_FrameBgActive));
-        if (ImGui::Button(("##" + cat).c_str(), ImVec2(w, w))) ImGui::OpenPopup(pop.c_str());
+        if (ImGui::Button(("##" + cat).c_str(), ImVec2(w, 30*theme().uiScale))) ImGui::OpenPopup(pop.c_str());
         ImGui::PopStyleColor(3);
         {
             const bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
@@ -764,15 +800,29 @@ void drawToolbar(App& app, UiState& ui) {
                 dl->AddRectFilled(ImVec2(mn.x, mn.y + 4), ImVec2(mn.x + bw, mx.y - 4), themeAccent(), bw * 0.5f);
             }
             const ImU32 ic = open ? themeAccent() : hot ? theme().text : theme().icon;
-            categoryIcon(dl, cat, ImVec2((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f), (mx.x - mn.x) * 0.27f, ic);
+            categoryIcon(dl, cat, ImVec2((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f), 9.f*theme().uiScale, ic);
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", cat.c_str());
         if (ImGui::BeginPopup(pop.c_str())) {
             ImGui::TextDisabled("%s", cat.c_str());
             ImGui::Separator();
-            if (cat == "OFX") {
+            if(cat=="Views") {
+                if(ImGui::MenuItem("Viewer"))createNode(app,ui,"Viewer");
+                if(ImGui::MenuItem("Split viewers horizontally"))ui.splitViewers=1;
+                if(ImGui::MenuItem("Split viewers vertically"))ui.splitViewers=2;
+            } else if(cat=="Metadata") {
+                if(app.selection.empty())ImGui::TextDisabled("Select an image node");
+                for(const auto& name:app.selection){const auto info=app.nodeInfo(name);ImGui::Text("%s",name.c_str());ImGui::Text("%d x %d",info.format.width,info.format.height);for(const auto& ch:info.channels)ImGui::TextUnformatted(ch.c_str());}
+            } else if(cat=="Tools") {
+                if(ImGui::MenuItem("Script Editor"))ui.showScriptEditor=true;
+                if(ImGui::MenuItem("Preferences"))ui.showPrefs=true;
+            } else if(cat=="Toolsets") {
+                for(const char* type:{"Group","Backdrop","NoOp"})if(ImGui::MenuItem(type))createNode(app,ui,type);
+            } else if (cat == "OFX" || cat=="Extensions") {
                 for (auto& [pid, label] : ui.ofxPlugins)
                     if (ImGui::MenuItem(label.c_str(), pid.c_str())) createNode(app, ui, "OFX", {{"plugin", pid}});
+                if(ui.ofxPlugins.empty())ImGui::TextDisabled("No OFX plugins found");
+                if(ImGui::MenuItem("Scan plugins again"))ui.ofxScanned=false;
             } else {
                 for (auto& d : nodeDefs())
                     if (d.category == cat && ImGui::MenuItem(d.type.c_str())) createNode(app, ui, d.type);
@@ -781,6 +831,7 @@ void drawToolbar(App& app, UiState& ui) {
         }
     }
     ImGui::End();
+    ImGui::PopStyleVar();
 }
 
 // Playback within in/out (or the frame range), looping, at most at the comp fps,
