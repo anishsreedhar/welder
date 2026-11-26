@@ -93,6 +93,7 @@ struct MLExportStatus {
     std::string node, slot;
     int done = 0, total = 0;
     std::string label;
+    bool failed = false;  // the job couldn't be written: label says why (shown by the node's button)
 };
 
 // Render > Render... (the classic Render dialog): which frames and Writes, and how.
@@ -149,6 +150,8 @@ public:
     void edit(std::function<void(Comp&)> fn);
     // Bumps each time queued edits are applied (with the comp's address, a cheap "has the script changed").
     uint64_t compRevision() const { return compRevision_; }
+    uint64_t compLoads = 0;   // bumps when a comp is opened or a new one started (Python callbacks)
+    uint64_t compSaves = 0;   // bumps on each save
     // Record the current state for undo (call at the start of a gesture).
     void checkpoint();
     // The same in two halves, for changes that come in over time (a Python script): the state
@@ -265,6 +268,9 @@ public:
     double diskCacheGB = 20;         // the setting (STRATA_DISK_CACHE_GB overrides it)
     std::string pythonInterpreter;   // Preferences > Python: the Python scripts run with ("" = found automatically)
     bool runInitScript = true;       // run <config>/init.py when the editor starts
+    bool mcpEnabled = false;         // Preferences > MCP server: AI clients can drive the editor (McpService.h)
+    int mcpPort = 9471;              // its port on 127.0.0.1
+    bool mcpAllowRemote = false;     // listen on every network interface, not only 127.0.0.1
 
     // ------------------------------------------------------------ settings
     std::string settingsPath;  // settings.json in the config folder
@@ -416,6 +422,9 @@ public:
     bool samplePixels(const std::string& node, int input, const Box& box, double frame, float rgba[4]);
     // Every channel of `box` from a node (or its input), full resolution; null on failure.
     ImagePtr pickImage(const std::string& node, int input, const Box& box, double frame);
+    // The deep samples of a node at full-resolution pixel (x, y), rendered now (the viewer's
+    // readout); null when the node gives no deep samples of its own, or on failure.
+    DeepPtr deepSamplesAt(const std::string& node, int x, int y, double frame);
     // Range the timeline shows (its Global / Input / Custom menu): the project
     // range, the viewed node's input range, or the custom range.
     std::pair<double, double> visibleRange() const;

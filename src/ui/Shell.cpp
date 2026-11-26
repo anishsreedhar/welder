@@ -11,7 +11,9 @@
 #include <sstream>
 
 #include "Panels.h"
+#include "McpService.h"
 #include "ScriptRunner.h"
+#include "core/Mcp.h"
 #include "core/NetPath.h"
 #include "PanelKit.h"
 #include "core/CacheDir.h"
@@ -675,6 +677,11 @@ void categoryIcon(ImDrawList* dl, const std::string& cat, ImVec2 c, float s, ImU
         poly({top, r, br, b, bl, l}, true);
         poly({l, m, r}, false);
         dl->AddLine(m, b, col, t);
+    } else if (cat == "Deep") {  // samples stacked in depth: three offset cards
+        for (int i = 2; i >= 0; --i) {
+            const float o = -0.45f + i * 0.45f;
+            dl->AddRect(P(-0.95f + o + 0.45f, -0.95f + 0.45f - o), P(0.05f + o + 0.45f, 0.05f + 0.45f - o), col, rr, 0, t);
+        }
     } else if (cat == "Value") {  // a graph: axes and a wave
         poly({P(-0.9f, -0.9f), P(-0.9f, 0.9f), P(0.95f, 0.9f)}, false);
         ImVec2 pts[21];
@@ -1021,6 +1028,79 @@ static void drawPreferences(App& app, UiState& ui) {
                           ("Run " + (fs::path(brand::configDir()) / "init.py").string() + " when Welder starts, if it exists").c_str()))
             app.saveSettings();
     }
+    ImGui::SeparatorText("MCP server");
+    {
+        McpService& mcpS = McpService::instance();
+        const bool byEnv = std::getenv("WELDER_MCP_PORT") && *std::getenv("WELDER_MCP_PORT");
+        bool on = app.mcpEnabled || byEnv;
+        ImGui::BeginDisabled(byEnv);
+        if (kit::checkbox("Let AI clients drive Welder", &on,
+                          "Runs an MCP (Model Context Protocol) server, so Claude or another AI client can build and change\n"
+                          "the open comp: make and connect nodes, set knobs, render, and look at the result. Every change it\n"
+                          "makes is one undo step. It answers on this computer only (127.0.0.1), to clients that have the token.")) {
+            app.mcpEnabled = on;
+            app.saveSettings();
+            mcpS.apply(app);
+        }
+        ImGui::EndDisabled();
+        if (byEnv) ImGui::TextDisabled("(on: WELDER_MCP_PORT is set)");
+        ImGui::BeginDisabled(!on);
+        kit::rowLabel("port", "The server's port on 127.0.0.1 (9471 unless something else uses it)");
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7);
+        int port = app.mcpPort;
+        if (ImGui::InputInt("##mcpport", &port, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue) && port > 0 && port < 65536 && port != app.mcpPort) {
+            app.mcpPort = port;
+            app.saveSettings();
+            mcpS.apply(app);
+        }
+        if (kit::checkbox("Allow other computers", &app.mcpAllowRemote,
+                          "Listen on every network interface, so a client on another machine can connect (with the token).\n"
+                          "The connection is plain HTTP: use it on a network you trust only.")) {
+            app.saveSettings();
+            mcpS.apply(app);
+        }
+        if (mcpS.running())
+            ImGui::TextDisabled("listening on http://127.0.0.1:%d/mcp  (%llu requests)", mcpS.port(), (unsigned long long)mcpS.requests());
+        else if (!mcpS.error().empty())
+            ImGui::TextColored(ImVec4(1, 0.45f, 0.4f, 1), "can't start: %s", mcpS.error().c_str());
+        else
+            ImGui::TextDisabled("off");
+#ifdef _WIN32
+        const std::string cli = (platform::executableDir() / "welder.exe").string();
+#else
+        const std::string cli = (platform::executableDir() / "welder").string();
+#endif
+        auto quoted = [](const std::string& s) { return "\"" + s + "\""; };
+        if (ImGui::Button("Copy Claude Code command")) {
+            ImGui::SetClipboardText(("claude mcp add welder -- " + quoted(cli) + " mcp").c_str());
+            app.message("copied: paste it into a terminal");
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("claude mcp add welder -- \"%s\" mcp\n(welder mcp passes the client's calls on to this editor)", cli.c_str());
+        ImGui::SameLine();
+        if (ImGui::Button("Copy Claude Desktop config")) {
+            json cfg = {{"mcpServers", {{"welder", {{"command", cli}, {"args", {"mcp"}}}}}}};
+            ImGui::SetClipboardText(cfg.dump(2).c_str());
+            app.message("copied: add it to claude_desktop_config.json (Claude > Settings > Developer > Edit Config)");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Copy HTTP address and token")) {
+            const std::string url = "http://127.0.0.1:" + std::to_string(mcpS.running() ? mcpS.port() : app.mcpPort) + "/mcp";
+            ImGui::SetClipboardText(("claude mcp add --transport http welder " + url + " --header \"Authorization: Bearer " +
+                                     mcp::loadToken() + "\"").c_str());
+            app.message("copied: the server's address and token (keep the token to yourself)");
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("For clients that connect over HTTP themselves: the address and the\n"
+                              "\"Authorization: Bearer <token>\" header they must send");
+        ImGui::SameLine();
+        if (ImGui::Button("New token")) {
+            mcp::renewToken();
+            mcpS.restart(app);
+            app.message("MCP server: a new token (HTTP clients set up with the old one must be given it)");
+        }
+        ImGui::EndDisabled();
+    }
     ImGui::SeparatorText("Updates");
     ImGui::BeginDisabled(update::disabledByEnv());
     if (kit::checkbox("Check for a newer Welder when it starts", &app.checkUpdates,
@@ -1148,8 +1228,10 @@ static void drawPreferences(App& app, UiState& ui) {
             app.saveSettings();
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Heavy nodes (Transform, CornerPin and others as they're added) run on the graphics card\n"
-                              "through Vulkan. Results match the CPU's. Off: everything on the CPU.");
+            ImGui::SetTooltip("Heavy nodes (Transform, CornerPin, Blur, Defocus, optical flow and others) run on the graphics\n"
+                              "card through Vulkan. Grade, Merge and the other per-pixel colour nodes go to the card when it\n"
+                              "times faster there than on the CPU (see Viewer > Performance). Results match the CPU's.\n"
+                              "Off: everything on the CPU.");
         ImGui::SameLine();
         const bool ok = gpu::available();
         ImGui::TextColored(ok ? ImVec4(0.55f, 0.85f, 0.5f, 1) : ImVec4(0.75f, 0.75f, 0.75f, 1), "%s", gpu::status().c_str());
@@ -1557,6 +1639,7 @@ static void drawPerformance(App& app, UiState& ui) {
     std::snprintf(b, sizeof b, "%.0f MB of %.0f free", platform::availableRamGB() * 1024, platform::physicalRamGB() * 1024);
     line("memory", b);
     line("GPU", gpu::status());
+    for (auto& r : gpu::routeSummary()) line("  CPU or GPU", r);  // what the router has measured (Gpu.h)
     line("disk cache", app.diskCache() ? "on" : "off");
 
     // ---- the viewer's last full render

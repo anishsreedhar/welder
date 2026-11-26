@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(welder VERSION 0.2.5 LANGUAGES C CXX)
+project(welder VERSION 0.2.6 LANGUAGES C CXX)
 if(WIN32)  # the program icon and version details for both programs
   enable_language(RC)
   configure_file(src/ui/welder.rc.in ${CMAKE_BINARY_DIR}/welder.rc @ONLY)
@@ -70,6 +70,7 @@ target_include_directories(strata_thirdparty SYSTEM INTERFACE
 # ---------------------------------------------------------------- core library
 add_library(strata_core STATIC
   src/core/Engine.cpp
+  src/core/Deep.cpp
   src/core/DiskCache.cpp
   src/core/CacheDir.cpp
   src/core/Crash.cpp
@@ -87,6 +88,7 @@ add_library(strata_core STATIC
   src/core/Process.cpp
   src/core/LocalSocket.cpp
   src/core/ScriptApi.cpp
+  src/core/Mcp.cpp
   src/core/Paths.cpp
   src/core/Studio.cpp
   src/core/Brand.cpp
@@ -139,6 +141,7 @@ add_library(strata_core STATIC
   src/nodes/Geo.cpp
   src/nodes/Scene3D.cpp
   src/nodes/SceneImport.cpp
+  src/nodes/VanishCam.cpp
   third_party/ufbx/ufbx.c
   src/nodes/Scanline.cpp
   src/nodes/CamTrack.cpp
@@ -158,8 +161,10 @@ add_library(strata_core STATIC
   src/nodes/ColorMgmtNodes.cpp
   src/color/Color.cpp
   src/ml/ML.cpp
+  src/gpu/Route.cpp
   src/nodes/ColorNodes.cpp
   src/nodes/MergeNodes.cpp
+  src/nodes/DeepNodes.cpp
   src/nodes/TransformNodes.cpp
   src/nodes/FilterNodes.cpp
   src/nodes/GlowNodes.cpp
@@ -308,9 +313,11 @@ if(STRATA_FFMPEG_DIR)
   endif()
   list(APPEND _ff_libs ${_ff_z})
   if(WIN32)
-    list(APPEND _ff_libs bcrypt)
+    # bcrypt: avutil's random numbers; mfuuid ole32 strmiids user32: the Media Foundation H.264 / H.265
+    # encoders (mfplat itself, NVENC, AMF and Vulkan are loaded at run time)
+    list(APPEND _ff_libs bcrypt mfuuid ole32 strmiids user32)
   else()
-    list(APPEND _ff_libs pthread m)
+    list(APPEND _ff_libs pthread m ${CMAKE_DL_LIBS})  # dl: NVENC / AMF / Vulkan drivers are loaded at run time
   endif()
   target_include_directories(strata_core SYSTEM PRIVATE ${STRATA_FFMPEG_DIR}/include)
   target_link_libraries(strata_core PUBLIC ${_ff_libs})
@@ -375,6 +382,10 @@ if(Python3_FOUND)
   # the scripting API end to end: a Python script driving the command-line program
   add_test(NAME python_api
            COMMAND welder python tests/python_api_test.py ${CMAKE_BINARY_DIR}/python-api-test --python ${Python3_EXECUTABLE}
+           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  # the MCP server as an AI client sees it: `welder mcp --headless` on stdio (tools/mcp_test.sh: the editor's)
+  add_test(NAME mcp
+           COMMAND ${Python3_EXECUTABLE} tests/mcp_test.py $<TARGET_FILE:welder> --headless
            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
   add_test(NAME ml_worker
            COMMAND ${Python3_EXECUTABLE} -m unittest tests/test_ml_worker.py
@@ -445,6 +456,7 @@ if(STRATA_BUILD_UI)
     src/ui/Properties.cpp
     src/ui/Shell.cpp
     src/ui/ScriptRunner.cpp
+    src/ui/McpService.cpp
     src/ui/ScriptEditor.cpp
     src/ui/Timeline.cpp
     src/ui/PanelKit.cpp
@@ -455,6 +467,7 @@ if(STRATA_BUILD_UI)
     src/ui/RotoTool.cpp
     src/ui/TrackerTool.cpp
     src/ui/PlanarTool.cpp
+    src/ui/VanishTool.cpp
   src/ui/CamTrackerTool.cpp
   src/ui/Viewer3D.cpp
   src/ui/TransformTool.cpp

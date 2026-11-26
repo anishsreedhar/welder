@@ -15,7 +15,7 @@ KnobDef F(const char* n, const char* l, double def, double lo, double hi, const 
     return {n, l, Knob::Float, def, lo, hi, {}, tip};
 }
 KnobDef I(const char* n, const char* l, int def, double lo, double hi) { return {n, l, Knob::Int, def, lo, hi, {}, ""}; }
-KnobDef B(const char* n, const char* l, bool def) { return {n, l, Knob::Bool, def, 0, 1, {}, ""}; }
+KnobDef B(const char* n, const char* l, bool def, const char* tip = "") { return {n, l, Knob::Bool, def, 0, 1, {}, tip}; }
 KnobDef C(const char* n, const char* l, const char* def, std::vector<std::string> opts) {
     return {n, l, Knob::Choice, def, 0, 1, std::move(opts), ""};
 }
@@ -233,25 +233,48 @@ std::vector<NodeDef> build() {
                   Width(CS("colorspace", "Output Transform", "default", {"default", "working"}), 200),
                   Same(B("raw", "raw data", false)),
                   Div("@ext Options"),
+                  When(B("deep", "deep", false,
+                         "Writes the input's deep samples (DeepRead, DeepMerge, ScanlineRender ...) as a deep scanline EXR: "
+                         "the data window is the input's bbox, depths are always float, compression none, rle or zips "
+                         "(the others write zips). A flat input goes as one sample a pixel at its depth.Z."), "@ext=exr"),
                   When(Width(C("datatype", "datatype", "half", {"half", "float"}), 90), "@ext=exr"),
                   When(Width(C("compression", "compression", "zip", {"none", "rle", "zips", "zip", "piz", "pxr24", "b44", "b44a", "dwaa", "dwab"}), 90), "@ext=exr"),
-                  When(F("dwa_level", "dw compression level", 45, 0, 200), "@ext=exr"),
-                  When(Width(C("data_window", "data window", "format", {"format", "bbox"}), 90), "@ext=exr"),
+                  When(F("dwa_level", "dw compression level", 45, 0, 200), "@ext=exr & deep=false"),
+                  When(Width(C("data_window", "data window", "format", {"format", "bbox"}), 90), "@ext=exr & deep=false"),
                   When(Tip(Width(C("metadata", "metadata", "all", {"all", "timecode only"}), 110),
                            "all: the input's metadata goes into the EXR header (exr/<name> as <name>; not the input/... "
-                           "facts about the file read). timecode only: just the timecode and frame rate"), "@ext=exr"),
+                           "facts about the file read). timecode only: just the timecode and frame rate"), "@ext=exr & deep=false"),
                   When(Width(C("bit_depth", "datatype", "default", {"default", "8", "10", "12", "16", "32 float"}), 90), "@ext=dpx|tif|tiff|png"),
                   When(Width(C("tiff_compression", "compression", "zip", {"none", "lzw", "zip", "packbits"}), 90), "@ext=tif|tiff"),
                   When(Width(C("codec", "codec", "prores 422 hq", {"prores 4444", "prores 4444 xq", "prores 422 hq", "prores 422",
                     "prores 422 lt", "prores 422 proxy", "dnxhr 444", "dnxhr hqx", "dnxhr hq", "dnxhr sq", "dnxhr lb",
-                    "mjpeg", "mpeg4", "ffv1", "png"}), 160), "@ext=mov|mxf|mkv|avi|mp4"),
-                  When(I("quality", "quality (mjpeg / mpeg4)", 90, 1, 100), "@ext=mov|mxf|mkv|avi|mp4"),
+                    "mjpeg", "mpeg4", "ffv1", "png", "h.264", "h.265"}), 160), "@ext=mov|mxf|mkv|avi|mp4"),
+                  When(Tip(Width(C("encoder", "encoder", "auto", {"auto", "nvenc", "amf", "media foundation", "vulkan"}), 140),
+                           "H.264 / H.265 use the GPU's own encoder. auto: the first that works here - NVIDIA NVENC, "
+                           "AMD AMF, then (Windows) Media Foundation, which also covers Intel, then Vulkan Video"),
+                       "@ext=mov|mkv|mp4 & codec=h.264|h.265"),
+                  When(Tip(Width(C("rate_control", "rate control", "quality", {"quality", "bitrate"}), 90),
+                           "quality: constant quality, the size follows the picture; bitrate: an average rate (for delivery specs)"),
+                       "@ext=mov|mkv|mp4 & codec=h.264|h.265"),
+                  When(Tip(I("quality", "quality", 90, 1, 100), "mjpeg / mpeg4 / h.264 / h.265: higher is better and bigger "
+                         "(h.264 / h.265: 90 is about QP 18, visually clean)"),
+                       "@ext=mov|mxf|mkv|avi|mp4 & rate_control=quality"),
+                  When(F("bitrate", "bitrate (Mbit/s)", 20, 1, 200), "@ext=mov|mkv|mp4 & codec=h.264|h.265 & rate_control=bitrate"),
+                  When(Width(C("h264_profile", "profile", "high", {"high", "main", "baseline"}), 90), "@ext=mov|mkv|mp4 & codec=h.264"),
+                  When(Tip(Width(C("h265_profile", "profile", "main", {"main", "main 10"}), 90),
+                           "main 10: 10-bit, less banding in gradients (NVENC, AMF and Vulkan; not Media Foundation)"),
+                       "@ext=mov|mkv|mp4 & codec=h.265"),
+                  When(Tip(Width(C("encoder_speed", "speed", "balanced", {"quality", "balanced", "fast"}), 90),
+                           "the encoder's preset: slower presets look better at the same size"),
+                       "@ext=mov|mkv|mp4 & codec=h.264|h.265"),
+                  When(Tip(I("keyframes", "keyframe every", 0, 0, 600), "frames from one keyframe to the next; 0: about two seconds. "
+                         "Smaller scrubs faster in editors, larger is smaller"), "@ext=mov|mkv|mp4 & codec=h.264|h.265"),
                   Div(""),
                   B("use_limit", "limit to range", false),
                   Same(EnableIf(Field(I("first", "", 1, -100000, 100000), 64), "use_limit=true"), true),
                   Same(EnableIf(Field(I("last", "", 100, -100000, 100000), 64), "use_limit=true"), true),
                   Btn("write_render", "Render", "Render this Write over the project range (or its limit)")},
-                 "Writes its input: EXR, DPX, TIFF, PNG, JPEG, TGA, BMP, HDR image sequences (#### or %04d in the name), or a movie (.mov .mp4 .mkv .avi .mxf). A new Write's file starts as the saved comp's name. Render with Render > Render All Writes."});
+                 "Writes its input: EXR, DPX, TIFF, PNG, JPEG, TGA, BMP, HDR image sequences (#### or %04d in the name), or a movie (.mov .mp4 .mkv .avi .mxf; H.264 / H.265 through the GPU's encoder). A new Write's file starts as the saved comp's name. Render with Render > Render All Writes."});
     // ---------------------------------------------------------------- Value (numbers that drive exposed knobs)
     d.push_back({"Value", "Value", {InfoRow("signal", "signal"), F("value", "value", 0.5, 0, 1, "Any number (type past the slider's range); animate it like any knob")},
                  "A number for exposed knobs (right-click a knob > Expose as input)."});
@@ -1667,9 +1690,13 @@ std::vector<NodeDef> build() {
                             When(XY("focus_point", "focus point", "$center", 0, 4096), "use_focus_point=true"),
                             F("depth_of_field", "depth of field", 0, 0, 100), F("size", "size", 20, 0, 200),
                             F("maximum", "maximum", 40, 0, 500), I("layers", "layers", 16, 2, 64),
-                            C("output", "output", "result", {"result", "focal plane setup", "coc"}), F("mix", "mix", 1, 0, 1)}),
-                     "Depth of field from a depth channel (depth.Z from ScanlineRender / BlenderRender is 1 / distance). "
-                     "Blur = size x |1 - focus / distance|, up to maximum; 'pick focus' sets the focus plane from the viewer."});
+                            C("output", "output", "result", {"result", "focal plane setup", "coc"}),
+                            B("use_deep", "use deep samples", true,
+                              "With a deep input (DeepRead, ScanlineRender ...): every sample is blurred at its own depth, so what's "
+                              "behind an out-of-focus edge shows through its blur. Off: the flattened image and its depth.Z."),
+                            F("mix", "mix", 1, 0, 1)}),
+                     "Depth of field from a depth channel (depth.Z from ScanlineRender / BlenderRender is 1 / distance), or from "
+                     "a deep input's samples. Blur = size x |1 - focus / distance|, up to maximum; 'pick focus' sets the focus plane from the viewer."});
         d.push_back({"Defocus", "Filter",
                      bokeh({F("defocus", "defocus (px)", 10, 0, 500), F("mix", "mix", 1, 0, 1)}),
                      "A lens blur: every pixel spread over the bokeh shape."});
@@ -1961,6 +1988,89 @@ std::vector<NodeDef> build() {
                  "Warps the picture so the source grid lands on the destination grid. Drag the grid points in the viewer "
                  "(the grid chosen in 'edit in the viewer'; shift-drag moves a point of the other one)."});
     const std::vector<std::string> rotOrders = {"XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"};
+    // ---------------------------------------------------------------- Deep
+    d.push_back({"DeepRead", "Deep",
+                 {File("file", "File"),
+                  InfoRow("read_format", "Format"),
+                  Field(I("first", "Frame Range", 1, -100000, 100000), 64),
+                  Same(Width(C("before", "", "hold", {"hold", "loop", "bounce", "black", "error"}), 74), true),
+                  Same(Field(I("last", "", 1, -100000, 100000), 64), true),
+                  Same(Width(C("after", "", "hold", {"hold", "loop", "bounce", "black", "error"}), 74), true),
+                  Width(C("frame_mode", "Frame", "expression", {"expression", "start at", "offset"}), 110),
+                  Same(Tip(Width(S("frame", "", ""), 0), "expression: the file frame for each frame (empty = the same frame); "
+                                                         "start at: the frame the clip starts at; offset: frames to shift by"), true),
+                  Field(I("origfirst", "Original Range", 1, -100000, 100000), 64),
+                  Same(Field(I("origlast", "", 1, -100000, 100000), 64), true),
+                  Width(C("missing_frames", "Missing Frames", "error", {"error", "black", "nearest frame"}), 130),
+                  Same(Btn("read_reload", "reload", "read the files again"), true),
+                  Width(CS("colorspace", "Input Transform", "default", {"default", "working"}), 200),
+                  Same(B("raw", "Raw Data", false)),
+                  Tip(S("part", "Part", ""), "the deep part to read, by name (empty: the first deep part in the file)"),
+                  OnTab(InfoRow("metadata", ""), "Metadata")},
+                 "Reads deep EXR files (scanline or tiled) as samples: colour, alpha and depth per sample. "
+                 "Deep nodes take them as they are; any other node sees them flattened."});
+    d.push_back({"DeepToImage", "Deep",
+                 {Tip(Width(C("depth", "depth", "1/z", {"1/z", "z", "none"}), 90),
+                      "depth.Z of the nearest visible sample: 1/z (what ScanlineRender and ZDefocus use), z (the distance) or none")},
+                 "Flattens deep samples front to back into an ordinary image."});
+    auto zlimit = [](std::vector<KnobDef> k) {
+        k.push_back(Div("Depth range"));
+        k.push_back(B("limit_z", "limit to depths", false));
+        k.push_back(EnableIf(F("zmin", "near", 0, 0, 1000), "limit_z=true"));
+        k.push_back(EnableIf(F("zmax", "far", 1000, 0, 1000), "limit_z=true"));
+        k.push_back(F("mix", "mix", 1, 0, 1));
+        return k;
+    };
+    d.push_back({"DeepMerge", "Deep",
+                 {Tip(Width(C("operation", "operation", "combine", {"combine", "plus", "holdout"}), 100),
+                      "combine: every input's samples by depth (overlapping volumes are split and mixed); plus: the same, but "
+                      "samples at one depth add up; holdout: B's samples held out by the other inputs"),
+                  Tip(B("drop_hidden", "drop hidden samples", false), "leave out samples behind the point where the result is opaque")},
+                 "Combines deep inputs by depth: no mattes or ordering needed."});
+    d.push_back({"DeepHoldout", "Deep",
+                 {Tip(Width(C("depth", "depth", "1/z", {"1/z", "z", "none"}), 90), "depth.Z of the result, as DeepToImage")},
+                 "Flattens the main input with the holdout input cutting it out by depth."});
+    d.push_back({"DeepFromImage", "Deep",
+                 {Tip(Width(C("z_from", "depth from", "depth.Z", {"depth.Z", "constant"}), 100),
+                      "depth.Z: the input's depth.Z, read as 1/z (0 = infinitely far); constant: the depth below"),
+                  EnableIf(F("z", "depth", 1, 0, 1000), "z_from=constant"),
+                  Tip(F("volume", "volume", 0, 0, 100), "thickness of each sample (0: a hard surface)"),
+                  B("keep_zero_alpha", "keep empty pixels", false)},
+                 "Turns a flat image into deep samples, one a pixel."});
+    d.push_back({"DeepRecolor", "Deep",
+                 {Tip(B("target_alpha", "target input alpha", false), "also scale the samples' alphas so the result flattens to the colour input's alpha")},
+                 "Puts a flat image's colour (graded, keyed, painted) back onto a deep image's samples."});
+    d.push_back({"DeepGrade", "Deep",
+                 zlimit({Col("blackpoint", "blackpoint", 0, -1, 1), Col("whitepoint", "whitepoint", 1), Col("lift", "lift", 0, -1, 1),
+                         Col("gain", "gain", 1), Col("multiply", "multiply", 1), Col("offset", "offset", 0, -1, 1),
+                         Col("gamma", "gamma", 1, 0.2, 5), B("black_clamp", "black clamp", true), Same(B("white_clamp", "white clamp", false))}),
+                 "Grade on every sample's colour, optionally only within a depth range."});
+    d.push_back({"DeepColorCorrect", "Deep",
+                 zlimit({F("saturation", "saturation", 1, 0, 4), Col("contrast", "contrast", 1, 0, 4), Col("gamma", "gamma", 1, 0.2, 5),
+                         Col("gain", "gain", 1), Col("offset", "offset", 0, -1, 1)}),
+                 "Saturation, contrast, gamma, gain and offset on every sample, optionally only within a depth range."});
+    d.push_back({"DeepTransform", "Deep",
+                 {XY("translate", "translate", json::array({0, 0}), -2000, 2000), F("zscale", "z scale", 1, -10, 10),
+                  F("ztranslate", "z translate", 0, -1000, 1000)},
+                 "Moves deep samples by whole pixels and scales or shifts their depth."});
+    d.push_back({"DeepCrop", "Deep",
+                 {B("use_box", "crop to box", true), {"box", "box", Knob::Box, "$box", 0, 4096, {}, ""},
+                  B("use_znear", "znear", false), Same(EnableIf(Field(F("znear", "", 0, 0, 100000), 70), "use_znear=true"), true),
+                  B("use_zfar", "zfar", false), Same(EnableIf(Field(F("zfar", "", 1000, 0, 100000), 70), "use_zfar=true"), true),
+                  Tip(B("outside", "keep outside the depth range", false), "keep the samples outside znear / zfar instead")},
+                 "Removes deep samples outside a box and a depth range (volumes are cut at the edges)."});
+    d.push_back({"DeepReformat", "Deep",
+                 {Fmt("format", "output format"),
+                  Width(C("resize", "resize type", "width", {"none", "width", "height", "fit", "fill", "distort"}), 90), B("center", "center", true)},
+                 "Fits deep samples to another format (each pixel takes the samples under its centre)."});
+    d.push_back({"DeepSample", "Deep",
+                 {XY("pos", "position", json::array({0, 0}), 0, 4096), InfoRow("metadata", "")},
+                 "Lists the deep samples of one pixel (depth, colour, alpha and how much of each shows)."});
+    d.push_back({"DeepToPoints", "Deep",
+                 {Tip(I("density", "every n pixels", 2, 1, 16), "1: a point for every sample of every pixel; 2: every other pixel..."),
+                  F("alpha_threshold", "alpha threshold", 0.01, 0, 1), I("max_points", "max points", 500000, 1000, 5000000),
+                  InfoRow("status", "")},
+                 "Shows deep samples as a point cloud in the 3D viewer, placed through the camera input."});
     d.push_back({"Camera", "3D",
                  {XYZ("translate", "translate", json::array({0, 0, 0}), -100, 100), XYZ("rotate", "rotate", json::array({0, 0, 0}), -180, 180),
                   C("rot_order", "rotation order", "ZXY", rotOrders), Div("Projection"),
@@ -1987,6 +2097,37 @@ std::vector<NodeDef> build() {
                  "A tracked camera, its point cloud and named cards on the shot's surfaces. Connect a solved CameraTracker or a "
                  "Camera to 'cam', or import an FBX / Alembic camera. In the 3D viewer (Tab) select points (P), drag a card on "
                  "their plane (C), and move it with W / E / R (L toggles world / local). Feed it to CardTransform's 'scene' input."});
+    d.push_back({"VanishingCamera", "3D",
+                 {InfoRow("vanishcam", "camera"),
+                  Div("Lines"),
+                  Tip(C("draw_axis", "new lines along", "X", {"X", "Y", "Z"}),
+                      "The axis a line dragged in the viewer goes on (keys 1 / 2 / 3). X and Z lie on the ground, Y is up"),
+                  Btn("vcam_starter", "starter lines", "Two lines along X and two along Z to drag onto the edges of the shot"),
+                  Same(Btn("vcam_clear", "clear lines")), InfoRow("vanishlines", ""),
+                  Div("Lens"),
+                  Tip(C("focal_mode", "focal length", "solve", {"solve", "known"}),
+                      "solve: from two axes with two or more lines each. known: type it (then one axis with two lines and a single "
+                      "line along a second axis are enough)"),
+                  EnableIf(F("focal", "known focal length", 35, 5, 300, "mm"), "focal_mode=known"),
+                  F("haperture", "film back width", 36, 1, 70, "mm (the solved focal length is in these millimetres)"),
+                  Div("Placement"),
+                  Tip(XY("origin", "origin", "$center", 0, 4096), "The world origin: a point on the ground (drag the cross in the viewer)"),
+                  C("scale_by", "scale by", "distance", {"distance", "camera height", "reference length"}),
+                  When(F("distance", "distance to origin", 10, 0.01, 1000, "scene units"), "scale_by=distance"),
+                  When(F("camera_height", "camera height", 1.7, -100, 100, "above the ground at the origin, scene units"), "scale_by=camera height"),
+                  When(C("ref_axis", "along", "X", {"X", "Y", "Z"}), "scale_by=reference length"),
+                  When(Tip(XY("ref_point", "reference point", "$midright", 0, 4096), "The far end of the known length, along that axis from the origin"),
+                       "scale_by=reference length"),
+                  When(F("ref_length", "length", 1, 0.001, 1000, "scene units"), "scale_by=reference length"),
+                  Tip(F("spin", "spin around up", 0, -180, 180, "degrees"), "Turns the world about +Y (which way X and Z point)"),
+                  Tip(B("flip_up", "flip up", false), "The world upside down (the solve keeps +Y up the frame)"),
+                  Div("Overlay"), B("show_grid", "ground grid", true), F("grid_size", "grid cell", 1, 0.01, 100, "scene units"),
+                  Div("Export"),
+                  Btn("vcam_camera", "Camera node", "A Camera node with this camera baked in (for export, or to animate from)"),
+                  Same(Btn("vcam_scene3d", "Scene3D with a floor card", "A Scene3D on this camera with a card lying on the ground at the origin"))},
+                 "A camera solved from lines drawn on a still along the scene's axes - floor edges, a building's corners. Drag lines in "
+                 "the viewer (red X, green Y up, blue Z), drag the origin cross onto the ground, set the scale. Feed it to Scene3D's cam input, "
+                 "Card3D or ScanlineRender like a Camera."});
     auto xform = [&](std::vector<KnobDef> extra) {
         std::vector<KnobDef> k = {XYZ("translate", "translate", json::array({0, 0, 0}), -100, 100),
                                   XYZ("rotate", "rotate", json::array({0, 0, 0}), -180, 180),
@@ -2147,7 +2288,11 @@ std::vector<NodeDef> build() {
                       S_(Tip(Field(I("max_number_of_keyframe_tracks_to_display", "on_screen key-track limit", 3, 0, 20), 70),
                              "Most tracks whose keyframe snapshots show in the viewer (0: the selected ones)")),
                       // ---- Transform
-                      X_(Width(C("transform", "transform", "none", {"none", "stabilize", "stabilize 1pt", "match-move", "match-move 1pt", "remove jitter", "add jitter"}), 140)),
+                      X_(Tip(Width(C("transform", "transform", "none", {"none", "stabilize", "stabilize 1pt", "match-move", "match-move 1pt", "remove jitter", "add jitter",
+                                                                     "corner pin match-move", "corner pin stabilize"}), 170),
+                             "corner pin: the perspective of a flat surface from its tracks (the enabled tracks with T on: 4 for a "
+                             "corner pin, more to average out noise). Where some are lost it carries on with the rest (3: affine, "
+                             "2: scale and rotation, 1: position). Smooth t averages the track positions")),
                       X_(ref), X_(Same(Btn("tracker_ref_here", "set to current frame", "Make the frame you're on the reference frame"), true)),
                       X_(Tip(F("jitter_period", "jitter period", 10, 1, 100), "Frames averaged to find the steady motion (remove / add jitter)")),
                       X_(Tip(smooth, "Frames averaged to smooth the translation, rotation and scale")),
@@ -2159,7 +2304,8 @@ std::vector<NodeDef> build() {
                       X_(Log(F("motionblur", "motionblur", 0, 0, 4))), X_(F("shutter", "Shutter Length", 0.5, 0, 2)),
                       X_(Width(C("shutteroffset", "Shutter Offset", "start", {"centred", "start", "end", "custom"}), 100)),
                       X_(Same(EnableIf(F("shuttercustomoffset", "", 0, -1, 1), "shutteroffset=custom"), true))},
-                     "2D point tracks: tracking, keyframe tracking and offsets in the viewer; stabilize, match-move and jitter on the Transform tab."});
+                     "2D point tracks: tracking, keyframe tracking and offsets in the viewer; Fill gaps for frames where a track lost its "
+                     "feature; stabilize, match-move, jitter and a live corner pin on the Transform tab."});
     }
     d.push_back({"PlanarTracker", "Transform", {}, "Tracks a flat surface (perspective, rotation, scale) from a region drawn in the viewer."});
     {
@@ -2390,8 +2536,8 @@ std::vector<NodeDef> build() {
                              "Copy the current key into the key folder now (frames already there are skipped)")}),
                  "CorridorKey 2.0 by Corridor Digital: AI green / blue screen keying that looks at the whole clip, for a steady matte "
                  "and real colour in hair, motion blur and glass. Optional hint input: a rough matte. Downloaded from Corridor Digital "
-                 "under its own licence (CorridorKey is free to use on commercial work; not for resale). Needs an NVIDIA RTX 30-series "
-                 "or newer. Runs on the ML worker."});
+                 "under its own licence (CorridorKey is free to use on commercial work; not for resale). Needs a GPU: an NVIDIA RTX 30-series "
+                 "or newer works best; AMD Radeon (DirectML on Windows, ROCm on Linux) and Intel Arc run it too. Runs on the ML worker."});
     d.push_back({"TrackMask", "AI",
                  frames({InfoRow("trackmask", ""),
                          Btn("trackmask_clear_frame", "Clear this frame", "Remove the active object's clicks and box on this frame"),
@@ -2402,6 +2548,9 @@ std::vector<NodeDef> build() {
                          Tip(C("model", "model", "large", {"large", "base_plus", "small", "tiny"}),
                              "SAM 2.1 (Apache 2.0). large: the best edges and tracking; tiny: the quickest"),
                          Tip(I("max_size", "max size", 1280, 256, 4096), "The frames are made this small (long side) for the model"),
+                         Tip(F("min_confidence", "leak cleanup", 2, 0, 10),
+                             "Parts of an object the model wasn't this sure of anywhere are dropped (SAM's faint leaks into the "
+                             "background). 0: keep everything. Changing it tracks again"),
                          Div("text"),
                          Tip(S("text_query", "find", ""), "What to look for (\"person, dog\"): Find text objects makes an object of each "
                                                            "one OWLv2 finds on this frame"),
@@ -2418,16 +2567,26 @@ std::vector<NodeDef> build() {
                          C("mask_b", "B", "Off", {"Off", "Add", "Subtract", "Intersect", "Multiply"}),
                          Div("mask output"),
                          Tip(C("mask_output", "mask output", "Guided Smooth Mask",
-                               {"RAW Mask", "Hard Mask", "Guided Smooth Mask", "ViTMatte", "MEMatte"}),
+                               {"RAW Mask", "Hard Mask", "Guided Smooth Mask", "SAM High-Res", "ViTMatte", "MEMatte"}),
                              "RAW: the model's matte as it comes. Hard: cut at a threshold. Guided Smooth: smoothed along the "
-                             "plate's edges (GPU guided filter). ViTMatte / MEMatte: the edges worked out by a matting model "
-                             "(Refine edges; Guided Smooth is shown wherever they haven't run or their weights aren't installed)"),
+                             "plate's edges (GPU guided filter). SAM High-Res: SAM segments the tracked edge again in tiles at "
+                             "the plate's own resolution (finer hair and profiles; the same weights, after Track by itself), then "
+                             "Guided Smooth. ViTMatte / MEMatte: the edges worked out by a matting model (Refine edges; Guided "
+                             "Smooth is shown wherever they haven't run or their weights aren't installed)"),
                          When(F("hard_threshold", "threshold", 0.5, 0.01, 0.99), "mask_output=Hard Mask"),
+                         When(Tip(F("edge_width", "edge width (px)", 1, 0.5, 8),
+                                  "How wide the tracked edge's antialiasing is, at the plate's size (the model's mask is cut "
+                                  "there, sharp, not scaled up soft)"),
+                              "mask_output=Hard Mask|Guided Smooth Mask|SAM High-Res|ViTMatte|MEMatte"),
                          When(Tip(I("smooth_radius", "radius (px)", 8, 1, 64), "How far the guided filter looks round each pixel"),
-                              "mask_output=Guided Smooth Mask|ViTMatte|MEMatte"),
+                              "mask_output=Guided Smooth Mask|SAM High-Res|ViTMatte|MEMatte"),
                          When(Tip(F("smooth_eps", "edge detail", 0.01, 0.0001, 0.1),
                                   "The guided filter's regulariser: smaller follows the plate's edges more closely, larger is smoother"),
-                              "mask_output=Guided Smooth Mask|ViTMatte|MEMatte"),
+                              "mask_output=Guided Smooth Mask|SAM High-Res|ViTMatte|MEMatte"),
+                         When(Tip(C("hires_tile", "tile (plate px)", "1024", {"1024", "1536", "2048"}),
+                                  "How much of the plate SAM sees at once along the edge: 1024 the finest (one mask step per 4 "
+                                  "plate px; ~18 tracking a 4.6K plate whole), 2048 quicker"),
+                              "mask_output=SAM High-Res"),
                          When(Tip(C("vitmatte_size", "ViTMatte model", "small", {"small", "base"}), "base: finer edges, slower"),
                               "mask_output=ViTMatte"),
                          When(Tip(I("trimap_erode", "trimap inside (px)", 8, 0, 100), "How far inside the edge the refiner works"),
@@ -2439,7 +2598,7 @@ std::vector<NodeDef> build() {
                               "mask_output=ViTMatte|MEMatte"),
                          When(Tip(B("direct_refiner", "Direct Refiner", false),
                                   "Refine the mask input's alpha instead of the tracked objects (a roto or key from upstream)"),
-                              "mask_output=ViTMatte|MEMatte"),
+                              "mask_output=SAM High-Res|ViTMatte|MEMatte"),
                          Div("matte"), B("binarize", "binarize", false),
                          EnableIf(F("binarize_threshold", "binarize threshold", 0.5, 0.01, 0.99), "binarize=true"),
                          F("grow", "grow / shrink (px)", 0, -50, 50),
@@ -2550,7 +2709,7 @@ const NodeDef* nodeDef(const std::string& type) {
 }
 
 const std::vector<std::string>& categories() {
-    static std::vector<std::string> c = {"Image", "Draw", "Time", "Channel", "Color", "Filter", "Keyer", "Merge", "Transform", "Stylize", "MoGraph", "3D", "Value", "AI", "Other", "OFX"};
+    static std::vector<std::string> c = {"Image", "Draw", "Time", "Channel", "Color", "Filter", "Keyer", "Merge", "Transform", "Stylize", "MoGraph", "3D", "Deep", "Value", "AI", "Other", "OFX"};
     return c;
 }
 
@@ -2563,7 +2722,7 @@ std::string categoryOf(const std::string& type) {
 unsigned int categoryColor(const std::string& c) {
     static const std::map<std::string, unsigned int> m = {
         {"Image", 0xFF8C8C8C}, {"Draw", 0xFF7C8FD8}, {"Keyer", 0xFF62B35E}, {"Time", 0xFF7FB89C}, {"Channel", 0xFFB8A15E}, {"Color", 0xFF6FA88A},
-        {"Filter", 0xFF5E8FC9}, {"Merge", 0xFFC98A4E}, {"Transform", 0xFFB97AA7}, {"3D", 0xFFC2B04A}, {"AI", 0xFF8A6AD8}, {"Other", 0xFF9A9A9A},
+        {"Filter", 0xFF5E8FC9}, {"Merge", 0xFFC98A4E}, {"Transform", 0xFFB97AA7}, {"3D", 0xFFC2B04A}, {"Deep", 0xFF5A7FB0}, {"AI", 0xFF8A6AD8}, {"Other", 0xFF9A9A9A},
         {"OFX", 0xFF4FA3C4}, {"Stylize", 0xFF5AB3D6}, {"Value", 0xFFE66E78}, {"MoGraph", 0xFFA86AE8}};
     auto it = m.find(c);
     return it == m.end() ? 0xFF4A4AB8 : it->second;  // unknown: red

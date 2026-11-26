@@ -92,14 +92,34 @@ void workerSection(App& app, const std::string& needPkg) {
         double vram = w.packages.is_object() ? w.packages.value("vram_gb", 0.0) : 0.0;
         bool cuda = w.packages.is_object() && w.packages.value("cuda", false);
         double cap = w.packages.is_object() ? w.packages.value("vram_limit_gb", 0.0) : 0.0;
-        if (cuda && cap > 0) ImGui::TextColored(kGood, "running on %s (%.0f GB, limited to %.0f GB)", gpu.c_str(), vram, cap);
-        else if (cuda) ImGui::TextColored(kGood, "running on %s (%.0f GB)", gpu.c_str(), vram);
-        else ImGui::TextColored(kWarn, "running (no CUDA GPU: CPU only, slow)");
+        // the GPU backend: cuda, rocm, xpu, directml, mps or cpu (a worker from before backends: cuda or nothing)
+        std::string backend = w.packages.is_object() ? w.packages.value("backend", std::string(cuda ? "cuda" : "cpu"))
+                                                     : std::string("cpu");
+        // AMD on Windows: the AI masking nodes run in the DirectML environment
+        const json dml = w.packages.is_object() ? w.packages.value("directml_env", json()) : json();
+        std::string dmlGpu = dml.is_object() && dml.contains("gpu") && dml["gpu"].is_string() ? dml["gpu"].get<std::string>() : "";
+        const char* via = backend == "rocm" ? " via ROCm" : backend == "xpu" ? " via Intel XPU"
+                        : backend == "directml" ? " via DirectML" : backend == "mps" ? " via Metal" : "";
+        if (backend != "cpu" && vram > 0 && cap > 0)
+            ImGui::TextColored(kGood, "running on %s%s (%.0f GB, limited to %.0f GB)", gpu.c_str(), via, vram, cap);
+        else if (backend != "cpu" && vram > 0) ImGui::TextColored(kGood, "running on %s%s (%.0f GB)", gpu.c_str(), via, vram);
+        else if (backend != "cpu") ImGui::TextColored(kGood, "running on %s%s", gpu.c_str(), via);
+        else if (!dmlGpu.empty())
+            ImGui::TextColored(kGood, "AI masking on %s via DirectML; other ML nodes on the CPU", dmlGpu.c_str());
+        else ImGui::TextColored(kWarn, "running (no GPU PyTorch can use: CPU only, slow)");
+        if (backend == "cpu" && dml.is_object() && dml.contains("error") && ImGui::IsItemHovered())
+            ImGui::SetTooltip("The DirectML environment doesn't load:\n%s", dml.value("error", std::string()).c_str());
         ImGui::SameLine();
         if (ImGui::SmallButton("stop")) ml::stopWorker();
         if (!needPkg.empty() && needPkg != "gsplat" && w.packages.is_object() && !w.packages.value(needPkg, false)) {
             label("");
-            if (needPkg == "corridorkey_env")
+            const json ckt = w.packages.value("corridorkey_torch", json());
+            if (needPkg == "corridorkey_env" && ckt.is_object() && ckt.contains("error")) {
+                ImGui::PushTextWrapPos(0);
+                ImGui::TextColored(kBad, "CorridorKey's environment: %s. Click Update ML to reinstall it.",
+                                   ckt.value("error", std::string()).c_str());
+                ImGui::PopTextWrapPos();
+            } else if (needPkg == "corridorkey_env")
                 ImGui::TextColored(kBad, "CorridorKey's Python environment isn't set up: click Update ML");
             else
                 ImGui::TextColored(kBad, "the worker's Python has no '%s': click Update ML", needPkg.c_str());
@@ -114,8 +134,10 @@ void workerSection(App& app, const std::string& needPkg) {
             else app.message("ML setup: " + err);
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Creates a Python environment in %s with PyTorch (CUDA), LTX, gsplat and MapAnything.\n"
-                              "Needs an NVIDIA GPU and about 10 GB of disk (models are separate).",
+            ImGui::SetTooltip("Creates a Python environment in %s with PyTorch, LTX, gsplat and MapAnything.\n"
+                              "It finds the GPU: NVIDIA (CUDA) runs everything; AMD Radeon (DirectML) and Intel Arc (XPU)\n"
+                              "run the AI masking nodes (TrackMask, CorridorKey) on the GPU too. About 10-20 GB of disk\n"
+                              "(models are separate).",
                               ml::home().c_str());
     } else {
         ImGui::TextColored(kWarn, "not running");
@@ -374,6 +396,12 @@ void drawMLPanel(App& app, UiState& ui, Node* n) {
             ImGui::ProgressBar(ex.total ? (float)ex.done / ex.total : 0.0f, ImVec2(-70, 0), b);
             ImGui::SameLine();
             if (ImGui::SmallButton("cancel")) app.cancelMLJob(n->name, slot);
+        } else if (ex.failed && ex.node == n->name && ex.slot == slot && (job.empty() || job == res || st.state.empty())) {
+            // the job couldn't be written (a frame that doesn't render, the cache disk full, ...): say so here,
+            // not only in the message line for a few seconds
+            ImGui::PushTextWrapPos(0);
+            ImGui::TextColored(kBad, "couldn't start: %s", ex.label.c_str());
+            ImGui::PopTextWrapPos();
         } else if (stale) {
             ImGui::TextColored(kWarn, "interrupted at %.0f%%: the worker stopped (start it to resume)", st.progress * 100);
         } else if (st.state == "queued" || st.state == "running") {

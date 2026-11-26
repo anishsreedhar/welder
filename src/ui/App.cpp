@@ -393,6 +393,9 @@ void App::loadSettings() {
             diskCacheGB = j.value("disk_cache_gb", diskCacheGB);
             pythonInterpreter = j.value("python_interpreter", pythonInterpreter);
             runInitScript = j.value("python_run_init", runInitScript);
+            mcpEnabled = j.value("mcp_enabled", mcpEnabled);
+            mcpPort = j.value("mcp_port", mcpPort);
+            mcpAllowRemote = j.value("mcp_allow_remote", mcpAllowRemote);
             playbackCacheGB = j.value("playback_cache_gb", playbackCacheGB);
             askMatchProject = j.value("ask_match_project", askMatchProject);
             rightAnglePipes = j.value("graph_right_angle_pipes", rightAnglePipes);
@@ -453,6 +456,9 @@ void App::saveSettings() {
     j["disk_cache_gb"] = diskCacheGB;
     j["python_interpreter"] = pythonInterpreter;
     j["python_run_init"] = runInitScript;
+    j["mcp_enabled"] = mcpEnabled;
+    j["mcp_port"] = mcpPort;
+    j["mcp_allow_remote"] = mcpAllowRemote;
     j["playback_cache_gb"] = playbackCacheGB;
     j["ask_match_project"] = askMatchProject;
     j["graph_right_angle_pipes"] = rightAnglePipes;
@@ -2908,6 +2914,25 @@ ImagePtr App::pickImage(const std::string& name, int input, const Box& box, doub
     }
 }
 
+DeepPtr App::deepSamplesAt(const std::string& name, int x, int y, double f) {
+    Node* n = node(name);
+    if (!n) return nullptr;
+    if (!pickEngine_) {
+        EngineOptions o;
+        o.cacheBytes = size_t(256) << 20;
+        pickEngine_ = std::make_unique<Engine>(o);
+    }
+    try {
+        pickEngine_->clearMemo();
+        pickEngine_->setScale(1.0);
+        if (!pickEngine_->isDeepSource(n, f)) return nullptr;
+        return pickEngine_->requestDeep(n, f, Box(x, y, x + 1, y + 1));
+    } catch (const std::exception& e) {
+        message(std::string("deep samples: ") + e.what());
+        return nullptr;
+    }
+}
+
 bool App::samplePixels(const std::string& name, int input, const Box& box, double f, float rgba[4]) {
     Node* n = node(name);
     if (!n || box.empty()) return false;
@@ -3024,7 +3049,7 @@ void App::batchLoop(RenderRequest r) {
         e.clearAssembled();
         e.setCacheBudget(std::max(size_t(512) << 20, now / 2));
         for (auto& n : comp->nodes)
-            if (n->type == "Read") n->paramsChanged();  // their decoded frames
+            if (n->type == "Read" || n->type == "DeepRead") n->paramsChanged();  // their decoded frames
     };
     std::shared_lock<std::shared_timed_mutex> cl(compM);  // edits wait until the batch finishes
     if (r.proxy && comp->project.proxyScale > 0 && comp->project.proxyScale < 1) eng.setScale(comp->project.proxyScale);
@@ -3286,6 +3311,7 @@ bool App::newComp() {
     edit([this, j](Comp&) {
         comp = Comp::fromJson(j, fs::current_path());
         ++compRevision_;
+        ++compLoads;
         selection.clear();
         panels.clear();
         viewed.clear();
@@ -3343,11 +3369,12 @@ void App::adoptComp(std::shared_ptr<Comp> loaded) {
     edit([this, loaded](Comp&) mutable {
         comp.reset(new Comp());
         ++compRevision_;
+        ++compLoads;
         std::swap(*comp, *loaded);  // move the loaded comp in
         for (auto& n : comp->nodes) {
             n->comp = comp.get();
             // Sequences saved without a range (hand-written comps) pick it up from disk.
-            if (n->type == "Read" && !n->params.has("first")) updateReadRange(n.get());
+            if ((n->type == "Read" || n->type == "DeepRead") && !n->params.has("first")) updateReadRange(n.get());
         }
         // a script with no media yet still gets the offer when its first Read gets a file
         matchArmed = true;
@@ -3423,6 +3450,7 @@ bool App::save(const std::string& path, std::string* err) {
     fs::remove(autosavePath(compPath), ec);
     lastAutosave_ = steadySeconds();
     addRecent(compPath);
+    ++compSaves;
     message("saved " + compPath);
     return true;
 }

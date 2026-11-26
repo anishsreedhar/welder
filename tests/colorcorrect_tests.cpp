@@ -5,6 +5,7 @@
 #include "core/NkExport.h"
 #include "nodes/ColorCorrect.h"
 #include "nodes/NodeUtils.h"
+#include "gpu/Gpu.h"
 
 using namespace strata;
 int main() {
@@ -100,6 +101,8 @@ int main() {
     check(exported.text.find("gain_panelDropped true") != std::string::npos, "export preserves wheel visibility");
     check(exported.text.find("lookup {") != std::string::npos, "export includes sampled lookup curves");
     check(exported.text.find("mix_luminance 0.7") != std::string::npos, "export includes mix luminance");
+    if (gpu::route() == gpu::RouteMode::Gpu && gpu::available())
+        check(gpu::routedGpuJobs("ColorCorrect") > 0, "forced GPU mode executes the RGB ColorCorrect shader");
     std::printf("ColorCorrect: %d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;
 }

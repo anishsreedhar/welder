@@ -26,8 +26,10 @@
 
 #include "GL.h"
 #include "Panels.h"
+#include "McpService.h"
 #include "ScriptRunner.h"
 #include "nodes/Scene3D.h"
+#include "nodes/VanishCam.h"
 #include "Tablet.h"
 #include "core/Crash.h"
 #include "SmokeTest.h"
@@ -58,7 +60,7 @@ using namespace strata::ui;
 namespace {
 
 struct Options {
-    std::string file, view, select, props, screenshot, ofxPath, level, runScript;
+    std::string file, view, select, props, screenshot, ofxPath, level, runScript, callbacksScript;
     bool quitAfterScript = false;
     double frame = -1;
     int width = 1600, height = 960;
@@ -81,6 +83,7 @@ Options parse(int argc, char** argv) {
         else if (a == "--graph-level") o.level = next();
         else if (a == "--run-script") o.runScript = next();
         else if (a == "--quit-after-script") o.quitAfterScript = true;
+        else if (a == "--callbacks-script") o.callbacksScript = next();  // (tests: in place of init.py)
         else if (a == "--screenshot") o.screenshot = next();
         else if (a == "--reset-workspace" || a == "--reset-layout") o.resetWorkspace = true;
         else if (a == "--safe-mode" || a == "--safe") o.safeMode = true;
@@ -454,7 +457,10 @@ int main(int argc, char** argv) {
     app.applyEdits();
     if (opt.file.empty() && opt.screenshot.empty() && !opt.smoke) app.checkAutosave();  // an untitled comp left by a crash
     if (opt.smoke) smoke::start(opt.smokeItems);
-    if (interactive && !opt.smoke && opt.runScript.empty()) ui::ScriptRunner::instance().runStartup(app);  // <config>/init.py
+    if (!opt.callbacksScript.empty()) ui::ScriptRunner::callbacks().restart(app, opt.callbacksScript);
+    else if (interactive && !opt.smoke && opt.runScript.empty()) ui::ScriptRunner::callbacks().runStartup(app);  // <config>/init.py
+    if ((opt.screenshot.empty() && !opt.smoke) || std::getenv("WELDER_MCP_PORT"))
+        ui::McpService::instance().apply(app);  // (if Preferences turned it on)
     bool scriptStarted = false;  // --run-script
     ui.updateAutoCheck = interactive && !opt.smoke;  // (Shell.cpp: at most every 12 hours, if allowed)
     if (const char* tr = std::getenv("STRATA_TEST_RECOVERY"); tr && *tr && !opt.screenshot.empty())  // screenshots: the offer
@@ -513,7 +519,7 @@ int main(int argc, char** argv) {
         // when something must advance every frame.
         // Keys pressed faster than frames are trickled in one per frame by ImGui; keep
         // polling while any are queued so a burst of hotkeys is never held back.
-        if (app.playing || app.editsPending() || ui::ScriptRunner::instance().running() || ui.graph.autoPanning || !opt.screenshot.empty() || smoke::active() || GImGui->InputEventsQueue.Size > 0)
+        if (app.playing || app.editsPending() || ui::ScriptRunner::instance().running() || ui::ScriptRunner::callbacks().needsFrames() || ui::McpService::instance().busy() || ui.graph.autoPanning || !opt.screenshot.empty() || smoke::active() || GImGui->InputEventsQueue.Size > 0)
             glfwPollEvents();
         else glfwWaitEventsTimeout(app.rendering() ? 0.05 : 0.5);
         const auto frameWorkStart = std::chrono::steady_clock::now();  // (WELDER_DEBUG_FRAMES)
@@ -812,6 +818,25 @@ int main(int argc, char** argv) {
                         std::printf("VIEWERCLICK %s %s = %s translate = %s (typing: %d, picker: %s)\n", n->name.c_str(), tk,
                                     n->params.data[tk].dump().c_str(), n->params.data.value("translate", json()).dump().c_str(),
                                     (int)typingInText(), ui.picker.active ? ui.picker.node.c_str() : "off");
+        }
+        // STRATA_TEST_DEEPHOVER=<x>,<y>: rest the cursor on that pixel of the viewed (deep) node and
+        // print the samples the viewer lists for it; the screenshot shows the list.
+        bool deepHoverTest = false;
+        if (const char* th = std::getenv("STRATA_TEST_DEEPHOVER"); th && *th && !opt.screenshot.empty()) {
+            static int phase = 0, wait = 0;
+            deepHoverTest = phase < 2 && frameCount < 600;
+            if (phase == 0 && frameCount > 20 && !app.rendering() && gTestDeepHover.x >= 0) {
+                ImGui::GetIO().AddMousePosEvent(gTestDeepHover.x, gTestDeepHover.y);
+                if (ui.viewer.deepAsked && ++wait > 5) {
+                    const DeepPtr& d = ui.viewer.deepAt;
+                    const int n = d ? d->count(ui.viewer.deepX, ui.viewer.deepY) : -1;
+                    std::printf("DEEPHOVER %d,%d: %d samples", ui.viewer.deepX, ui.viewer.deepY, n);
+                    for (int k = 0; k < n; ++k) std::printf(" z=%g", d->sample(ui.viewer.deepX, ui.viewer.deepY)[k * d->nch() + d->zi]);
+                    std::printf("\n");
+                    std::fflush(stdout);
+                    phase = 1;
+                }
+            } else if (phase == 1 && ++wait > 12) phase = 2;  // (a few frames for the tooltip in the screenshot)
         }
         // STRATA_TEST_VIEWERDRAG=<seconds>: drag the open Transform's centre handle steadily for that long
         // (a step every 16 ms, as a hand would), then let go; print how often the viewer got a new
@@ -1579,6 +1604,88 @@ int main(int argc, char** argv) {
                                     n->params.has("strokes") ? n->params.data["strokes"].size() : (size_t)0,
                                     n->params.has("strokes") && !n->params.data["strokes"].empty() ? n->params.data["strokes"][0]["pts"].size() : (size_t)0);
         }
+        // STRATA_TEST_VANISH="x:x1,y1,x2,y2;z:...;o:x,y": with a VanishingCamera's panel open, for each item
+        // press 1 / 2 / 3 (x / y / z) over the viewer and drag a line between the two image positions,
+        // or ("o") drag the origin cross to x, y; then print the lines and the solved camera
+        // (tools/vanish_camera_test.sh)
+        bool vanishTest = false;
+        if (const char* tv = std::getenv("STRATA_TEST_VANISH"); tv && *tv && !opt.screenshot.empty()) {
+            ImGuiIO& tio = ImGui::GetIO();
+            struct Item {
+                char kind;
+                double a[4];
+            };
+            static std::vector<Item> items;
+            static bool parsed = false;
+            if (!parsed) {
+                parsed = true;
+                std::stringstream ss(tv);
+                std::string it;
+                while (std::getline(ss, it, ';')) {
+                    Item x{it.empty() ? '?' : it[0], {0, 0, 0, 0}};
+                    if (it.size() > 2) std::sscanf(it.c_str() + 2, "%lf,%lf,%lf,%lf", &x.a[0], &x.a[1], &x.a[2], &x.a[3]);
+                    items.push_back(x);
+                }
+            }
+            const int start = 20, per = 16;
+            vanishTest = frameCount < start + per * (int)items.size() + 30;
+            const int k = (frameCount - start) / per, step = (frameCount - start) % per;
+            Node* vn = activeVanishCam(app);
+            if (frameCount >= start && k < (int)items.size() && vn) {
+                if (items[k].kind == 'o' && step == 0) {  // from where the origin is now to the given position
+                    const Format f = nodeFormatUI(app, vn, app.frame);
+                    auto o = vn->params.vec<2>("origin", app.frame, {f.width / 2.0, f.height / 2.0});
+                    Item& m = items[k];
+                    m.a[2] = m.a[0], m.a[3] = m.a[1], m.a[0] = o[0], m.a[1] = o[1];
+                }
+                const Item it = items[k];
+                auto at = [&](double x, double y) {
+                    ImVec2 p = vanishTestScreen(x, y);
+                    tio.AddMousePosEvent(p.x, p.y);
+                };
+                const ImGuiKey key = it.kind == 'y' ? ImGuiKey_2 : it.kind == 'z' ? ImGuiKey_3 : ImGuiKey_1;
+                if (step == 1) at(it.a[0], it.a[1]);
+                else if (step == 2 && it.kind != 'o') tio.AddKeyEvent(key, true);
+                else if (step == 3 && it.kind != 'o') tio.AddKeyEvent(key, false);
+                else if (step == 5) tio.AddMouseButtonEvent(0, true);
+                else if (step > 5 && step <= 12) {
+                    const double t = (step - 5) / 7.0;
+                    at(it.a[0] + (it.a[2] - it.a[0]) * t, it.a[1] + (it.a[3] - it.a[1]) * t);
+                } else if (step == 14) tio.AddMouseButtonEvent(0, false);
+            }
+            if (frameCount == start + per * (int)items.size() + 10 && vn) {
+                std::printf("VANISH lines %s origin %s\n", vn->params.data.value("lines", json()).dump().c_str(),
+                            vn->params.data.value("origin", json()).dump().c_str());
+                const Format f = nodeFormatUI(app, vn, app.frame);
+                vanish::Setup st = vanish::setupFromParams(vn->params, app.frame, f.width, f.height);
+                vanish::Result r = vanish::solve(st);
+                if (r.ok) {
+                    const cam3d::V3 e = cam3d::matrixToEuler(r.cam.R, "ZXY");
+                    std::printf("VANISH solved focal %.3f translate %.4f %.4f %.4f rotate %.3f %.3f %.3f\n", r.cam.focal, r.cam.C.x, r.cam.C.y,
+                                r.cam.C.z, e.x, e.y, e.z);
+                } else {
+                    std::printf("VANISH not solved: %s\n", r.error.c_str());
+                }
+                std::fflush(stdout);
+                if (std::getenv("STRATA_TEST_VANISH_EXPORT")) {  // the panel's export buttons
+                    vanishCamButton(app, vn, "vcam_camera");
+                    vanishCamButton(app, vn, "vcam_scene3d");
+                }
+            }
+            if (frameCount == start + per * (int)items.size() + 20 && std::getenv("STRATA_TEST_VANISH_EXPORT"))
+                for (auto& n : app.comp->nodes) {
+                    if (n->type == "Camera") std::printf("VANISH export %s %s\n", n->name.c_str(), n->params.data.dump().c_str());
+                    if (n->type == "Scene3D") {
+                        auto* src = dynamic_cast<scene3d::SceneSource*>(n.get());
+                        auto sn = src->scene(app.frame);
+                        std::printf("VANISH export %s inputs %s %s, camera %s, cards %zu", n->name.c_str(), n->input(0) ? n->input(0)->name.c_str() : "-",
+                                    n->input(1) ? n->input(1)->name.c_str() : "-", sn.camera ? "yes" : "no", sn.cards.size());
+                        if (!sn.cards.empty())
+                            std::printf(" normal %.3f %.3f %.3f size %.2f", sn.cards[0].normal().x, sn.cards[0].normal().y, sn.cards[0].normal().z, sn.cards[0].w);
+                        std::printf("\n");
+                    }
+                }
+        }
         // STRATA_TEST_MARKUP=<file>: with a Markup's panel open, paint a stroke, drag a box, move it
         // with Select, place and type a text, drag a circle and delete it with the Delete key, then
         // Save image at half resolution to <file> and print the items (tools/markup_test.sh)
@@ -1844,7 +1951,12 @@ int main(int argc, char** argv) {
         app.setGesture(ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseDown(ImGuiMouseButton_Middle));
         app.applyEdits();
         ui::ScriptRunner::instance().pump(app);  // a Python script's requests (ScriptRunner.h)
-        if (!opt.runScript.empty() && !scriptStarted) {
+        ui::McpService::instance().pump(app);    // an AI client's tool calls (McpService.h)
+        ui::ScriptRunner::callbacks().pump(app, !ui::ScriptRunner::instance().running());  // init.py's callbacks
+        // (--callbacks-script: the script runs once the callbacks are registered and waiting)
+        const bool callbacksReady = opt.callbacksScript.empty() || !ui::ScriptRunner::callbacks().running() || ui::ScriptRunner::callbacks().idle();
+        static bool buttonPressed = false;  // WELDER_TEST_PRESS_BUTTON=<node>:<label>, once the script is done
+        if (!opt.runScript.empty() && !scriptStarted && callbacksReady) {
             scriptStarted = true;
             ui.showScriptEditor = true;
             if (!ui::ScriptRunner::instance().runFile(app, opt.runScript) && opt.quitAfterScript) {
@@ -1857,6 +1969,15 @@ int main(int argc, char** argv) {
             static const auto t0 = std::chrono::steady_clock::now();
             if (stopAfter > 0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() > stopAfter)
                 ui::ScriptRunner::instance().stop();
+        } else if (scriptStarted && opt.quitAfterScript && !ui::ScriptRunner::instance().running() && !ui.requestQuit &&
+                   (!ui::ScriptRunner::callbacks().idle() || (ui::ScriptRunner::callbacks().running() && app.editsPending()))) {
+            // the callbacks the script set off run first (its last edits must be in to set them off)
+        } else if (scriptStarted && opt.quitAfterScript && !ui.requestQuit && !buttonPressed && std::getenv("WELDER_TEST_PRESS_BUTTON")) {
+            buttonPressed = true;
+            const std::string b = std::getenv("WELDER_TEST_PRESS_BUTTON");
+            const size_t colon = b.find(':');
+            if (!ui::runPythonButton(app, b.substr(0, colon), colon == std::string::npos ? "" : b.substr(colon + 1)))
+                std::printf("BUTTON could not run\n");
         } else if (scriptStarted && opt.quitAfterScript && !ui::ScriptRunner::instance().running() && !ui.requestQuit) {
             const size_t before = app.comp ? app.comp->nodes.size() : 0;
             const bool couldUndo = app.canUndo();
@@ -1867,6 +1988,9 @@ int main(int argc, char** argv) {
             }
             std::printf("SCRIPT exit=%d nodes=%zu undo=%d after_undo_nodes=%zu dirty=%d\n", ui::ScriptRunner::instance().lastExitCode(),
                         before, (int)couldUndo, app.comp ? app.comp->nodes.size() : 0, (int)app.dirty);
+            if (std::getenv("WELDER_TEST_DUMP_PARAMS") && app.comp)  // (the knobs after that undo)
+                for (auto& n : app.comp->nodes)
+                    if (n->type != "Viewer") std::printf("SCRIPT params %s %s\n", n->name.c_str(), n->params.data.dump().c_str());
             std::printf("SCRIPT output:\n%s\n", ui::ScriptRunner::instance().output().c_str());
             std::fflush(stdout);
             app.dirty = false;
@@ -1951,7 +2075,7 @@ int main(int argc, char** argv) {
                     scanResult = conflicts.empty() ? 0 : 3;
                     break;
                 }
-            } else if (frameCount > 8 && (settled > 4 || forceShot) && !pipeTest && !playTest && !altTest && !vclickTest && !vdragTest && !sc3Test && !stabTest && !flowTest && !markupTest && !matchTest && !dragTest && !camTest && !swapTest && !exposeTest && !shakeTest && !alignTest && !altDragTest && !messTest && !panelDragTest && !actionsTest && !keysTest && !menuTest && !tmTest && !reTest && !pcTest && !trackTest) {
+            } else if (frameCount > 8 && (settled > 4 || forceShot) && !pipeTest && !playTest && !altTest && !vclickTest && !deepHoverTest && !vdragTest && !sc3Test && !stabTest && !flowTest && !markupTest && !vanishTest && !matchTest && !dragTest && !camTest && !swapTest && !exposeTest && !shakeTest && !alignTest && !altDragTest && !messTest && !panelDragTest && !actionsTest && !keysTest && !menuTest && !tmTest && !reTest && !pcTest && !trackTest) {
                 if (std::getenv("STRATA_TEST_OPEN")) std::fprintf(stderr, "OPENTEST viewed '%s'\n", app.viewed.c_str());
                 bool ok = savePng(opt.screenshot, fbw, fbh);
                 std::printf("%s %s (%dx%d)\n", ok ? "wrote" : "failed to write", opt.screenshot.c_str(), fbw, fbh);
@@ -2025,6 +2149,8 @@ int main(int argc, char** argv) {
 
     startupDone();
     ui::ScriptRunner::instance().shutdown(app);  // a script still running is stopped
+    ui::ScriptRunner::callbacks().shutdown(app);
+    ui::McpService::instance().shutdown();
     ml::releaseWorker();  // the last Welder to quit stops the ML worker (it holds the models' memory)
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

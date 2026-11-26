@@ -26,7 +26,11 @@ SAM's conditioning frames (its memory always attends to them, so a correction ke
 from both sides); after the last forwards. Runs with the same frames and anchors share one pass for all their
 objects, and every frame's image features are computed once and kept (LRU) for the other runs.
 
-Writes "matte": one channel per object (the result's "objects" says which), 0-1 soft edge from the logits.
+Writes "matte": one channel per object (the result's "objects" says which), 0-1 soft edge from the logits, and
+"logit": the same as the model's logits (+-16 where it's sure), which Welder scales up to the plate and cuts at 0
+there, so the edge is sharp at any plate size (the model's own masks are 256 x 256, so a 4.6K plate's soft
+matte has ~18 px steps). Before both, the parts of an object the model wasn't sure of anywhere (no logit of at
+least `min_confidence`, default 2) are dropped: SAM's leaks into the background are faint, never sure.
 """
 
 import os
@@ -64,28 +68,32 @@ def load_predictor(ctx, size):
     for mod in ("torch", "torchvision", "hydra", "PIL"):
         if importlib.util.find_spec(mod) is None:
             raise RuntimeError(f"the ML worker's Python has no '{mod}': run Set up ML again (it adds what TrackMask needs)")
-    import torch
     _vendor_path()
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
-    key = (size, dev)
+    from ..device import current
+    d = current()  # NVIDIA (CUDA), AMD (ROCm / DirectML), Intel (XPU), or the CPU
+    key = (size, d.kind, d.index)
     if key in _LOADED:
-        return _LOADED[key], dev
+        return _LOADED[key], d.torch_device
     from sam2.build_sam import build_sam2_video_predictor
     cfg, ckpt = CONFIGS[size]
     path = ctx.model_file(model_id(size), ckpt)
-    pred = build_sam2_video_predictor(cfg, path, device=dev)
+    ctx.log(f"SAM 2.1 {size} on {d.describe()}")
+    pred = build_sam2_video_predictor(cfg, path, device=d.torch_device)
     _LOADED.clear()  # one at a time: they're big
     _LOADED[key] = pred
-    return pred, dev
+    return pred, d.torch_device
 
 
 def write_jpegs(frames_linear, folder, max_size):
-    """The frames as 00000.jpg ... (sRGB), the long side at most max_size. Returns (w, h, scale)."""
+    """The frames as 00000.jpg ... (sRGB), the long side at most max_size. Returns (w, h, scale).
+    frames_linear can be any iterable (a generator reading one frame at a time keeps memory flat)."""
     from PIL import Image
-    H, W = frames_linear[0].shape[:2]
-    s = min(1.0, float(max_size) / max(H, W)) if max_size and max_size > 0 else 1.0
-    w, h = max(16, int(round(W * s))), max(16, int(round(H * s)))
+    W = H = w = h = None
     for i, im in enumerate(frames_linear):
+        if W is None:
+            H, W = im.shape[:2]
+            s = min(1.0, float(max_size) / max(H, W)) if max_size and max_size > 0 else 1.0
+            w, h = max(16, int(round(W * s))), max(16, int(round(H * s)))
         u8 = (np.clip(srgb_encode(np.asarray(im, np.float32)[..., :3]), 0, 1) * 255 + 0.5).astype(np.uint8)
         img = Image.fromarray(u8)
         if (w, h) != (W, H):
@@ -211,6 +219,40 @@ def to_matte(logits):
     return 1.0 / (1.0 + np.exp(-np.clip(a, -30, 30)))
 
 
+LOGIT_RANGE = 16.0
+
+
+def matte_logits(m):
+    """A matte from to_matte back to the model's logits (+-LOGIT_RANGE where it's sure)."""
+    m = np.clip(np.asarray(m, np.float32), 1e-7, 1 - 1e-7)
+    return np.clip(np.log(m) - np.log1p(-m), -LOGIT_RANGE, LOGIT_RANGE).astype(np.float32)
+
+
+def clean_logits(L, sure=2.0, min_area=0.0002):
+    """Drop the parts of an object (8-connected logit > 0) with no pixel of at least `sure` in them (the model
+    was never sure of them: a leak into the background), and specks smaller than min_area of the frame. They
+    become surely-not-the-object. Returns (logits, how many parts were dropped)."""
+    L = np.asarray(L, np.float32)
+    if sure <= 0 and min_area <= 0:
+        return L, 0
+    try:
+        from scipy import ndimage
+    except Exception:  # noqa: BLE001 (setup puts scipy in; without it the matte is left as it is)
+        return L, 0
+    lab, n = ndimage.label(L > 0, structure=np.ones((3, 3), bool))
+    if n == 0:
+        return L, 0
+    idx = np.arange(1, n + 1)
+    peak = np.asarray(ndimage.maximum(L, lab, idx), np.float32)
+    area = np.asarray(ndimage.sum(np.ones_like(L), lab, idx), np.float64)
+    drop = (peak < sure) | (area < min_area * L.size)
+    if not drop.any():
+        return L, 0
+    out = L.copy()
+    out[np.concatenate([[False], drop])[lab]] = -LOGIT_RANGE
+    return out, int(drop.sum())
+
+
 # ---------------------------------------------------------------- feature cache
 class FeatureCache:
     """Every frame's image features, kept (least recently used out first, up to cap_bytes) so the passes that
@@ -305,7 +347,8 @@ def infer_masks(pred, dev, folder, prompts, n, needed=None, preview=False, repor
     try:
         import torch
         ctx_inf = torch.inference_mode()
-        ctx_amp = torch.autocast("cuda", dtype=torch.bfloat16) if dev == "cuda" else _Null()
+        from ..device import autocast
+        ctx_amp = autocast(dev)  # bfloat16 on CUDA / ROCm / XPU; full precision on DirectML and the CPU
     except ImportError:  # (the tests' stand-in model)
         ctx_inf = ctx_amp = _Null()
     if needed is None:
@@ -314,7 +357,9 @@ def infer_masks(pred, dev, folder, prompts, n, needed=None, preview=False, repor
     total = sum(len(r[5]) and (abs(r[1] - r[0]) + 1) for r in runs) or 1
     mattes = {o: {} for o in prompts}
     with ctx_inf, ctx_amp:
-        state = pred.init_state(folder, offload_video_to_cpu=n > 60, offload_state_to_cpu=n > 300)
+        # long shots: frames read from their JPEGs when needed, not all held as 1024 x 1024 float tensors
+        lazy = {"async_loading_frames": "lazy"} if n > 60 else {}
+        state = pred.init_state(folder, offload_video_to_cpu=n > 60, offload_state_to_cpu=n > 300, **lazy)
         cache = FeatureCache(pred, state, cache_mb * 1024 * 1024)
         done = 0
         try:
@@ -519,24 +564,34 @@ def auto_cache_mb():
 
 def track_with_fallback(pred, dev, folder, prompts, n, need, preview, report, cache_mb, log):
     """infer_masks, and when the GPU runs out of memory: again with a small feature cache, then on the CPU (slow,
-    but the job finishes). Returns (mattes, predictor, device, cache_mb) as finally used."""
+    but the job finishes). A GPU backend that can't run SAM (an operator DirectML or XPU lacks, a driver error)
+    goes straight to the CPU. Returns (mattes, predictor, device, cache_mb) as finally used."""
+    from ..device import is_backend_failure
     from ..util import free_gpu, is_oom
-    for attempt in range(3):
+    attempt = 0
+    while True:
         try:
             return infer_masks(pred, dev, folder, prompts, n, need, preview, report, cache_mb, log), pred, dev, cache_mb
         except Exception as e:  # noqa: BLE001
-            if not is_oom(e) or attempt == 2:
+            oom = is_oom(e)
+            if not oom and is_backend_failure(e, dev):
+                log(f"the GPU backend couldn't run SAM ({str(e).strip().splitlines()[0][:200]}): tracking on the CPU (slower)")
+            elif not oom or attempt == 2:
                 raise
-            free_gpu()
-            if attempt == 0 and cache_mb > 128:
+            elif attempt == 0 and cache_mb > 128:
+                attempt = 1
+                free_gpu()
                 cache_mb = 128
                 log(f"GPU out of memory: tracking again with a {cache_mb} MB feature cache")
+                continue
             else:
                 log("GPU out of memory again: tracking on the CPU (slower)")
-                if hasattr(pred, "to"):
-                    pred = pred.to("cpu")
-                dev = "cpu"
-                _LOADED.clear()  # (the next job loads it on the GPU again)
+            attempt = 2
+            free_gpu()
+            if hasattr(pred, "to"):
+                pred = pred.to("cpu")
+            dev = "cpu"
+            _LOADED.clear()  # (the next job loads it on the GPU again)
 
 
 def run(ctx, p):
@@ -558,7 +613,11 @@ def run(ctx, p):
     ctx.progress(0.01, f"reading {len(frames)} frame(s)", force=True)
     cache_mb = int(p.get("embed_cache_mb", 0)) or auto_cache_mb()
     with tempfile.TemporaryDirectory(dir=ctx.jobdir) as td:
-        w, h, (sx, sy) = write_jpegs([src.rgb(f) for f in frames], td, int(p.get("max_size", 1280)))
+        # one frame at a time: a list of every frame would hold the whole shot in memory (a 4.6K plate is 222 MB
+        # a frame as float32, so 1600 frames won't fit)
+        w, h, _ = write_jpegs((src.rgb(f) for f in frames), td, int(p.get("max_size", 1280)))
+        # the clicks are in the plate's pixels; the frames may have been written smaller than the plate
+        sx, sy = w / max(1, src.plate_width), h / max(1, src.plate_height)
         prompts, texts = {}, {}
         for o in objects:
             oid = int(o.get("id", 1))
@@ -598,15 +657,29 @@ def run(ctx, p):
                            ctx.log, cache_mb=cache_mb)
             refound = {str(o): [frames[i] for i in v] for o, v in added.items()}
         ids = sorted(prompts)
-        written = 0
+        written = dropped = 0
+        sure = float(p.get("min_confidence", 2.0))
         for i, f in enumerate(frames):
             if i not in needed_idx:
                 continue
             if preview and not any(i in mattes[o] for o in ids):
                 continue
-            stack = np.stack([mattes[o].get(i, np.zeros((h, w), np.float32)) for o in ids], axis=-1)
-            ctx.write_frame("matte", f, stack, channels=[str(o) for o in ids], dtype=np.float16)
+            logits = []
+            for o in ids:
+                m = mattes[o].get(i)
+                if m is None:
+                    logits.append(np.full((h, w), -LOGIT_RANGE, np.float32))
+                    continue
+                L, k = clean_logits(matte_logits(m), sure)
+                dropped += k
+                logits.append(L)
+            lst = np.stack(logits, axis=-1)
+            chans = [str(o) for o in ids]
+            ctx.write_frame("matte", f, 1.0 / (1.0 + np.exp(-lst)), channels=chans, dtype=np.float16)
+            ctx.write_frame("logit", f, lst, channels=chans, dtype=np.float16)
             written += 1
+        if dropped:
+            ctx.log(f"dropped {dropped} unsure part(s) of objects (leaks into the background)")
     which = "preview" if preview else f"{written} frames"
     tags = p.get("object_tags") or {}
     out_tags = {}

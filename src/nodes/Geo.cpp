@@ -16,6 +16,7 @@
 #include "MLNodes.h"
 #include "Splat.h"
 #include "NodeUtils.h"
+#include "DeepNodes.h"
 #include "PointMesh.h"
 #include "MeshEdit.h"
 
@@ -150,7 +151,7 @@ bool isTransformable(const Node* n) {
 bool is3D(const Node* n) {
     return n && (isGeoFlow(n) || n->type == "Axis" || n->type == "Camera" || n->type == "ScanlineRender" ||
                  n->type == "Project3D" || n->type == "ReadSplat" || n->type == "SplatRender" ||
-                 n->type == "GaussianSplat" || n->type == "Reconstruct" || n->type == "NeRF");
+                 n->type == "GaussianSplat" || n->type == "Reconstruct" || n->type == "NeRF" || n->type == "DeepToPoints");
 }
 
 // ================================================================= primitives
@@ -698,7 +699,7 @@ SceneData viewerScene(Comp& comp, Node* n, double f, Engine* e) {
         for (Node* in : x->inputs) stack.push_back(in);
     }
     bool any = false;
-    for (Node* x : reach) any = any || is3D(x) || x->type == "CameraTracker" || x->type == "Card3D" || x->type == "Scene3D";
+    for (Node* x : reach) any = any || is3D(x) || x->type == "CameraTracker" || x->type == "VanishingCamera" || x->type == "Card3D" || x->type == "Scene3D";
     if (!any) {
         reach.clear();
         for (auto& x : comp.nodes) reach.push_back(x.get());
@@ -726,7 +727,7 @@ SceneData viewerScene(Comp& comp, Node* n, double f, Engine* e) {
             auto g = geometryOf(x, f, e);
             s.objects.insert(s.objects.end(), g.begin(), g.end());
         }
-        if (x->type == "Camera" && !x->disabled()) {
+        if ((x->type == "Camera" || x->type == "VanishingCamera") && !x->disabled()) {
             if (auto c = cam3d::cameraAt(x, f)) s.cameras.push_back({x, *c});
         }
         if (x->type == "Axis" && !x->disabled()) s.axes.push_back({x, worldMatrix(x, f)});
@@ -778,6 +779,8 @@ SceneData viewerScene(Comp& comp, Node* n, double f, Engine* e) {
                 p.dense = true;
                 s.points.push_back(std::move(p));
             }
+        if (x->type == "DeepToPoints")
+            if (auto dp = deepPointsOf(x, f, e)) s.points.push_back(*dp);
         if (auto* ss = dynamic_cast<splat::SplatSource*>(x)) {
             std::string err;
             if (auto sp = ss->splats(f, &err)) {

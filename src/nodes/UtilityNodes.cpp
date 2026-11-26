@@ -306,6 +306,7 @@ void registerMarkupNode();
 void registerBlenderNodes();
 void registerCreativeNodes();
 void registerCGNodes();
+void registerDeepNodes();
 void registerGroupNodes();
 void registerCryptomatteNode();
 namespace geo {
@@ -313,6 +314,9 @@ void register3DNodes();
 }
 namespace scene3d {
 void registerScene3DNode();
+}
+namespace vanish {
+void registerNode();
 }
 
 void registerBuiltinNodes() {
@@ -342,6 +346,7 @@ void registerBuiltinNodes() {
     registerRetimeNodes();
     geo::register3DNodes();
     scene3d::registerScene3DNode();
+    vanish::registerNode();
     registerScanlineRender();
     registerCameraTrackerNodes();
     registerSplatNodes();
@@ -367,6 +372,7 @@ void registerBuiltinNodes() {
     registerBlenderNodes();
     registerCreativeNodes();
     registerCGNodes();
+    registerDeepNodes();
     registerGroupNodes();
     registerCryptomatteNode();
 }

@@ -1956,7 +1956,7 @@ void knobBody(Ctx& c, const KnobDef& k) {
                                app->edit([name, key, path](Comp& comp) {
                                    if (Node* n = comp.find(name)) {
                                        // Picking one frame of a sequence reads the whole sequence.
-                                       n->params.data[key] = n->type == "Read" ? sequencePatternFor(path) : path;
+                                       n->params.data[key] = n->type == "Read" || n->type == "DeepRead" ? sequencePatternFor(path) : path;
                                        updateReadRange(n);
                                        n->paramsChanged();
                                    }
@@ -2029,16 +2029,15 @@ bool condOk(const Node* n, const std::string& cond) {
     return false;
 }
 
-// A knob's "when" condition: shown only while another knob has one of the listed values.
-bool whenOk(const Node* n, const NodeDef& def, const KnobDef& k) {
-    if (k.when.empty()) return true;
-    if (k.when.rfind("@", 0) == 0) return condOk(n, k.when);
-    size_t eq = k.when.find('=');
+// One "key=v1|v2" of a knob's "when": does the knob `key` hold one of the values?
+static bool whenOne(const Node* n, const NodeDef& def, const std::string& when) {
+    if (when.rfind("@", 0) == 0) return condOk(n, when);
+    size_t eq = when.find('=');
     if (eq == std::string::npos) return true;
-    std::string key = k.when.substr(0, eq), vals = k.when.substr(eq + 1);
+    std::string key = when.substr(0, eq), vals = when.substr(eq + 1);
     std::string defv;
     for (auto& o : def.knobs)
-        if (o.name == key && o.def.is_string()) defv = o.def.get<std::string>();
+        if (o.name == key) defv = o.def.is_string() ? o.def.get<std::string>() : o.def.is_boolean() ? (o.def.get<bool>() ? "true" : "false") : "";
     std::string cur = getString(n, key, defv);
     size_t p = 0;
     while (p <= vals.size()) {
@@ -2048,6 +2047,23 @@ bool whenOk(const Node* n, const NodeDef& def, const KnobDef& k) {
         p = q + 1;
     }
     return false;
+}
+
+// A knob's "when" condition: shown only while another knob has one of the listed values
+// ("a=x|y & b=z": all of them).
+bool whenOk(const Node* n, const NodeDef& def, const KnobDef& k) {
+    if (k.when.empty()) return true;
+    size_t p = 0;
+    while (p <= k.when.size()) {
+        size_t q = k.when.find('&', p);
+        if (q == std::string::npos) q = k.when.size();
+        std::string part = k.when.substr(p, q - p);
+        while (!part.empty() && part.front() == ' ') part.erase(0, 1);
+        while (!part.empty() && part.back() == ' ') part.pop_back();
+        if (!part.empty() && !whenOne(n, def, part)) return false;
+        p = q + 1;
+    }
+    return true;
 }
 
 // OFlow / RIFE: the input range (automatic unless set), the resulting output
@@ -2659,6 +2675,25 @@ void infoKnob(Ctx& c, const KnobDef& k) {
         return;
     }
     if (k.info == "tracker_xform") {  // Tracker: the transform it applies on this frame (read-only, like the classic knobs)
+        const json& tp = c.node->params.data;
+        if (track::isPinMode(tp.value("transform", std::string("none")))) {  // the corner pin: what it solved from
+            const json& tr = tp.contains("tracks") ? tp["tracks"] : json::array();
+            const auto pins = track::pinTracks(tr);
+            track::Fit fit = track::pinSolve(tr, track::referenceFrame(tp, c.app.frame), c.app.frame);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("corner pin");
+            ImGui::SameLine(kit::labelWidth());
+            if (pins.size() < 4)
+                ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.3f, 1), "needs 4 tracks with T on (has %d)", (int)pins.size());
+            else if (!fit.ok)
+                ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.35f, 1), "no solve on this frame (no tracks here)");
+            else if (fit.model < 4)
+                ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.3f, 1), "%s from %d of %d tracks (the others are lost here: Fill gaps)",
+                                   track::modelName(fit.model), fit.used, (int)pins.size());
+            else
+                ImGui::Text("perspective from %d of %d tracks, %.3f px rms", fit.used, (int)pins.size(), fit.rms);
+            return;
+        }
         track::Solve sh;
         track::trackerTransform(c.node->params.data, c.app.frame, &sh);
         auto ro = [&](const char* label, const char* fmt, std::initializer_list<double> vals) {
@@ -2962,6 +2997,7 @@ void infoKnob(Ctx& c, const KnobDef& k) {
         else if (!st.empty()) ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.5f, 1), "%s", st.c_str());
         return;
     }
+    if (vanishCamInfo(c.app, c.node, k.info)) return;  // VanishingCamera: the solve and the lines
     if (k.info == "flowpaint") {  // FlowField: the painted strokes and how to paint
         const json* st = findParam(c.node, "strokes");
         const int ns = st && st->is_array() ? (int)st->size() : 0;
@@ -3080,6 +3116,8 @@ void infoKnob(Ctx& c, const KnobDef& k) {
         }
         double ps = comp.project.proxyScale;
         text = "root proxy scale " + std::to_string(ps).substr(0, 4) + "  " + formatText((int)std::ceil(w * ps), (int)std::ceil(h * ps));
+    } else if (in.is_object() && in.contains(k.info) && in[k.info].is_string()) {  // a node's own line of text (DeepToPoints)
+        text = in[k.info].get<std::string>();
     }
     ImGui::TextDisabled("%s", text.c_str());
 }
@@ -3331,6 +3369,7 @@ void buttonAction(Ctx& c, const std::string& action) {
         });
         return;
     }
+    if (vanishCamButton(c.app, c.node, action)) return;  // VanishingCamera: starter lines, clear, export
     if (action == "flow_paint_clear") {  // FlowField: remove every painted stroke
         std::string name = c.node->name;
         c.app.checkpoint();
@@ -3478,6 +3517,8 @@ void nodeTab(Ctx& c) {
     knob(c, a);
     knob(c, b);
     gDef = saved;
+    ImGui::Separator();
+    editPythonButtons(c.app, n);  // (ScriptEditor.cpp)
 }
 
 static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
@@ -3581,6 +3622,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
     if (n->type == "Read") shown.insert({"format", "frame_offset"});                           // shown as Format / Frame
     if (n->type == "WarpStabilize") shown.insert({"motion", "motion_id"});    // the analysis (data, not knobs)
     if (n->type == "FlowField") shown.insert("strokes");
+    if (n->type == "VanishingCamera") shown.insert({"lines", "image_size"});  // drawn in the viewer
     if (n->type == "EditMesh") shown.insert({"mesh", "mesh_id"});  // the mesh itself (data, edited with the buttons / viewer)
     if (n->type == "TrackMask") shown.insert({"prompts", "scene", "tracks", "preview_frame", "retrack_all", "refines"});  // the objects and clicks (viewer and panel)
     if (n->type == "Precomp") shown.insert({"use_cache", "version"});  // set by Precomp / Clear
@@ -3805,6 +3847,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
         KnobDef k{key, key, Knob::Json, val, 0, 1, {}, ""};
         knob(c, k);
     }
+    drawPythonButtons(app, n);  // (ScriptEditor.cpp)
     ImGui::EndTabItem();
     }  // main tab
     if (tabBar) {

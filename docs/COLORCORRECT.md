@@ -50,6 +50,11 @@ use Welder's smooth monotone interpolation; the importer reports that approximat
 Export samples the range curves and reports that sampling. Exact Welder-to-Welder
 clipboard copies retain the original data.
 
+With the 0.2.6 update, ordinary RGB corrections also use upstream's CPU/GPU
+router. Its shader uses the same local luminance coefficients, range blending,
+and signed gamma behavior. Custom curves, luminance mixing, diagnostic output,
+alpha/layer selections, and unpremultiplication use the complete CPU path.
+
 Open `examples/colorcorrect.weld` for a connected example. The focused rendering
 checks are registered as the CTest `colorcorrect` test; importer regressions are
 in `tests/test_nk2strata.py`.

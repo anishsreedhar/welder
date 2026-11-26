@@ -1,5 +1,7 @@
 #include "ScriptApi.h"
+#include "Deep.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -18,6 +20,8 @@
 #include "Process.h"
 #include "Schema.h"
 #include "../io/ImageIO.h"
+#include "../nodes/Track.h"
+#include "stb_image_write.h"
 
 #ifdef _WIN32
 #include <stdlib.h>  // _putenv_s
@@ -80,6 +84,7 @@ void ScriptHost::newComp(int width, int height) {
 ScriptApi::Kind ScriptApi::kind(const std::string& m) {
     if (m.rfind("render.", 0) == 0) return Kind::Render;
     if (m == "comp.open" || m == "comp.new") return Kind::Replace;
+    if (m.rfind("events.", 0) == 0) return Kind::Wait;
     static const std::set<std::string> reads = {"app.info", "comp.info", "comp.nodes", "comp.types", "node.info",
                                                 "knob.list", "knob.get", "knob.keys"};
     return reads.count(m) ? Kind::Read : Kind::Edit;
@@ -177,6 +182,58 @@ void writeNpy(const std::string& path, const Image& img, const Box& box) {
     if (!f) fail("OSError", "cannot write " + path);
 }
 
+std::string base64(const unsigned char* d, size_t n) {
+    static const char t[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((n + 2) / 3 * 4);
+    for (size_t i = 0; i < n; i += 3) {
+        const unsigned v = (unsigned)d[i] << 16 | (i + 1 < n ? (unsigned)d[i + 1] << 8 : 0u) | (i + 2 < n ? (unsigned)d[i + 2] : 0u);
+        out.push_back(t[(v >> 18) & 63]);
+        out.push_back(t[(v >> 12) & 63]);
+        out.push_back(i + 1 < n ? t[(v >> 6) & 63] : '=');
+        out.push_back(i + 2 < n ? t[v & 63] : '=');
+    }
+    return out;
+}
+
+// A preview PNG (8-bit sRGB, RGB): `img` over `box`, box-filtered down to tw x th.
+std::vector<unsigned char> previewPng(const Image& img, const Box& box, int tw, int th) {
+    const int r = img.ch("R") >= 0 ? img.ch("R") : (img.nch() ? 0 : -1);
+    const int g = img.ch("G") >= 0 ? img.ch("G") : r, b = img.ch("B") >= 0 ? img.ch("B") : r;
+    const int bw = box.width(), bh = box.height();
+    std::vector<unsigned char> rgb((size_t)tw * th * 3);
+    for (int ty = 0; ty < th; ++ty) {
+        // (PNG rows go top first; Welder's y counts up from the bottom)
+        const int ya = box.y2 - (int)((long long)(ty + 1) * bh / th), yb = std::max(ya + 1, box.y2 - (int)((long long)ty * bh / th));
+        for (int tx = 0; tx < tw; ++tx) {
+            const int xa = box.x1 + (int)((long long)tx * bw / tw), xb = std::max(xa + 1, box.x1 + (int)((long long)(tx + 1) * bw / tw));
+            double acc[3] = {0, 0, 0};
+            int cnt = 0;
+            for (int y = ya; y < yb; ++y)
+                for (int x = xa; x < xb; ++x) {
+                    ++cnt;
+                    if (r < 0 || !img.bounds.contains(x, y)) continue;
+                    acc[0] += img.at(x, y, r);
+                    acc[1] += img.at(x, y, g);
+                    acc[2] += img.at(x, y, b);
+                }
+            for (int k = 0; k < 3; ++k) {
+                const float v = cnt ? (float)(acc[k] / cnt) : 0.0f;
+                const float e = linearToSrgb(std::clamp(v, 0.0f, 1.0f));
+                rgb[((size_t)ty * tw + tx) * 3 + k] = (unsigned char)std::lround(std::clamp(e, 0.0f, 1.0f) * 255.0f);
+            }
+        }
+    }
+    std::vector<unsigned char> png;
+    stbi_write_png_to_func(
+        [](void* ctx, void* data, int size) {
+            auto* v = (std::vector<unsigned char>*)ctx;
+            v->insert(v->end(), (unsigned char*)data, (unsigned char*)data + size);
+        },
+        &png, tw, th, 3, rgb.data(), tw * 3);
+    return png;
+}
+
 }  // namespace
 
 // ------------------------------------------------------------ the commands
@@ -213,6 +270,7 @@ json ScriptApi::nodeInfo(Node* n) {
             {"outputs", outs},
             {"position", {n->ui.value("x", 0.0), n->ui.value("y", 0.0)}},
             {"disabled", n->disabled()},
+            {"buttons", n->ui.contains("python_buttons") && n->ui["python_buttons"].is_array() ? n->ui["python_buttons"] : json::array()},
             {"category", ui::categoryOf(n->type)}};
 }
 
@@ -359,6 +417,47 @@ json ScriptApi::call(const std::string& method, const json& p) {
         return to;
     }
     if (method == "node.info") return nodeInfo(node(p));
+    if (method == "tracker.fill_gaps" || method == "tracker.clear_filled") {  // a Tracker's lost frames (track::fillGaps)
+        Node* n = node(p);
+        if (n->type != "Tracker") fail("TypeError", n->name + " is a " + n->type + ", not a Tracker");
+        json& tracks = n->params.data["tracks"];
+        if (!tracks.is_array()) tracks = json::array();
+        std::vector<int> which;
+        if (p.contains("tracks") && p["tracks"].is_array()) {  // names or 0-based indices
+            for (auto& w : p["tracks"]) {
+                int found = -1;
+                if (w.is_number_integer()) found = w.get<int>();
+                else if (w.is_string())
+                    for (int i = 0; i < (int)tracks.size(); ++i)
+                        if (tracks[i].value("name", "") == w.get<std::string>()) found = i;
+                if (found < 0 || found >= (int)tracks.size()) fail("ValueError", n->name + " has no track " + w.dump());
+                which.push_back(found);
+            }
+        } else {
+            for (int i = 0; i < (int)tracks.size(); ++i) which.push_back(i);
+        }
+        if (method == "tracker.clear_filled") {
+            const int cnt = track::clearFilled(tracks, which);
+            n->paramsChanged();
+            host_.changed(n);
+            return {{"removed", cnt}};
+        }
+        track::FillOptions o;
+        o.method = p.value("method", std::string("auto"));
+        if (o.method != "auto" && o.method != "from other tracks" && o.method != "smooth" && o.method != "linear")
+            fail("ValueError", "method is one of: auto, from other tracks, smooth, linear");
+        o.inside = p.value("inside", true);
+        o.before = p.value("before", false);
+        o.after = p.value("after", true);
+        o.first = num(p, "first", comp().firstFrame);
+        o.last = num(p, "last", comp().lastFrame);
+        o.redoAbove = num(p, "redo_above", 0);
+        o.maxGap = (int)num(p, "max_gap", 0);
+        const track::FillReport r = track::fillGaps(tracks, which, o);
+        n->paramsChanged();
+        host_.changed(n);
+        return {{"filled", r.frames}, {"from_tracks", r.fromTracks}, {"interpolated", r.interpolated}, {"skipped", r.skipped}};
+    }
     if (method == "node.set_input") {
         Node* n = node(p);
         Comp& c = comp();
@@ -381,6 +480,41 @@ json ScriptApi::call(const std::string& method, const json& p) {
         Node* n = node(p);
         n->ui["x"] = num(p, "x", 0);
         n->ui["y"] = num(p, "y", 0);
+        host_.changed(nullptr);
+        return nullptr;
+    }
+
+    // Python buttons: shown on the node's panel, each runs its code with welder.this_node() = it
+    if (method == "node.add_button") {
+        Node* n = node(p);
+        const std::string label = str(p, "label"), code = str(p, "code");
+        if (label.empty()) fail("ValueError", "a button needs a label");
+        json& b = n->ui["python_buttons"];
+        if (!b.is_array()) b = json::array();
+        bool replaced = false;
+        for (auto& e : b)
+            if (e.is_object() && e.value("label", "") == label) {
+                e["code"] = code;
+                replaced = true;
+            }
+        if (!replaced) b.push_back({{"label", label}, {"code", code}});
+        host_.changed(nullptr);
+        return nullptr;
+    }
+    if (method == "node.remove_button") {
+        Node* n = node(p);
+        const std::string label = str(p, "label");
+        json& b = n->ui["python_buttons"];
+        bool found = false;
+        if (b.is_array())
+            for (size_t i = 0; i < b.size(); ++i)
+                if (b[i].is_object() && b[i].value("label", "") == label) {
+                    b.erase(i);
+                    found = true;
+                    break;
+                }
+        if (b.is_array() && b.empty()) n->ui.erase("python_buttons");
+        if (!found) fail("KeyError", n->name + " has no button " + label);
         host_.changed(nullptr);
         return nullptr;
     }
@@ -531,6 +665,22 @@ json ScriptApi::call(const std::string& method, const json& p) {
         for (int c = 0; c < img->nch(); ++c) vals.push_back(img->at(x, y, c));
         return {{"channels", img->channels}, {"values", vals}};
     }
+    if (method == "render.deep_samples") {  // one pixel's deep samples (a flat node: one sample)
+        Node* n = node(p);
+        Engine& e = host_.engine();
+        const double f = num(p, "frame", comp().firstFrame);
+        const int x = (int)std::floor(num(p, "x", 0)), y = (int)std::floor(num(p, "y", 0));
+        e.resetCancel();
+        DeepPtr d = e.requestDeep(n, f, Box(x, y, x + 1, y + 1));
+        json samples = json::array();
+        const int nc = d->nch();
+        for (int k = 0; k < d->count(x, y); ++k) {
+            json v = json::array();
+            for (int c = 0; c < nc; ++c) v.push_back(d->sample(x, y)[k * nc + c]);
+            samples.push_back(v);
+        }
+        return {{"channels", d->channels}, {"samples", samples}, {"deep", n->isDeep()}};
+    }
     if (method == "render.image") {
         Node* n = node(p);
         Engine& e = host_.engine();
@@ -555,6 +705,38 @@ json ScriptApi::call(const std::string& method, const json& p) {
         }
         return {{"path", path}, {"width", box.width()}, {"height", box.height()}, {"channels", img->channels},
                 {"box", {box.x1, box.y1, box.x2, box.y2}}};
+    }
+    if (method == "render.png") {  // a small preview, for an AI client to look at (core/Mcp.h)
+        Node* n = node(p);
+        Engine& e = host_.engine();
+        const double f = num(p, "frame", comp().firstFrame);
+        const int maxSize = std::clamp((int)num(p, "max_size", 512), 16, 4096);
+        Format fmt = n->format(e, f);
+        Box box = fmt.box();
+        if (p.contains("box") && p["box"].is_array() && p["box"].size() == 4)
+            box = Box(p["box"][0].get<int>(), p["box"][1].get<int>(), p["box"][2].get<int>(), p["box"][3].get<int>());
+        if (box.width() <= 0 || box.height() <= 0) fail("ValueError", "empty region");
+        const double s = std::min(1.0, (double)maxSize / std::max(box.width(), box.height()));
+        const int tw = std::max(1, (int)std::lround(box.width() * s)), th = std::max(1, (int)std::lround(box.height() * s));
+        // a proxy render (Engine::setScale) unless full_res: much quicker for a big plate
+        const bool proxy = s < 1.0 && !p.value("full_res", false);
+        struct ScaleGuard {
+            Engine& e;
+            double was;
+            ~ScaleGuard() { e.setScale(was); }
+        } guard{e, e.scale()};
+        Box rbox = box;
+        if (proxy) {
+            e.setScale(s);
+            rbox = Box((int)std::floor(box.x1 * s), (int)std::floor(box.y1 * s), (int)std::ceil(box.x2 * s), (int)std::ceil(box.y2 * s));
+            if (rbox.width() <= 0 || rbox.height() <= 0) rbox = Box(rbox.x1, rbox.y1, rbox.x1 + 1, rbox.y1 + 1);
+        }
+        ImagePtr img = renderNode(e, n, f, rbox);
+        std::vector<unsigned char> png = previewPng(*img, rbox, tw, th);
+        if (png.empty()) fail("RuntimeError", "cannot encode the preview");
+        return {{"png_base64", base64(png.data(), png.size())}, {"width", tw}, {"height", th},
+                {"format", {fmt.width, fmt.height}}, {"box", {box.x1, box.y1, box.x2, box.y2}},
+                {"channels", img->channels}, {"proxy", proxy}};
     }
     if (method == "render.write") {
         Comp& c = comp();
@@ -614,7 +796,7 @@ json ScriptApi::call(const std::string& method, const json& p) {
         }
         return out;
     }
-    if (method.rfind("editor.", 0) == 0) return host_.editorCall(method, p);
+    if (method.rfind("editor.", 0) == 0 || method.rfind("events.", 0) == 0) return host_.editorCall(method, p);
     fail("AttributeError", "unknown command " + method);
 }
 
