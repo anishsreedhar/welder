@@ -2525,6 +2525,10 @@ class Translator:
                     params["white_clamp"] = flag("white_clamp")
                 if flag("reverse"):
                     params["reverse"] = True
+                num("mix_luminance", dest="mix_luminance")
+                for knob, default in (("enable_mix_luminance", True), ("inject", False)):
+                    if knob in k:
+                        params[knob] = flag(knob, default)
             elif klass == "ColorCorrect":
                 for rng in ("", "shadows.", "midtones.", "highlights."):
                     for knob in ("saturation", "contrast", "gamma", "gain", "offset"):

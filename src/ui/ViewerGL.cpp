@@ -91,7 +91,7 @@ void* keepParams(const DisplayParams& d) {
 struct Program {
     GLuint prog = 0;
     bool failed = false;
-    GLint uProj = -1, uTex = -1, uGain = -1, uGamma = -1, uChannel = -1, uMatte = -1, uRaw = -1;
+    GLint uProj = -1, uTex = -1, uGain = -1, uGamma = -1, uSaturation = -1, uTransfer = -1, uChannel = -1, uMatte = -1, uRaw = -1;
     std::vector<std::pair<GLuint, GLenum>> luts;  // texture, target (units 1..n)
     std::vector<GLint> lutSamplers;
 };
@@ -122,6 +122,8 @@ in float Frag_A;
 uniform sampler2D Texture;
 uniform float Gain;
 uniform float Gamma;
+uniform float Saturation;
+uniform int Transfer;
 uniform int Channel;
 uniform int Matte;
 uniform int Raw;
@@ -139,6 +141,7 @@ const char* kFSMain = R"(
 void main() {
     vec4 c = texture(Texture, Frag_UV);
     vec3 rgb = c.rgb;
+    rgb = mix(vec3(dot(rgb, vec3(0.2126, 0.7152, 0.0722))), rgb, Saturation);
     if (Channel == 1) rgb = vec3(c.r);
     else if (Channel == 2) rgb = vec3(c.g);
     else if (Channel == 3) rgb = vec3(c.b);
@@ -148,6 +151,13 @@ void main() {
     if (Gamma != 1.0) rgb = pow(max(rgb, vec3(0.0)), vec3(1.0 / Gamma));
     // a matte is data: 1 is white, not what the view transform makes of scene white (ACES: ~0.8 grey)
     vec3 outc = (Channel == 4 || Raw != 0) ? clamp(rgb, 0.0, 1.0) : clamp(OCIODisplay(vec4(rgb, 1.0)).rgb, 0.0, 1.0);
+    if (Channel != 4 && Raw == 0 && Transfer != 0) {
+        vec3 t = max(rgb, vec3(0.0));
+        if (Transfer == 1) outc = t;
+        else if (Transfer == 2) outc = mix(t * 4.5, 1.099 * pow(t, vec3(0.45)) - 0.099, step(vec3(0.018), t));
+        else outc = pow(t, vec3(1.0 / 2.4));
+        outc = clamp(outc, 0.0, 1.0);
+    }
     if (Matte != 0) outc = mix(outc, vec3(1.0, 0.25, 0.25), clamp(c.a, 0.0, 1.0) * 0.5);  // M: alpha as a red overlay
     Out_Color = vec4(outc, Frag_A);
 }
@@ -231,6 +241,8 @@ Program* program(const std::shared_ptr<const color::GpuShader>& ocio) {
     P.uTex = pGetUniformLocation(p, "Texture");
     P.uGain = pGetUniformLocation(p, "Gain");
     P.uGamma = pGetUniformLocation(p, "Gamma");
+    P.uSaturation = pGetUniformLocation(p, "Saturation");
+    P.uTransfer = pGetUniformLocation(p, "Transfer");
     P.uChannel = pGetUniformLocation(p, "Channel");
     P.uMatte = pGetUniformLocation(p, "Matte");
     P.uRaw = pGetUniformLocation(p, "Raw");
@@ -264,6 +276,8 @@ void bindDisplayProgram(const ImDrawList*, const ImDrawCmd* cmd) {
     pUniform1i(P->uTex, 0);
     pUniform1f(P->uGain, g_params.gain);
     pUniform1f(P->uGamma, g_params.gamma);
+    pUniform1f(P->uSaturation, g_params.saturation);
+    pUniform1i(P->uTransfer, g_params.transfer);
     pUniform1i(P->uChannel, g_params.channel);
     pUniform1i(P->uMatte, g_params.matte);
     pUniform1i(P->uRaw, g_params.raw);

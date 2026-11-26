@@ -431,6 +431,7 @@ int main(int argc, char** argv) {
         theme().small = io.Fonts->AddFontFromFileTTF(font.c_str(), 11.5f * scale, &cfg);
     }
     theme().uiScale = scale;
+    loadNodeLabelFonts();
     applyTheme(app.themeName);
 
     ImGui_ImplGlfw_InitForOpenGL(win, true);
@@ -1157,6 +1158,21 @@ int main(int argc, char** argv) {
                     for (int pi = 0; pi < (int)rn->params.data["shapes"][si].value("points", json::array()).size(); ++pi) ui.roto.sel.insert({si, pi});
         // STRATA_TEST_MAXIMIZE=<panel>: that panel maximized (Space); STRATA_TEST_NO_OVERLAYS: Q pressed over the viewer
         if (const char* tm = std::getenv("STRATA_TEST_MAXIMIZE"); tm && *tm && !opt.screenshot.empty() && frameCount == 5) ui.maximized = tm;
+        // Screenshot regression fixtures exercise the display shader and render request controls.
+        if (const char* tv = std::getenv("STRATA_TEST_VIEWER"); tv && !opt.screenshot.empty() && frameCount == 5) {
+            const auto j = json::parse(tv, nullptr, false);
+            if (j.is_object()) {
+                auto& v = ui.viewer;
+                v.fstop = j.value("stops", 0.f); v.gamma = j.value("gamma", 1.f);
+                v.saturation = j.value("saturation", 1.f); v.displayTransfer = j.value("transfer", 0);
+                v.channel = j.value("channel", 0); v.safeZone = j.value("safe", false);
+                v.cropToFormat = j.value("crop", false); v.fullBuffer = j.value("full", false);
+                v.proxy = j.value("proxy", false); v.resolution = j.value("resolution", 1);
+                v.alphaChannel = j.value("alpha", std::string("A")); v.dirtyTexture = true;
+                if (j.contains("roi")) { auto r=j["roi"]; v.roi=true; v.roiBox=Box(r[0],r[1],r[2],r[3]); }
+                v.reqScale=0;
+            }
+        }
         if (std::getenv("STRATA_TEST_NO_OVERLAYS") && !opt.screenshot.empty() && frameCount == 5) ui.viewer.overlays = false;
         // STRATA_TEST_COLLAPSE=<backdrop>: minimise it (as its corner button does)
         if (const char* tb = std::getenv("STRATA_TEST_COLLAPSE"); tb && *tb && !opt.screenshot.empty() && frameCount == 12)
@@ -2077,6 +2093,10 @@ int main(int argc, char** argv) {
                 }
             } else if (frameCount > 8 && (settled > 4 || forceShot) && !pipeTest && !playTest && !altTest && !vclickTest && !deepHoverTest && !vdragTest && !sc3Test && !stabTest && !flowTest && !markupTest && !vanishTest && !matchTest && !dragTest && !camTest && !swapTest && !exposeTest && !shakeTest && !alignTest && !altDragTest && !messTest && !panelDragTest && !actionsTest && !keysTest && !menuTest && !tmTest && !reTest && !pcTest && !trackTest) {
                 if (std::getenv("STRATA_TEST_OPEN")) std::fprintf(stderr, "OPENTEST viewed '%s'\n", app.viewed.c_str());
+                if (std::getenv("STRATA_TEST_VIEWER")) {
+                    const auto& v=ui.viewer;
+                    std::printf("VIEWERTEST scale=%g region=%d,%d,%d,%d\n",v.reqScale,v.reqRegion.x1,v.reqRegion.y1,v.reqRegion.x2,v.reqRegion.y2);
+                }
                 bool ok = savePng(opt.screenshot, fbw, fbh);
                 std::printf("%s %s (%dx%d)\n", ok ? "wrote" : "failed to write", opt.screenshot.c_str(), fbw, fbh);
                 break;

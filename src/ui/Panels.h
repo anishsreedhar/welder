@@ -45,6 +45,9 @@ struct ThemeColors {
     ImFont* small = nullptr;    // uppercase section headers, captions
 };
 ThemeColors& theme();
+void loadNodeLabelFonts();
+const std::vector<std::string>& nodeLabelFamilies();
+ImFont* nodeLabelFont(const Node* node);
 // the theme's accent at an alpha (0-255)
 inline unsigned int themeAccent(int alpha = 255) { return (theme().accent & 0x00FFFFFFu) | ((unsigned int)alpha << 24); }
 const std::vector<std::string>& themeNames();
@@ -73,6 +76,15 @@ struct ViewerState {
     int channel = 0;      // 0 RGBA, 1 R, 2 G, 3 B, 4 A, 5 luminance
     float fstop = 0.0f;
     float gamma = 1.0f;
+    float saturation = 1.0f;
+    std::string alphaChannel = "A";
+    int displayTransfer = 0;  // 0 sRGB/OCIO, 1 linear, 2 Rec.709, 3 Rec.1886
+    bool inputProcess = true;
+    bool safeZone = false, cropToFormat = false, fullBuffer = false;
+    bool proxy = false;
+    int resolution = 1;
+    bool roi = false;
+    Box roiBox;
     bool hovered = false;
     bool matte = false;      // M
     bool overlays = true;    // Q: shapes, handles, trackers, format / bbox lines

@@ -422,7 +422,7 @@ ImagePtr Engine::tile(Node* n, double frame, uint64_t h, int tx, int ty, const B
         t_upCost = savedUp;
         t_hitCost = 0;
         ImagePtr result = img;
-        cache_.put(key, result, cost);
+        cache_.put(key, result, n->ui.value("cached",false) ? std::max(cost,1.0)*16 : cost);
         promise.set_value(result);
         std::lock_guard<std::mutex> l(inflightM_);
         inflight_.erase(key);

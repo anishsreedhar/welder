@@ -701,6 +701,9 @@ struct Writer {
                 if (has("black_clamp")) raw("black_clamp", p.value("black_clamp", true) ? "true" : "false");
                 if (has("white_clamp")) raw("white_clamp", p.value("white_clamp", false) ? "true" : "false");
                 if (p.value("reverse", false)) raw("reverse", "true");
+                copy("mix_luminance");
+                for(const char* k:{"inject","enable_mix_luminance"})
+                    if(has(k))raw(k,p.value(k,false)?"true":"false");
             } else if (type == "ColorCorrect") {
                 for (std::string rng : {"", "shadows.", "midtones.", "highlights."})
                     for (const char* k : {"saturation", "contrast", "gamma", "gain", "offset"}) copy((rng + k).c_str());

@@ -191,12 +191,13 @@ std::shared_ptr<const App::Texture3D> App::thumbnail(const std::string& name) {
     }
     Node* n = node(name);
     if (!n) return nullptr;
+    const double thumbFrame=n->ui.value("postage_stamp_static",false)?n->ui.value("postage_stamp_frame",1.0):(double)frame;
     uint64_t h = 0;
     try {
         Engine& e = uiEngine();
         e.clearMemo();
         e.setScale(1.0);
-        h = e.hash(n, frame);
+        h = e.hash(n, thumbFrame);
     } catch (...) {
         return nullptr;
     }
@@ -205,8 +206,8 @@ std::shared_ptr<const App::Texture3D> App::thumbnail(const std::string& name) {
     bool fresh = it != texCache_.end() && it->second->hash == h;
     if (!fresh) {
         auto w = texWant_.find(key);
-        if (w == texWant_.end() || w->second != std::make_pair((double)frame, h)) {
-            texWant_[key] = {frame, h};
+        if (w == texWant_.end() || w->second != std::make_pair(thumbFrame, h)) {
+            texWant_[key] = {thumbFrame, h};
             texCv_.notify_one();
         }
     }
@@ -822,6 +823,10 @@ void App::ensureViewer(Comp& c, const std::string& view) {
 }
 
 void App::viewPipe(int pipe, const std::string& node, bool asB) {
+    if (Node* v = viewerNode(); v && v->params.flag("lock_inputs", false) && !node.empty()) {
+        message("Viewer inputs are pinned; unpin the Viewer to route another node.");
+        return;
+    }
     const int idx = pipeIndex(pipe);
     viewEdit([this, idx, pipe, node, asB](Comp& c) {
         Node* v = c.find(activeViewer);

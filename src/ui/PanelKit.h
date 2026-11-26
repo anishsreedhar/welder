@@ -13,6 +13,8 @@ namespace strata::ui::kit {
 
 // The knob label column (scales with the font).
 float labelWidth();
+float setLabelWidth(float width);  // scoped compact panels; returns the previous override
+bool setReferenceFields(bool enabled);
 // A row's label, then the cursor on the field column.
 void rowLabel(const char* text, const char* tip = nullptr);
 // The field column on a new row with no label.
@@ -31,6 +33,7 @@ bool tickSlider(const char* id, double* v, double lo, double hi, float width, bo
 // ColorCorrect: signed scale centered on its neutral value, numbered ticks,
 // and a thin vertical rectangular handle.
 bool colorCorrectSlider(const char* id, double* v, double neutral, double extent, float width);
+bool gradeSlider(const char* id, double* v, double neutral, bool gamma, float width);
 // A checkbox; its label turns the accent colour when on.
 bool checkbox(const char* label, bool* v, const char* tip = nullptr);
 // A menu with the field's colour.

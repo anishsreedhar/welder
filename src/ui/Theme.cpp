@@ -5,6 +5,8 @@
 //   midnight  cool blue-black, teal accent
 //   neutral   true mid grey, quiet blue accent (colour-critical work)
 #include <cstdlib>
+#include <array>
+#include <filesystem>
 
 #include "Panels.h"
 #include "imgui_internal.h"
@@ -14,6 +16,35 @@ namespace strata::ui {
 ThemeColors& theme() {
     static ThemeColors t;
     return t;
+}
+
+static std::map<std::string, std::array<ImFont*,4>> gLabelFonts;
+static std::vector<std::string> gLabelFamilies = {"Roboto"};
+void loadNodeLabelFonts() {
+    gLabelFonts.clear(); gLabelFamilies={"Roboto"};
+#ifdef _WIN32
+    const char* root=std::getenv("WINDIR");
+    const std::filesystem::path dir=std::filesystem::path(root?root:"C:/Windows")/"Fonts";
+    const std::vector<std::pair<std::string,std::array<const char*,4>>> families={
+        {"Verdana",{"verdana.ttf","verdanab.ttf","verdanai.ttf","verdanaz.ttf"}},
+        {"Arial",{"arial.ttf","arialbd.ttf","ariali.ttf","arialbi.ttf"}},
+        {"Consolas",{"consola.ttf","consolab.ttf","consolai.ttf","consolaz.ttf"}}};
+    for(const auto& [name,files]:families) {
+        bool all=true;for(auto file:files)all=all&&std::filesystem::exists(dir/file);
+        if(!all)continue;
+        std::array<ImFont*,4> fonts{};
+        for(int i=0;i<4;++i)fonts[i]=ImGui::GetIO().Fonts->AddFontFromFileTTF((dir/files[i]).string().c_str(),14);
+        gLabelFonts[name]=fonts;gLabelFamilies.push_back(name);
+    }
+    if(gLabelFamilies.size()>1)gLabelFamilies.erase(gLabelFamilies.begin());
+#endif
+}
+const std::vector<std::string>& nodeLabelFamilies(){return gLabelFamilies;}
+ImFont* nodeLabelFont(const Node* n) {
+    const std::string family=n->ui.value("note_font",std::string("Verdana"));
+    auto it=gLabelFonts.find(family);
+    if(it!=gLabelFonts.end())return it->second[(n->ui.value("note_bold",false)?1:0)+(n->ui.value("note_italic",false)?2:0)];
+    return n->ui.value("note_bold",false)?theme().medium:theme().regular;
 }
 
 const std::vector<std::string>& themeNames() {

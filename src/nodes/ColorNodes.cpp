@@ -165,7 +165,25 @@ protected:
 //                B = offset + lift - A*blackpoint
 //                out = pow(A*in + B, 1/gamma)   (gamma only applied to positive values)
 class GradeNode : public PixelOp {
+public:
+    ChannelSet channels(Engine& e,double frame) override {
+        auto ch=Node::channels(e,frame);
+        if(params.flag("inject",false) && input(1) && channelIndex(ch,"mask.a")<0)ch.push_back("mask.a");
+        return ch;
+    }
+    void render(RenderArgs& a,Image& out) override {
+        PixelOp::render(a,out);
+        if(params.flag("inject",false) && input(1)) {
+            auto mask=a.fetch(input(1),a.region);
+            const int mc=mask->ch(resolveChannelName(params.str("mask_channel","A"))),oc=out.ch("mask.a");
+            if(oc>=0)for(int y=out.bounds.y1;y<out.bounds.y2;++y)for(int x=out.bounds.x1;x<out.bounds.x2;++x)out.px(x,y)[oc]=mask->at(x,y,mc);
+        }
+    }
+private:
+    bool coupledChannels() const override {return params.has("mix_luminance") && params.flag("enable_mix_luminance",true);}
+
     bool gpuOp(RenderArgs& a, const Image&, GpuOp& g) override {
+        if(params.flag("enable_mix_luminance",true) && params.num("mix_luminance",a.frame,0)!=0)return false;
         double f = a.frame;
         auto bp = params.vec<4>("blackpoint", f, {0, 0, 0, 0});
         auto wp = params.vec<4>("whitepoint", f, {1, 1, 1, 1});
@@ -196,6 +214,29 @@ class GradeNode : public PixelOp {
         return true;
     }
     void apply(RenderArgs& a, Image& out, const std::vector<int>& idx, const std::vector<int>& comps) override {
+        const double mix=params.flag("enable_mix_luminance",true)?std::clamp(params.num("mix_luminance",a.frame,0),0.0,1.0):0;
+        if(mix==0){applyGrade(a,out,idx,comps);return;}
+        const Image original=out;
+        applyGrade(a,out,idx,comps);
+        std::map<std::string,std::array<bool,3>> groups;
+        for(size_t k=0;k<idx.size();++k)if(comps[k]<3){
+            const std::string& ch=out.channels[idx[k]];const auto dot=ch.rfind('.');
+            const std::string prefix=dot==std::string::npos?"":ch.substr(0,dot+1);
+            if(ch==prefix+std::string(1,"RGB"[comps[k]]))groups[prefix][comps[k]]=true;
+        }
+        auto encode=[](double v){return v<=.0031308?12.92*v:1.055*std::pow(v,1/2.4)-.055;};
+        auto decode=[](double v){return v<=.04045?v/12.92:std::pow((v+.055)/1.055,2.4);};
+        for(auto& [prefix,selected]:groups) {
+            const int channels[]={out.ch(prefix+"R"),out.ch(prefix+"G"),out.ch(prefix+"B")};
+            for(int y=out.bounds.y1;y<out.bounds.y2;++y)for(int x=out.bounds.x1;x<out.bounds.x2;++x){
+                double e[3]={};for(int c=0;c<3;++c)if(channels[c]>=0)e[c]=encode(original.at(x,y,channels[c]));
+                auto luminance=[&](){return .2126*e[0]+.7152*e[1]+.0722*e[2];};
+                const double before=luminance();
+                for(int c=0;c<3;++c)if(selected[c] && channels[c]>=0){e[c]=encode(out.at(x,y,channels[c]));out.px(x,y)[channels[c]]=(float)decode(e[c]+mix*(before-luminance()));}
+            }
+        }
+    }
+    void applyGrade(RenderArgs& a, Image& out, const std::vector<int>& idx, const std::vector<int>& comps) {
         double f = a.frame;
         auto bp = params.vec<4>("blackpoint", f, {0, 0, 0, 0});
         auto wp = params.vec<4>("whitepoint", f, {1, 1, 1, 1});

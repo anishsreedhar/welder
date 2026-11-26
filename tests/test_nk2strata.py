@@ -342,6 +342,12 @@ class Knobs(unittest.TestCase):
         self.assertEqual(p["gain"], [1.0, 2.0, 3.0, 1.0])
         self.assertEqual(p["offset"], 0.5)
 
+    def test_grade_luminance_and_injection(self):
+        _, _, nodes = convert("Constant { inputs 0 name C }\nGrade { name G mix_luminance 0.65 enable_mix_luminance false inject true }\n")
+        self.assertAlmostEqual(nodes["G"]["params"]["mix_luminance"], .65)
+        self.assertFalse(nodes["G"]["params"]["enable_mix_luminance"])
+        self.assertTrue(nodes["G"]["params"]["inject"])
+
     def test_transform_animation(self):
         _, _, n = convert("Constant { inputs 0 name C }\n"
                           "Transform { translate {{curve x1 0 x10 100} 5} rotate 30 scale 2 name T }\n")

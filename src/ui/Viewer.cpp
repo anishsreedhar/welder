@@ -22,7 +22,6 @@ namespace strata::ui {
 
 namespace {
 
-const char* kChannelNames[] = {"RGBA", "R", "G", "B", "A", "Luminance"};
 
 // Layers present in a channel list: "rgba" first, then "<layer>" for "<layer>.<ch>".
 std::vector<std::string> layersOf(const ChannelSet& cs) {
@@ -41,8 +40,8 @@ std::vector<std::string> layersOf(const ChannelSet& cs) {
 // (depth.Z) shows as grey.
 std::array<int, 4> layerChannels(const Image& img, const std::string& layer) {
     std::array<int, 4> m = {-1, -1, -1, -1};
-    if (layer == "rgba" || layer.empty()) {
-        m = {img.ch("R"), img.ch("G"), img.ch("B"), img.ch("A")};
+    if (layer == "rgba" || layer == "rgb" || layer.empty()) {
+        m = {img.ch("R"), img.ch("G"), img.ch("B"), layer == "rgb" ? -1 : img.ch("A")};
         return m;
     }
     std::vector<int> found;
@@ -80,6 +79,7 @@ void viewerUpload(ViewerState& v) {
     if (!img || img->bounds.empty()) return;
     const int W = img->bounds.width(), H = img->bounds.height(), n = img->nch();
     std::array<int, 4> m = layerChannels(*img, v.layer);
+    if (v.alphaChannel != "A") m[3] = img->ch(v.alphaChannel);
     const bool direct = n == 4 && m[0] == 0 && m[1] == 1 && m[2] == 2 && m[3] == 3;
     v.texBounds = img->bounds;
     v.texScale = v.res.scale;
@@ -125,6 +125,7 @@ void viewerUpload(ViewerState& v) {
     const bool haveB = v.compare != "off" && ib && ib->bounds == img->bounds;
     if (haveB) {
         std::array<int, 4> mb = layerChannels(*ib, v.layer);
+        if (v.alphaChannel != "A") mb[3] = ib->ch(v.alphaChannel);
         bb.resize(buf.size());
         const int nb = ib->nch();
         const float* sb = ib->data.data();
@@ -157,6 +158,8 @@ void viewerUpload(ViewerState& v) {
                         for (int k = 0; k < 4; ++k) a[k] = q[k] + a[k] * t;
                     } else if (c == "minus") {
                         for (int k = 0; k < 3; ++k) a[k] -= q[k];
+                    } else if (c == "onion skin") {
+                        for (int k = 0; k < 4; ++k) a[k] = (a[k] + q[k]) * .5f;
                     } else if (c == "difference") {
                         for (int k = 0; k < 3; ++k) a[k] = std::fabs(a[k] - q[k]);
                         a[3] = 1;
@@ -351,8 +354,8 @@ static void pipeCombos(App& app, Node* vn, int aPipe, int bPipe, ViewerState& v)
     }
     const std::string vname = vn->name;
     auto list = [&](const char* id, int cur, bool isB) {
-        std::string label = (isB ? "B: " : "A: ") + (cur < 0 ? std::string("none") : pipeLabel(vn, cur));
-        ImGui::SetNextItemWidth(isB ? 100 : 130);
+        std::string label = (isB ? "B  " : "A  ") + (cur < 0 ? std::string("-") : vn->input(App::pipeIndex(cur)) ? vn->input(App::pipeIndex(cur))->name : std::string("-"));
+        ImGui::SetNextItemWidth(110);
         if (ImGui::BeginCombo(id, label.c_str(), ImGuiComboFlags_HeightLarge)) {
             if (isB && ImGui::Selectable("none", cur < 0)) app.setViewerParam(vname, "b_pipe", -1);
             for (int k = 1; k <= 10; ++k) {
@@ -375,15 +378,12 @@ static void pipeCombos(App& app, Node* vn, int aPipe, int bPipe, ViewerState& v)
     list("##apipe", aPipe, false);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("A: the pipe shown (number keys)");
     ImGui::SameLine(0, 4);
-    list("##bpipe", v.compare == "off" ? -1 : bPipe, true);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("B: the pipe to compare against (Shift+number)");
-    ImGui::SameLine(0, 4);
-    static const char* modes[] = {"off", "wipe", "over", "under", "minus", "difference", "side by side", "above / below"};
+    static const char* modes[] = {"off", "wipe", "over", "under", "minus", "onion skin", "difference", "side by side", "above / below"};
     const std::string cur = vn->params.str("compare", "off");
     ImGui::SetNextItemWidth(84);
-    if (ImGui::BeginCombo("##cmpmode", cur.c_str())) {
+    if (ImGui::BeginCombo("##cmpmode", cur == "off" ? "-" : cur == "above / below" ? "stack" : cur.c_str())) {
         for (const char* m : modes)
-            if (ImGui::Selectable(m, cur == m)) {
+            if (ImGui::Selectable(std::string(m) == "off" ? "-" : std::string(m) == "above / below" ? "stack" : m, cur == m)) {
                 app.setViewerParam(vname, "compare", m);
                 if (std::string(m) != "off" && bPipe < 0)  // no B yet: the next connected pipe
                     for (int step = 1; step < 10; ++step) {
@@ -393,26 +393,25 @@ static void pipeCombos(App& app, Node* vn, int aPipe, int bPipe, ViewerState& v)
                 v.fitPending = std::string(m) == "side by side" || std::string(m) == "above / below" || v.compare == "side by side" ||
                                v.compare == "above / below";
             }
+        ImGui::Separator();
+        if (bPipe >= 0 && ImGui::Selectable("Swap A / B")) {
+            app.setViewerParam(vname, "a_pipe", bPipe);
+            app.setViewerParam(vname, "b_pipe", aPipe);
+        }
+        if (cur == "wipe") {
+            float mix = (float)vn->params.num("wipe_mix", 0, 1);
+            if (ImGui::SliderFloat("wipe mix", &mix, 0, 1)) app.setViewerParam(vname, "wipe_mix", mix);
+        }
         ImGui::EndCombo();
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("How A and B are compared (W: wipe on / off)\nwipe: drag the line's centre to move it, its handle to turn it\n"
                           "over / under: A over B, B over A\nminus: A - B   difference: |A - B| (black: the same)\n"
                           "side by side / above / below: next to each other");
-    if (cur == "wipe") {
-        ImGui::SameLine(0, 4);
-        float mix = (float)vn->params.num("wipe_mix", 0, 1);
-        ImGui::SetNextItemWidth(60);
-        if (ImGui::SliderFloat("##wmix", &mix, 0, 1, "mix %.2f")) app.setViewerParam(vname, "wipe_mix", mix);
-    }
-    if (cur != "off" && bPipe >= 0) {
-        ImGui::SameLine(0, 4);
-        if (ImGui::SmallButton("A<>B")) {  // swap the buffers
-            app.setViewerParam(vname, "b_pipe", aPipe);
-            app.setViewerParam(vname, "a_pipe", bPipe);
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Swap A and B");
-    }
+    ImGui::SameLine(0, 2);
+    list("##bpipe", bPipe, true);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("B: comparison input (Shift+number)");
+
 }
 
 // The wipe: a line through its centre (drag it), a handle to turn it, A on one side, B the other.
@@ -450,6 +449,175 @@ static void wipeHandles(App& app, Node* vn, ViewerState& v, ImDrawList* dl, cons
     dl->AddText(ImVec2(c.x - n.x * 24 - sa.x * (n.x > 0 ? 1.0f : 0.0f) + d.x * 40, c.y - n.y * 24 + d.y * 40 - 8), themeAccent(230), la.c_str());
     dl->AddText(ImVec2(c.x + n.x * 24 - ImGui::CalcTextSize(lb.c_str()).x * (n.x < 0 ? 1.0f : 0.0f) + d.x * 40, c.y + n.y * 24 + d.y * 40 - 8),
                 IM_COL32(90, 170, 255, 230), lb.c_str());
+}
+
+// Small line icons and two tightly packed rows, matching the reference Viewer strip.
+static bool viewerToolIcon(const char* id, int shape, bool on, const char* tip) {
+    ImGui::PushID(id);
+    const bool clicked = ImGui::InvisibleButton("##icon", ImVec2(20, 20));
+    const ImVec2 p = ImGui::GetItemRectMin();
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    const ImU32 c = on ? IM_COL32(245, 183, 77, 255) : IM_COL32(158, 158, 158, 255);
+    if (ImGui::IsItemHovered()) d->AddRectFilled(p, ImVec2(p.x + 20, p.y + 20), IM_COL32(78, 78, 78, 255));
+    auto pt = [&](float x, float y) { return ImVec2(p.x + x, p.y + y); };
+    auto line = [&](float x, float y, float X, float Y) { d->AddLine(pt(x,y), pt(X,Y), c, 1.4f); };
+    if (shape == 0) { d->AddRect(pt(3,5), pt(17,15),c); d->AddRect(pt(5,7),pt(15,13),c); }
+    else if (shape == 1) { d->AddRect(pt(5,6),pt(16,15),c); line(3,3,3,13); line(3,3,14,3); }
+    else if (shape == 2) { for (int i=0;i<3;++i) line(4+i*4,15,8+i*4,5); }
+    else if (shape == 3) { d->AddRect(pt(3,8),pt(13,16),c); d->AddRect(pt(7,4),pt(17,12),c); }
+    else if (shape == 4) { for(int i=0;i<4;++i) line(3,5+i*3,17,5+i*3); }
+    else if (shape == 5) { d->AddCircle(pt(10,10),6,c,16,1.5f); line(9,3,12,6); line(12,6,14,2); line(10,6,8,14); }
+    else if (shape == 6) { d->AddRect(pt(5,5),pt(15,15),c); line(10,2,10,6); line(10,14,10,18); line(2,10,6,10); line(14,10,18,10); }
+    else if (shape == 7) { d->AddRectFilled(pt(5,4),pt(8,16),c); d->AddRectFilled(pt(12,4),pt(15,16),c); }
+    else if (shape == 8) { line(5,6,10,11); line(10,11,15,6); line(5,11,10,16); line(10,16,15,11); }
+    else if(shape==9) { line(6,3,16,8); line(8,5,6,11); line(14,8,11,13); line(6,11,11,13); line(9,12,4,18); }
+    else { for(int i=3;i<17;i+=4){line(i,4,i+2,4);line(i,16,i+2,16);line(3,i,3,i+2);line(17,i,17,i+2);} }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tip);
+    ImGui::PopID();
+    return clicked;
+}
+
+// Labeled ruler with a narrow rectangular handle. Numeric entry and double-click reset
+// use the same value as dragging the scale; all adjustments stay in the display shader.
+static void viewerRuler(const char* label, float& value, float width, int kind) {
+    ImGui::PushID(label);
+    const float startX = ImGui::GetCursorScreenPos().x;
+    auto stepArrow = [&](bool up) {
+        if (ImGui::InvisibleButton(up ? "##up" : "##down", ImVec2(10,20))) value=std::clamp(value*(up?2.f:.5f),1.f/64,64.f);
+        ImVec2 p=ImGui::GetItemRectMin();
+        ImDrawList* d=ImGui::GetWindowDrawList();
+        d->AddTriangleFilled(ImVec2(p.x+(up?8:2),p.y+10),ImVec2(p.x+(up?2:8),p.y+5),ImVec2(p.x+(up?2:8),p.y+15),IM_COL32(170,170,170,255));
+        if(ImGui::IsItemHovered())ImGui::SetTooltip(up?"Increase exposure by one stop":"Decrease exposure by one stop");
+        ImGui::SameLine(0,2);
+    };
+    if(kind==0)stepArrow(false);
+    ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(label);
+    if(kind==0){ImGui::SameLine(0,2);stepArrow(true);}
+    ImGui::SameLine(0,3); ImGui::SetNextItemWidth(44);
+    ImGui::InputFloat("##value", &value, 0, 0, "%.3g");
+    value = std::clamp(value, kind == 0 ? 1.f/64 : kind == 1 ? .01f : -4.f, kind == 0 ? 64.f : 8.f);
+    ImGui::SameLine(0,3);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float w = std::max(80.f,width - (p.x-startX) - 8);
+    ImGui::InvisibleButton("##scale",ImVec2(w,24));
+    const std::vector<float> values = kind == 0 ? std::vector<float>{1.f/64,.1f,1,10,64} :
+        kind == 1 ? std::vector<float>{.2f,.3f,.5f,.7f,1,2,3,4,5} : std::vector<float>{0,.1f,.4f,.7f,1,2,3,4};
+    const std::vector<float> positions = kind == 0 ? std::vector<float>{0,.22f,.5f,.82f,1} :
+        kind == 1 ? std::vector<float>{0,.1f,.2f,.3f,.5f,.67f,.79f,.9f,1} : std::vector<float>{0,.17f,.32f,.43f,.5f,.68f,.84f,1};
+    auto map = [](float x, const std::vector<float>& from, const std::vector<float>& to) {
+        x=std::clamp(x,from.front(),from.back());
+        size_t i=1; while(i+1<from.size() && x>from[i])++i;
+        return to[i-1]+(to[i]-to[i-1])*(x-from[i-1])/(from[i]-from[i-1]);
+    };
+    auto fromT = [&](float t) {return map(t,positions,values);};
+    auto toT = [&](float x) {return map(x,values,positions);};
+    if (ImGui::IsItemActive() && ImGui::IsMouseDown(0)) value = fromT(std::clamp((ImGui::GetIO().MousePos.x-p.x)/w,0.f,1.f));
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) value=1;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s: drag ruler or type a value; double-click resets to 1",kind==0?"Brightness (gain)":kind==1?"Gamma":"Saturation");
+    ImDrawList* d=ImGui::GetWindowDrawList();
+    d->AddLine(ImVec2(p.x,p.y+10),ImVec2(p.x+w,p.y+10),IM_COL32(12,12,12,255));
+    for(int i=0;i<=32;++i) {
+        const float x=p.x+w*i/32.f;
+        d->AddLine(ImVec2(x,p.y+(i%4?5:2)),ImVec2(x,p.y+10),IM_COL32(19,19,19,255));
+    }
+    for(float tick:values) {
+        char b[16]; std::snprintf(b,sizeof b,"%g",tick);
+        const float x=p.x+w*toT(tick);
+        const float tw=ImGui::CalcTextSize(b).x*.75f;
+        d->AddText(ImGui::GetFont(),9,ImVec2(std::clamp(x-tw*.5f,p.x,p.x+w-tw),p.y+12),IM_COL32(17,17,17,255),b);
+    }
+    const float x=p.x+w*std::clamp(toT(value),0.f,1.f);
+    d->AddRectFilled(ImVec2(x-2,p.y+3),ImVec2(x+2,p.y+14),IM_COL32(124,111,58,255));
+    d->AddRect(ImVec2(x-2,p.y+3),ImVec2(x+2,p.y+14),IM_COL32(12,12,12,255));
+    ImGui::PopID();
+}
+
+static void drawReferenceToolbar(App& app, UiState& ui, ViewerState& v, Node* vn, int aPipe, int bPipe, bool active) {
+    ImGui::PushFont(theme().regular,14);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(4,2));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(2,1));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,0);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(2,1));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,IM_COL32(49,49,49,255));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,IM_COL32(43,43,43,255));
+    ImGui::PushStyleColor(ImGuiCol_Button,IM_COL32(49,49,49,255));
+    ImGui::PushStyleColor(ImGuiCol_Border,IM_COL32(25,25,25,255));
+    const float width=std::max(1120.f,ImGui::GetContentRegionAvail().x-4);
+    ImGui::SetNextWindowContentSize(ImVec2(width,51));
+    ImGui::BeginChild("##viewerTop",ImVec2(0,ImGui::GetContentRegionAvail().x<1124?72:55),ImGuiChildFlags_None,ImGuiWindowFlags_HorizontalScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::SetNextItemWidth(64);
+    if(ImGui::BeginCombo("##layer",v.layer.c_str())) {
+        for(const char* layer:{"none","rgb","rgba"}) if(ImGui::Selectable(layer,v.layer==layer)) {v.layer=layer;v.dirtyTexture=true;}
+        ImGui::SeparatorText("other layers");
+        for(auto& layer:v.layers) if(layer!="rgba" && ImGui::Selectable(layer.c_str(),v.layer==layer)){v.layer=layer;v.dirtyTexture=true;}
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine(); ImGui::SetNextItemWidth(99);
+    const std::string alphaLabel=v.alphaChannel=="A"?"rgba.alpha":v.alphaChannel;
+    if(ImGui::BeginCombo("##alpha",alphaLabel.c_str())) {
+        for(auto c:std::vector<std::string>{"R","G","B","A"}) {
+            const std::string label=c=="R"?"rgba.red":c=="G"?"rgba.green":c=="B"?"rgba.blue":"rgba.alpha";
+            if(ImGui::Selectable(label.c_str(),v.alphaChannel==c)){v.alphaChannel=c;v.dirtyTexture=true;}
+        }
+        if(v.res.image) for(auto& c:v.res.image->channels) if(c.find('.')!=std::string::npos && ImGui::Selectable(c.c_str(),v.alphaChannel==c)){v.alphaChannel=c;v.dirtyTexture=true;}
+        ImGui::EndCombo();
+    }
+    if(ImGui::IsItemHovered()) ImGui::SetTooltip("Channel used for alpha display and matte overlay");
+    ImGui::SameLine(); ImGui::SetNextItemWidth(57);
+    const char* names[]={"RGB","R","G","B","A","Y"};
+    if(ImGui::BeginCombo("##channels",names[v.channel])){for(int i=0;i<6;++i)if(ImGui::Selectable(names[i],v.channel==i))v.channel=i;ImGui::EndCombo();}
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Text,v.inputProcess?IM_COL32(185,185,185,255):IM_COL32(90,90,90,255));
+    if(ImGui::Button("IP"))v.inputProcess=!v.inputProcess;
+    ImGui::PopStyleColor();
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("Enable / bypass the Viewer display process");
+    ImGui::SameLine(); ImGui::SetNextItemWidth(76);
+    const char* transfers[]={"sRGB","None","rec709","rec1886"};
+    if(ImGui::BeginCombo("##transfer",transfers[v.displayTransfer])) {
+        for(int i=0;i<4;++i)if(ImGui::Selectable(transfers[i],v.displayTransfer==i))v.displayTransfer=i;
+        if(color::haveOCIO()){ImGui::Separator();viewerProcessCombo(app);}
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine(std::max(365.f,(width-310)*.5f));
+    pipeCombos(app,vn,aPipe,bPipe,v);
+    ImGui::SameLine(width-349);
+    if(viewerToolIcon("safe",0,v.safeZone,"Safe zones: 90% action and 80% title"))v.safeZone=!v.safeZone; ImGui::SameLine();
+    if(viewerToolIcon("crop",1,v.cropToFormat,"Crop display to project format"))v.cropToFormat=!v.cropToFormat; ImGui::SameLine();
+    if(viewerToolIcon("proxy",2,v.proxy,"Proxy rendering: use the chosen 1:N resolution")){v.proxy=!v.proxy;if(v.proxy&&v.resolution==1)v.resolution=2;v.reqScale=0;} ImGui::SameLine();
+    if(viewerToolIcon("full",3,v.fullBuffer,"Full buffer: render and cache the complete frame")){v.fullBuffer=!v.fullBuffer;v.reqScale=0;} ImGui::SameLine();
+    if(viewerToolIcon("cache",4,app.precaching(),"Cache the playback range in the background"))app.setPrecache(!app.precaching()); ImGui::SameLine();
+    if(viewerToolIcon("refresh",5,app.rendering(),"Refresh Viewer: clear cached buffers and render again")){app.clearCaches();app.requestView(true);} ImGui::SameLine();
+    if(viewerToolIcon("roi",6,v.roi,"Region of interest: click to toggle; right-click to edit bounds")){v.roi=!v.roi;if(v.roiBox.empty()){const auto f=v.res.format;v.roiBox=Box(f.width/4,f.height/4,f.width*3/4,f.height*3/4);}v.reqScale=0;}
+    if(ImGui::BeginPopupContextItem("##roiBounds")){
+        int xy[2]={v.roiBox.x1,v.roiBox.y1}, wh[2]={v.roiBox.width(),v.roiBox.height()};
+        if(ImGui::InputInt2("origin",xy)|ImGui::InputInt2("size",wh)){v.roiBox=Box(xy[0],xy[1],xy[0]+std::max(1,wh[0]),xy[1]+std::max(1,wh[1]));v.reqScale=0;}
+        ImGui::EndPopup();
+    } ImGui::SameLine();
+    if(viewerToolIcon("pause",7,app.viewPaused,"Pause / resume Viewer updates"))app.viewPaused=!app.viewPaused; ImGui::SameLine();
+    float zoom=v.zoom*100; ImGui::SetNextItemWidth(58);
+    if(ImGui::DragFloat("##zoom",&zoom,.5f,2,6400,"%.1f%%")){v.zoom=zoom/100;v.fitPending=false;}
+    if(ImGui::IsItemHovered()&&ImGui::IsMouseDoubleClicked(0))v.fitPending=true;
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("Viewer zoom; double-click to fit (F)");
+    ImGui::SameLine();ImGui::SetNextItemWidth(65);
+    char r[12];std::snprintf(r,sizeof r,"1:%d",v.resolution);
+    if(ImGui::BeginCombo("##res",r)){for(int i:{1,2,4,8,16,32}){char b[12];std::snprintf(b,sizeof b,"1:%d",i);if(ImGui::Selectable(b,v.resolution==i)){v.resolution=i;v.proxy=i>1;v.fullRes=i==1;v.reqScale=0;}}ImGui::EndCombo();}
+    ImGui::SameLine();if(viewerToolIcon("settings",8,v.openSettings,"Viewer settings"))v.openSettings=true;
+    ImGui::SetCursorPos(ImVec2(2,26));
+    const float rulerWidth=(width-125)/3;
+    float gain=std::pow(2.f,v.fstop);viewerRuler("f/8",gain,rulerWidth,0);v.fstop=std::log2(gain);
+    ImGui::SameLine(rulerWidth+2);viewerRuler("\xCE\xB3",v.gamma,rulerWidth,1);
+    ImGui::SameLine(rulerWidth*2+2);viewerRuler("S",v.saturation,rulerWidth,2);
+    ImGui::SameLine(width-118);
+    if(viewerToolIcon("overlays",10,v.overlays,"Toggle Viewer overlays (Q)"))v.overlays=!v.overlays;
+    ImGui::SameLine();ImGui::SetNextItemWidth(54);
+    if(ImGui::BeginCombo("##dimension","2D")){if(ImGui::Selectable("2D",true)){}if(ImGui::Selectable("3D")&&active){ui.v3d.on=true;ui.v3d.force2D=false;}ImGui::EndCombo();}
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!vn);
+    if(viewerToolIcon("pin",9,vn && vn->params.flag("lock_inputs",false),"Pin Viewer inputs: prevent number keys from replacing connected nodes") && vn)
+        app.setViewerParam(vn->name,"lock_inputs",!vn->params.flag("lock_inputs",false));
+    ImGui::EndDisabled();
+    ImGui::EndChild();
+    ImGui::PopStyleColor(4);ImGui::PopStyleVar(4);ImGui::PopFont();
 }
 
 // One viewer panel: `vn` is its Viewer node (may be null: nothing to look through yet); `active`:
@@ -532,162 +700,7 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
         return;
     }
 
-    // ---- toolbar: grouped segments (what's viewed | channels | display | view), status on the right
-    ImGui::SetCursorPos(ImVec2(8, ImGui::GetCursorPosY() + 6));
-    ImDrawList* tdl = ImGui::GetWindowDrawList();
-    auto segBegin = [&] {
-        tdl->ChannelsSplit(2);
-        tdl->ChannelsSetCurrent(1);
-        ImGui::BeginGroup();
-    };
-    auto segEnd = [&] {
-        ImGui::EndGroup();
-        const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
-        tdl->ChannelsSetCurrent(0);
-        tdl->AddRectFilled(ImVec2(mn.x - 3, mn.y - 3), ImVec2(mx.x + 3, mx.y + 3), theme().card, 6);
-        tdl->ChannelsMerge();
-    };
-    const float gap = 12;
-    auto nextSeg = [&](float w) {  // on this row when it fits, otherwise the next
-        const float right = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
-        if (ImGui::GetItemRectMax().x + gap + w < right) ImGui::SameLine(0, gap);
-        else ImGui::SetCursorPos(ImVec2(8, ImGui::GetCursorPosY() + 6));
-    };
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImGui::ColorConvertU32ToFloat4(theme().segment));
-    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::ColorConvertU32ToFloat4(theme().segment));
-
-    segBegin();  // what's viewed
-    ImGui::AlignTextToFramePadding();
-    ImGui::PushFont(theme().medium, 0.0f);
-    if (active) ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(themeAccent()), " %s", vname.empty() ? "Viewer" : vname.c_str());
-    else ImGui::TextDisabled(" %s", vname.empty() ? "Viewer" : vname.c_str());
-    ImGui::PopFont();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip(active ? "The active viewer (number keys route here)" : "Click in this viewer to make it active");
-    ImGui::SameLine(0, 8);
-    pipeCombos(app, vn, aPipe, bPipe, v);
-    segEnd();
-
-    nextSeg(290);
-    segBegin();  // channels
-    ImGui::SetNextItemWidth(76);
-    if (ImGui::BeginCombo("##layer", v.layer.c_str())) {
-        for (auto& l : v.layers)
-            if (ImGui::Selectable(l.c_str(), l == v.layer)) {
-                v.layer = l;
-                v.dirtyTexture = true;
-            }
-        ImGui::EndCombo();
-    }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("layer");
-    {  // a segmented switch: RGB(A) R G B A Y
-        static const char* shortNames[] = {"RGB", "R", "G", "B", "A", "Y"};
-        static const ImU32 tints[] = {0, IM_COL32(255, 92, 92, 255), IM_COL32(110, 220, 110, 255), IM_COL32(100, 150, 255, 255),
-                                      IM_COL32(230, 230, 230, 255), IM_COL32(200, 200, 200, 255)};
-        ImGui::SameLine(0, 4);
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(1, 0));
-        for (int i = 0; i < 6; ++i) {
-            if (i) ImGui::SameLine();
-            const bool on = v.channel == i;
-            ImGui::PushID(i);
-            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::ColorConvertU32ToFloat4(on ? theme().segmentOn : theme().segment));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(on ? (i ? tints[i] : theme().value) : theme().muted));
-            const float bw = ImGui::CalcTextSize(shortNames[i]).x + 12;
-            if (ImGui::Button(shortNames[i], ImVec2(std::max(bw, 22.0f), 0))) {
-                v.channel = on && i ? 0 : i;  // clicking the shown channel again goes back to colour
-                v.dirtyTexture = true;
-            }
-            if (on) {
-                const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
-                tdl->AddLine(ImVec2(mn.x + 4, mx.y - 1), ImVec2(mx.x - 4, mx.y - 1), i ? tints[i] : themeAccent(), 2);
-            }
-            ImGui::PopStyleColor(2);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kChannelNames[i]);
-            ImGui::PopID();
-        }
-        ImGui::PopStyleVar();
-    }
-    segEnd();
-
-    nextSeg(340);
-    segBegin();  // display: exposure, gamma, the viewer transform
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled(" f/stop");
-    ImGui::SameLine(0, 4);
-    ImGui::SetNextItemWidth(52);
-    // Double-click resets (#76). ImGui turns a double-click on a drag field into text entry, so
-    // on that frame the field is drawn without it (Ctrl+click still types a value).
-    auto resettingDrag = [](const char* id, float* val, float speed, float lo, float hi, const char* fmt, float def) {
-        const ImVec2 p = ImGui::GetCursorScreenPos();
-        const ImVec2 q(p.x + ImGui::CalcItemWidth(), p.y + ImGui::GetFrameHeight());
-        const bool dbl = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && ImGui::IsMouseHoveringRect(p, q) &&
-                         ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
-        ImGui::DragFloat(id, val, speed, lo, hi, fmt, dbl ? ImGuiSliderFlags_NoInput : 0);
-        if (dbl) {
-            *val = def;
-            ImGui::ClearActiveID();
-        }
-    };
-    resettingDrag("##fstop", &v.fstop, 0.05f, -10.0f, 10.0f, v.fstop == 0 ? "0" : "%+.1f", 0.0f);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Exposure in stops (double-click: 0, Ctrl+click: type a value)");
-    ImGui::SameLine(0, 8);
-    ImGui::TextDisabled("gamma");
-    ImGui::SameLine(0, 4);
-    ImGui::SetNextItemWidth(52);
-    resettingDrag("##gamma", &v.gamma, 0.01f, 0.2f, 4.0f, "%.2f", 1.0f);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Gamma (double-click: 1, Ctrl+click: type a value)");
-    ImGui::SameLine(0, 6);
-    viewerProcessCombo(app);
-    segEnd();
-
-    nextSeg(170);
-    segBegin();  // the view
-    if (ImGui::Button("Fit")) v.fitPending = true;
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fit the image to the viewer (F)");
-    ImGui::SameLine(0, 2);
-    if (ImGui::Button("1:1")) v.zoom = 1.0f;
-    ImGui::SameLine(0, 2);
-    if (ImGui::Button("3D") && active) {
-        ui.v3d.on = true;
-        ui.v3d.force2D = false;
-    }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("3D view (Tab)");
-    ImGui::SameLine(0, 2);
-    {
-        const bool fr = v.fullRes;
-        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::ColorConvertU32ToFloat4(fr ? theme().segmentOn : theme().segment));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(fr ? themeAccent() : theme().muted));
-        if (ImGui::Button("full res")) v.fullRes = !v.fullRes;
-        ImGui::PopStyleColor(2);
-    }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Off: when zoomed out, render at a lower resolution that still fills the screen (faster).\n"
-                          "On: always render every pixel.");
-    segEnd();
-    ImGui::PopStyleColor(2);
-
-    nextSeg(120);
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("%d%%", (int)std::lround(v.zoom * 100));
-    if (v.res.image && v.res.scale < 1.0) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("proxy 1/%d", (int)std::lround(1.0 / v.res.scale));
-    }
-    if (app.comp->project.proxyMode) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1), "PROXY");
-    }
-    if (active && app.viewPaused) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "PAUSED (U to update)");
-    }
-    if (active && app.rendering()) {
-        ImGui::SameLine(0, 12);
-        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(themeAccent()), "rendering...");
-    } else if (v.res.image) {
-        ImGui::SameLine(0, 12);
-        ImGui::TextDisabled("%.0f ms", active ? app.lastRenderMs() : v.res.ms);
-    }
-    ImGui::Dummy(ImVec2(0, 2));
+    drawReferenceToolbar(app, ui, v, vn, aPipe, bPipe, active);
 
     // ---- a viewer tool's own row (the Tracker's toolbar)
     if (active && activeTracker(app)) {
@@ -767,7 +780,7 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
     // Tell the renderer what is on screen (full-res pixels) and at which scale.
     // The request is padded so small pans don't need a new render.
     {
-        double sc = pickScale(v.zoom, v.fullRes);
+        double sc = v.proxy ? 1.0 / v.resolution : pickScale(v.zoom, v.fullRes);
         if (app.comp->project.proxyMode) sc = std::min(sc, app.comp->project.proxyScale);
         ImVec2 a = toImage(p0), b = toImage(p1);
         Box visible((int)std::floor(std::min(a.x, b.x)), (int)std::floor(std::min(a.y, b.y)),
@@ -775,10 +788,12 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
         const ImVec2 off = sideOffset(v);  // side by side: what's on screen of B, in B's own pixels, too
         if (off.x != 0 || off.y != 0)
             visible = visible.unite(Box(visible.x1 - (int)off.x, visible.y1 - (int)off.y, visible.x2 - (int)off.x, visible.y2 - (int)off.y));
+        if (v.fullBuffer) visible = v.res.format.box();
+        if (v.roi && !v.roiBox.empty()) visible = v.roiBox;
         bool covered = sc == v.reqScale && !v.reqRegion.empty() && visible.intersect(v.reqRegion) == visible;
         if (!covered && !(active && app.viewPaused)) {
             int px = std::max(64, visible.width() / 3), py = std::max(64, visible.height() / 3);
-            v.reqRegion = visible.pad(px, py);
+            v.reqRegion = (v.fullBuffer || v.roi) ? visible : visible.pad(px, py);
             v.reqScale = sc;
             if (active) app.setViewWindow(v.reqRegion, sc);
         }
@@ -789,16 +804,20 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
     DisplayParams dp;
     dp.gain = std::pow(2.0f, v.fstop);
     dp.gamma = v.gamma;
+    dp.saturation = v.saturation;
+    dp.transfer = v.inputProcess ? v.displayTransfer : 1;
     dp.channel = v.channel;
     dp.matte = v.matte ? 1 : 0;
     if (vn)
         if (Node* x = vn->input(App::pipeIndex(aPipe)); x && x->outputIsData()) dp.raw = 1;
-    dp.ocio = viewerTransform(app);
+    dp.ocio = v.inputProcess && v.displayTransfer == 0 ? viewerTransform(app) : nullptr;
     if (res.image && v.tex && !v.texBounds.empty()) {
         // Texture pixels are at render scale; draw them in full-res image coordinates.
         const Box& b = v.texBounds;
         const double s = v.texScale;
+        if (v.cropToFormat) dl->PushClipRect(toScreen(0, res.format.height), toScreen(res.format.width, 0), true);
         viewerDrawImage(dl, v.tex, toScreen(b.x1 / s, b.y2 / s), toScreen(b.x2 / s, b.y1 / s), ImVec2(0, 1), ImVec2(1, 0), dp);
+        if (v.cropToFormat) dl->PopClipRect();
         if (v.hasB && v.texB) {  // side by side / above and below: B in its place, labelled
             const ImVec2 off = sideOffset(v);
             ImVec2 a0 = toScreen(b.x1 / s + off.x, b.y2 / s + off.y), a1 = toScreen(b.x2 / s + off.x, b.y1 / s + off.y);
@@ -814,6 +833,13 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
             const std::string t = "A " + v.compare + " B";
             dl->AddText(ImVec2(p0.x + 10, p0.y + 8), IM_COL32(255, 255, 255, 170), t.c_str());
         }
+        if (v.safeZone) {
+            for (float inset : {.05f, .10f})
+                dl->AddRect(toScreen(res.format.width * inset, res.format.height * (1 - inset)),
+                            toScreen(res.format.width * (1 - inset), res.format.height * inset), IM_COL32(220, 220, 160, 180));
+        }
+        if (v.roi && !v.roiBox.empty())
+            dl->AddRect(toScreen(v.roiBox.x1, v.roiBox.y2), toScreen(v.roiBox.x2, v.roiBox.y1), IM_COL32(230, 180, 65, 230));
         // Format box and bbox (O toggles them).
         if (v.overlays) {
         ImU32 fmtCol = IM_COL32(150, 150, 150, 200);
@@ -1015,6 +1041,7 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
             const Image& im = *res.image;
             int sx = (int)std::floor(ip.x * res.scale), sy = (int)std::floor(ip.y * res.scale);
             std::array<int, 4> m = layerChannels(im, v.layer);
+            if (v.alphaChannel != "A") m[3] = im.ch(v.alphaChannel);
             ImGui::SameLine(0, 20);
             ImGui::Text("x=%d y=%d", x, y);
             const ImVec4 cols[4] = {ImVec4(1, .45f, .45f, 1), ImVec4(.5f, 1, .5f, 1), ImVec4(.55f, .7f, 1, 1),

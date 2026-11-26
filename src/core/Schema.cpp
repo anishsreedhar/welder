@@ -1516,12 +1516,15 @@ std::vector<NodeDef> build() {
     d.push_back({"Remove", "Channel", {C("operation", "operation", "remove", {"remove", "keep"}), Ch("channels", "channels", "none")}, ""});
     // ---------------------------------------------------------------- Color
     d.push_back({"Grade", "Color",
-                 colorMask({Ch("channels", "channels", "rgb"), Col("blackpoint", "blackpoint", 0, -1, 1),
-                            Col("whitepoint", "whitepoint", 1), Col("lift", "lift", 0, -1, 1), Col("gain", "gain", 1),
-                            Col("multiply", "multiply", 1), Col("offset", "offset", 0, -1, 1), Col("gamma", "gamma", 1, 0.2, 5),
-                            B("reverse", "reverse", false), B("black_clamp", "black clamp", true),
-                            Same(B("white_clamp", "white clamp", false))}),
-                 ""});
+        {Ch("channels", "channels", "rgb"), Col("blackpoint", "blackpoint", 0, -1, 1),
+         Col("whitepoint", "whitepoint", 1), Col("lift", "lift", 0, -1, 1), Col("gain", "gain", 1),
+         Col("multiply", "multiply", 1), Col("offset", "offset", 0, -1, 1), Col("gamma", "gamma", 1, 0.2, 5),
+         B("reverse", "reverse", false), Same(B("black_clamp", "black clamp", true)), Same(B("white_clamp", "white clamp", false)),
+         Width(C("mask_channel", "mask", "A", {}), 220), Same(B("inject", "inject", false)),
+         Same(B("invert_mask", "invert", false)), Same(B("fringe", "fringe", false)),
+         Width(C("unpremult", "(un)premult by", "none", {}), 350), Same(B("invert_unpremult", "invert", false)),
+         B("enable_mix_luminance", "mix luminance", true), Same(EnableIf(F("mix_luminance", "", 0, 0, 1), "enable_mix_luminance=true"), true),
+         F("mix", "mix", 1, 0, 1)}, ""});
     {
         std::vector<KnobDef> k = {Ch("channels", "channels", "rgb")};
         auto master = ccRange("");

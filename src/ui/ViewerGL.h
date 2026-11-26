@@ -16,6 +16,8 @@ namespace strata::ui {
 struct DisplayParams {
     float gain = 1.0f;   // 2^fstop
     float gamma = 1.0f;
+    float saturation = 1.0f;
+    int transfer = 0;  // 0 OCIO/sRGB, 1 linear, 2 Rec.709, 3 Rec.1886
     int channel = 0;     // 0 RGBA, 1 R, 2 G, 3 B, 4 A, 5 luminance
     int matte = 0;       // 1: alpha drawn as a red overlay (M)
     int raw = 0;         // 1: the RGB is data (a matte): no display transform, like the alpha channel always

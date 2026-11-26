@@ -213,6 +213,8 @@ std::vector<double> openKeys(App& app) {
     };
     for (auto& pn : app.panels)
         if (Node* n = app.node(pn)) collect(n->params.data);
+    for(const auto& n:app.comp->nodes)
+        if(n->ui.value("dope_sheet",false) && std::find(app.panels.begin(),app.panels.end(),n->name)==app.panels.end())collect(n->params.data);
     cached.assign(keys.begin(), keys.end());
     cachedFor = std::move(key);
     return cached;
