@@ -537,6 +537,27 @@ int main(int argc, char** argv) {
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
+        // Screenshot regression input is applied after GLFW's physical mouse polling.
+        // Keep it here so hidden test windows receive the same gestures as real widgets.
+        if (!opt.screenshot.empty()) {
+            static const char* mouseScript = std::getenv("STRATA_TEST_MOUSE");
+            if (mouseScript && *mouseScript) {
+                static const json events = json::parse(mouseScript, nullptr, false);
+                static ImVec2 at(-100, -100);
+                static bool down = false;
+                if (events.is_array()) {
+                    for (const auto& e : events) if (e.is_array() && e.size() == 4 && e[0] == frameCount) {
+                        at = ImVec2(e[1].get<float>(), e[2].get<float>());
+                        down = e[3].get<bool>();
+                    }
+                    auto& input = ImGui::GetIO();
+                    input.ConfigInputTrickleEventQueue = false;
+                    input.AddFocusEvent(true);
+                    input.AddMousePosEvent(at.x, at.y);
+                    input.AddMouseButtonEvent(0, down);
+                }
+            }
+        }
         if (scanning) {  // the sweep: each position is held 3 frames (ImGui reports a conflict two frames on)
             const int cols = std::max(1, opt.width / opt.idScan), pos = scanIdx / 3;
             ImGui::GetIO().AddMousePosEvent((float)((pos % cols) * opt.idScan + opt.idScan / 2),

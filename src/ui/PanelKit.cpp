@@ -128,11 +128,11 @@ bool valueField(const char* id, double* v, float width, const char* prefix, bool
         const double a = std::fabs(*v);
         const bool whole = a >= 10 && a < 1e7 && *v == std::round(*v);  // 1350, not 1350.00
         const bool twoDp = a < 1e5 && std::fabs(*v * 100 - std::round(*v * 100)) < 1e-7;
-        changed = ImGui::DragScalar(id, ImGuiDataType_Double, v, (float)speed, nullptr, nullptr, gReferenceFields ? "%.4g" : whole ? "%.0f" : twoDp ? "%.2f" : "%.4g", fl);
+        changed = ImGui::DragScalar(id, ImGuiDataType_Double, v, (float)speed, nullptr, nullptr, gReferenceFields ? "%.6g" : whole ? "%.0f" : twoDp ? "%.2f" : "%.4g", fl);
     }
     if(idleReference)ImGui::PopStyleColor();
     if(gReferenceFields && !ImGui::TempInputIsActive(ImGui::GetID(id))) {
-        char text[48];std::snprintf(text,sizeof text,isInt?"%.0f":"%.4g",*v);
+        char text[48];std::snprintf(text,sizeof text,isInt?"%.0f":"%.6g",*v);
         const ImVec2 p=ImGui::GetItemRectMin();
         ImGui::GetWindowDrawList()->AddText(ImVec2(p.x+(prefix&&*prefix?22:4),p.y+ImGui::GetStyle().FramePadding.y),theme().value,text);
     }

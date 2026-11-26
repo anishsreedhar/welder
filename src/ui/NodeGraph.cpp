@@ -380,7 +380,14 @@ ImVec2 inputPoint(const Node* n, int i, ImVec2* dir) {
         *dir = ImVec2(0, -1);
         return ImVec2(p.x + s.x / 2, p.y + s.y / 2);
     }
-    // Masks come in on the right side, one under the other; every other input along the top.
+    // Spare Merge inputs wait at the left edge. Once connected, facingPoint turns
+    // their arrows toward the source just like the main A/B inputs.
+    if (n->type == "Merge" && i >= 3) {
+        *dir = ImVec2(-1, 0);
+        const int count = std::max(1, n->maxInputs() - 3);
+        return ImVec2(p.x, p.y + s.y * (i - 3 + .5f) / count);
+    }
+    // Masks come in on the right side; the main image inputs sit along the top.
     int maskIdx = 0, topIdx = 0, tops = 0;
     for (int k = 0; k < std::max(n->maxInputs(), i + 1); ++k) {
         const bool m = n->inputLabel(k) == "mask";
@@ -2120,12 +2127,15 @@ void drawNodeGraph(App& app, UiState& ui) {
                     } else
                         dl->AddText(font, fs * 0.85f, ImVec2(grab.x + 4, grab.y - fs), IM_COL32(245, 190, 90, 255), label.c_str());
                 }
-            } else if (i < n->maxInputs() && isMask) {  // the classic side tab: drag from it to connect a mask
+            } else if (i < n->maxInputs() && (isMask || (n->type == "Merge" && i >= 3))) {
+                // Keep unused side arrows visible and draggable, but don't label
+                // a spare Merge input until it is actually connected.
+                const float side = isMask ? 1.f : -1.f;
                 const float t = 6 * std::max(0.6f, g.zoom);
                 ImVec2 b = S(ip);
-                ImVec2 tip(b.x + 1 * g.zoom, b.y), back(b.x + t * 1.3f, b.y);
+                ImVec2 tip(b.x + side * g.zoom, b.y), back(b.x + side * t * 1.3f, b.y);
                 dl->AddTriangleFilled(tip, ImVec2(back.x, back.y - t * 0.75f), ImVec2(back.x, back.y + t * 0.75f), IM_COL32(5, 5, 5, 255));
-                handles.push_back({n, i, ImVec2(b.x + kStub * 0.6f * g.zoom, b.y)});
+                handles.push_back({n, i, ImVec2(b.x + side * kStub * 0.6f * g.zoom, b.y)});
             } else if (knob) {  // an exposed knob waiting for a value: a short stub in the Value colour, named
                 ImVec2 a = S(ImVec2(ip.x - kStub * 0.6f, ip.y)), b = S(ip);
                 const ImU32 vc = categoryColor("Value");
@@ -2813,7 +2823,9 @@ void drawNodeGraph(App& app, UiState& ui) {
             ImVec2 from;
             if (g.drag == GraphState::Drag::FromInput) {
                 ImVec2 dir;
-                from = S(inputPoint(n, g.dragInput, &dir));
+                ImVec2 anchor = inputPoint(n, g.dragInput, &dir);
+                if (n->type == "Merge" && g.dragInput >= 3) anchor = facingPoint(n, mouseG);
+                from = S(anchor);
                 dl->AddLine(io.MousePos, from, theme().accent, 2);
                 arrow(from, io.MousePos, theme().accent);
             } else {

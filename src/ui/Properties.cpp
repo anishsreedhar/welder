@@ -30,6 +30,7 @@
 #include "nodes/PrecompNode.h"
 #include "nodes/Curves.h"
 #include "nodes/ColorCorrect.h"
+#include "ColorWheel.h"
 #include "nodes/TextRender.h"
 #include <thread>
 #include "core/Engine.h"
@@ -466,7 +467,7 @@ void keyButton(Ctx& c, const KnobDef& k, int n, const std::vector<double>& cur, 
     ImVec2 p = ImGui::GetCursorScreenPos();
     float h = ImGui::GetFrameHeight();
     ImGui::PushID("key");
-    const bool reference=c.node->type=="Grade" || c.node->type=="ColorCorrect";
+    const bool reference=c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge";
     const float keyWidth=reference?h:h*.8f;
     bool clicked = ImGui::InvisibleButton("##k", ImVec2(keyWidth, h));
     gKeyHovered = ImGui::IsItemHovered();
@@ -475,18 +476,18 @@ void keyButton(Ctx& c, const KnobDef& k, int n, const std::vector<double>& cur, 
     float r = h * 0.28f;
     ImVec2 pts[4] = {{ctr.x, ctr.y - r}, {ctr.x + r, ctr.y}, {ctr.x, ctr.y + r}, {ctr.x - r, ctr.y}};
     ImU32 col = onKey ? IM_COL32(90, 170, 255, 255) : anim ? IM_COL32(90, 170, 255, 120) : IM_COL32(110, 110, 110, 255);
-    if((c.node->type=="Grade" || c.node->type=="ColorCorrect")) {
+    if((c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge")) {
         dl->AddRectFilled(p,ImVec2(p.x+h,p.y+h),ImGui::IsItemHovered()?IM_COL32(75,75,75,255):IM_COL32(62,62,62,255));
         dl->AddRect(p,ImVec2(p.x+h,p.y+h),IM_COL32(25,25,25,255));
         dl->AddBezierCubic(ImVec2(p.x+3,p.y+h-4),ImVec2(p.x+h*.6f,p.y+h),ImVec2(p.x+h*.4f,p.y),ImVec2(p.x+h-3,p.y+4),col,1.5f);
     } else if (onKey || anim) dl->AddConvexPolyFilled(pts, 4, col);
     else dl->AddPolyline(pts, 4, col, ImDrawFlags_Closed, 1.2f);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip((c.node->type=="Grade" || c.node->type=="ColorCorrect") ? "Click or right-click: animation menu (keys and expressions)" : onKey ? "Click: delete key at this frame\nRight-click: animation menu\n(Alt+click a value: set a key)"
+        ImGui::SetTooltip((c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge") ? "Click or right-click: animation menu (keys and expressions)" : onKey ? "Click: delete key at this frame\nRight-click: animation menu\n(Alt+click a value: set a key)"
                                 : "Click: set key at this frame\nRight-click: animation menu\n(Alt+click a value: set a key)");
     double frame = c.frame;
-    if(clicked && (c.node->type=="Grade" || c.node->type=="ColorCorrect"))ImGui::OpenPopup("##keymenu");
-    if (clicked && (c.node->type!="Grade" && c.node->type!="ColorCorrect")) {
+    if(clicked && (c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge"))ImGui::OpenPopup("##keymenu");
+    if (clicked && (c.node->type!="Grade" && c.node->type!="ColorCorrect" && c.node->type!="Merge")) {
         c.app.checkpoint();
         change(c, k.name, [n, cur, defs, frame, onKey](json& val) {
             json& a = expand(val, n, defs);
@@ -624,7 +625,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
     // expression-driven: purple (red when it fails); animated: blue
     if (hasX) ImGui::PushStyleColor(ImGuiCol_FrameBg, exprErr.empty() ? ImVec4(0.33f, 0.2f, 0.45f, 1.0f) : ImVec4(0.5f, 0.16f, 0.16f, 1.0f));
     else if (anim) ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.16f, 0.27f, 0.42f, 1.0f));
-    const bool referenceControls=c.node->type=="Grade" || c.node->type=="ColorCorrect";
+    const bool referenceControls=c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge";
     float avail = ImGui::GetContentRegionAvail().x - (k.noAnim ? 0 : ImGui::GetFrameHeight() * (referenceControls?1.f:.8f) + ImGui::GetStyle().ItemSpacing.x);
     if (k.half) {  // half the row, when both halves have room for a field and a slider; else the whole row
         const float half = (ImGui::GetContentRegionAvail().x - kit::labelWidth() * 0.55f) * 0.5f - 8;
@@ -644,7 +645,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
     const double dragSpeed = k.type == Knob::Int ? 0.2 : std::max(0.001, (k.hi - k.lo) / 400.0);
     // a value field (drag it, or click to type), then (unless noSlider) a slider with ticks filling the row
     auto scalarRow = [&](int comp, bool isInt, float sliderRoom) {
-        const float fw = k.width > 0 ? k.width : (c.node->type=="Grade" || c.node->type=="ColorCorrect") ? 72.f : std::round(ImGui::GetFontSize() * 5.6f);
+        const float fw = k.width > 0 ? k.width : (c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge") ? 72.f : std::round(ImGui::GetFontSize() * 5.6f);
         double fv = cur[std::max(0, comp)];
         if (kit::valueField("##v", &fv, k.noSlider ? fw : fw, nullptr, isInt, dragSpeed)) commit(comp, fv);
         const char* tk = std::getenv("STRATA_TEST_ALTKEY");
@@ -796,6 +797,30 @@ void numericKnob(Ctx& c, const KnobDef& k) {
             const float top = ImGui::GetCursorScreenPos().y;
             const float wheelSize = std::min(94.0f, ImGui::GetFrameHeightWithSpacing() * 4 - spacing);
             float sliderX = controlsX;
+            struct WheelSlot {
+                colorwheel::State model;
+                const Comp* comp=nullptr;
+                colorwheel::RGB tmiStart{};
+                float tmiMouse=0;
+                std::array<double,4> arrowStart{};
+                std::array<float,4> arrowMouse{};
+                std::array<bool,4> arrowDragged{};
+                std::array<int,4> arrowButton{};
+            };
+            static std::map<ImGuiID,WheelSlot> slots;
+            auto& slot=slots[ImGui::GetID("##wheelInteraction")];
+            if(slot.comp!=c.app.comp.get()){slot=WheelSlot{};slot.comp=c.app.comp.get();}
+            const colorwheel::RGB incoming={cur[0],cur[1],cur[2]};
+            if(!c.app.editsPending())slot.model.sync(incoming,state.value("hue",0.0),state.value("saturation",0.0));
+            if(!slot.model.initialized)slot.model.sync(incoming,state.value("hue",0.0),state.value("saturation",0.0));
+            auto publishWheel=[&]() {
+                for(int i=0;i<3;++i)if(slot.model.rgb[i]!=incoming[i])commit(i,slot.model.rgb[i]);
+                const std::string name=c.node->name,knob=k.name;
+                const auto hsv=slot.model.hsv;
+                c.app.edit([name,knob,controlsKey,hsv](Comp& comp){if(Node* n=comp.find(name)){n->ui[controlsKey][knob]["hue"]=hsv.h;n->ui[controlsKey][knob]["saturation"]=hsv.s;}});
+            };
+            const float tmiWidth=wheel?60.f:0.f;
+            if(!ImGui::IsMouseDown(0))slot.model.end();
             if (wheel) {
                 // The wheel occupies the label column; RGBA fields keep their usual alignment.
                 const float wheelX=controlsX-wheelSize-10;
@@ -805,6 +830,17 @@ void numericKnob(Ctx& c, const KnobDef& k) {
                 const float radius=wheelSize*.48f,inner=radius-6;
                 ImDrawList* dl=ImGui::GetWindowDrawList();
                 dl->AddCircleFilled(center,inner,IM_COL32(0,0,0,255),64);
+                const double previewValue=std::fabs(slot.model.hsv.v);
+                if(previewValue>0) {
+                    constexpr int count=64;
+                    const ImVec2 uv=dl->_Data->TexUvWhitePixel;
+                    dl->PrimReserve(count*3,count+1);
+                    const unsigned int base=dl->_VtxCurrentIdx;
+                    const float gray=(float)std::clamp(previewValue,0.0,1.0);
+                    dl->PrimWriteVtx(center,uv,ImGui::GetColorU32(ImVec4(gray,gray,gray,1)));
+                    for(int i=0;i<count;++i){const double h=i/(double)count,angle=-h*colorwheel::tau;const auto rgb=colorwheel::toRGB({h,inner/radius,previewValue});dl->PrimWriteVtx(ImVec2(center.x+inner*(float)std::cos(angle),center.y+inner*(float)std::sin(angle)),uv,ImGui::GetColorU32(ImVec4((float)std::clamp(rgb[0],0.0,1.0),(float)std::clamp(rgb[1],0.0,1.0),(float)std::clamp(rgb[2],0.0,1.0),1)));}
+                    for(int i=0;i<count;++i){dl->PrimWriteIdx((ImDrawIdx)base);dl->PrimWriteIdx((ImDrawIdx)(base+1+i));dl->PrimWriteIdx((ImDrawIdx)(base+1+(i+1)%count));}
+                }
                 // Continuous hue ring, with transparent inner/outer fringes for smooth edges.
                 constexpr int segments=64;
                 const float radii[]={radius+1,radius,inner,inner-1};
@@ -821,22 +857,35 @@ void numericKnob(Ctx& c, const KnobDef& k) {
                     const unsigned int next=(i+1)%segments,a=base+ring*segments+i,b=base+ring*segments+next,c=base+(ring+1)*segments+i,d=base+(ring+1)*segments+next;
                     for(unsigned int index:{a,b,c,b,d,c})dl->PrimWriteIdx((ImDrawIdx)index);
                 }
-                float hue,sat,value;
-                ImGui::ColorConvertRGBtoHSV(std::max(col[0],0.f),std::max(col[1],0.f),std::max(col[2],0.f),hue,sat,value);
-                const float angle=-hue*6.2831853f;
-                const ImVec2 marker(center.x+(inner-3)*sat*std::cos(angle),center.y+(inner-3)*sat*std::sin(angle));
-                dl->AddCircleFilled(marker,3.5f,IM_COL32(80,166,255,255),16);
+                ImGuiIO& io=ImGui::GetIO();
+                const float puckRadius=inner-3;
+                const colorwheel::Point mouse{io.MousePos.x-center.x,io.MousePos.y-center.y};
+                if(ImGui::IsItemActivated()) {
+                    const bool ctrl=io.KeyCtrl||io.KeySuper,ringDrag=std::hypot(mouse.x,mouse.y)>=inner;
+                    const auto mode=ctrl&&io.KeyShift?colorwheel::Drag::Value:ctrl||ringDrag?colorwheel::Drag::Hue:io.KeyShift?colorwheel::Drag::Saturation:colorwheel::Drag::HueSaturation;
+                    slot.model.begin(mouse,puckRadius,mode,ringDrag);
+                }
+                if(ImGui::IsItemActive()&&ImGui::IsMouseDown(0)) {
+                    slot.model.update(mouse,puckRadius,io.KeyAlt);
+                    publishWheel();
+                }
+                if(ImGui::IsItemHovered()) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    ImGui::SetTooltip("Drag: relative hue / saturation\nRing or Ctrl: hue only; Shift: saturation only\nCtrl+Shift: brightness; Alt: absolute positioning");
+                }
+                const auto hsv=slot.model.hsv;
+                const float angle=(float)(-hsv.h*colorwheel::tau);
+                const auto point=slot.model.position(puckRadius);
+                const ImVec2 marker(center.x+(float)point.x,center.y+(float)point.y);
+                dl->AddLine(ImVec2(center.x-3,center.y),ImVec2(center.x+3,center.y),IM_COL32(190,190,190,255));
+                dl->AddLine(ImVec2(center.x,center.y-3),ImVec2(center.x,center.y+3),IM_COL32(190,190,190,255));
+                if(slot.model.dragging&&slot.model.mode!=colorwheel::Drag::Value){const float r=puckRadius*(float)std::clamp(hsv.s,0.0,1.0);for(int i=0;i<64;i+=2){float a=i*6.2831853f/64,b=(i+1)*6.2831853f/64;dl->AddLine(ImVec2(center.x+r*std::cos(a),center.y+r*std::sin(a)),ImVec2(center.x+r*std::cos(b),center.y+r*std::sin(b)),IM_COL32(215,215,215,180));}dl->AddLine(center,marker,IM_COL32(215,215,215,160));}
+                const double minimum=*std::min_element(slot.model.rgb.begin(),slot.model.rgb.end()),maximum=*std::max_element(slot.model.rgb.begin(),slot.model.rgb.end());
+                const ImU32 markerColor=maximum>1?IM_COL32(230,60,45,255):maximum<.1?IM_COL32(80,166,255,255):IM_COL32(235,235,235,255);
+                dl->AddCircleFilled(marker,3.5f,markerColor,16);
                 const ImVec2 tip(center.x+(inner+1)*std::cos(angle),center.y+(inner+1)*std::sin(angle));
                 const ImVec2 back(center.x+(radius+7)*std::cos(angle),center.y+(radius+7)*std::sin(angle));
-                dl->AddTriangleFilled(tip,ImVec2(back.x-4*std::sin(angle),back.y+4*std::cos(angle)),ImVec2(back.x+4*std::sin(angle),back.y-4*std::cos(angle)),IM_COL32(235,235,235,255));
-                if(ImGui::IsItemActive()&&ImGui::IsMouseDown(0)&&!ImGui::GetIO().KeyAlt) {
-                    const ImVec2 mouse=ImGui::GetIO().MousePos;
-                    float selectedHue=-std::atan2(mouse.y-center.y,mouse.x-center.x)/6.2831853f;
-                    if(selectedHue<0)selectedHue+=1;
-                    const float saturation=std::min(1.f,std::hypot(mouse.x-center.x,mouse.y-center.y)/(inner-3));
-                    ImGui::ColorConvertHSVtoRGB(selectedHue,saturation,value>0?value:1.f,col[0],col[1],col[2]);
-                    for(int i=0;i<3;++i)commit(i,col[i]);
-                }
+                dl->AddTriangleFilled(tip,ImVec2(back.x-4*std::sin(angle),back.y+4*std::cos(angle)),ImVec2(back.x+4*std::sin(angle),back.y-4*std::cos(angle)),minimum<0&&maximum>0?IM_COL32(230,60,45,255):IM_COL32(235,235,235,255));
                 startGesture();
             }
             for (int i = 0; i < 4; ++i) {
@@ -848,10 +897,47 @@ void numericKnob(Ctx& c, const KnobDef& k) {
                 startGesture();
                 {const ImVec2 a=ImGui::GetItemRectMin(),b=ImGui::GetItemRectMax();const ImU32 colors[]={IM_COL32(155,65,65,255),IM_COL32(65,140,65,255),IM_COL32(65,85,160,255),IM_COL32(140,140,140,255)};ImGui::GetWindowDrawList()->AddLine(ImVec2(a.x+1,b.y-1),ImVec2(b.x-1,b.y-1),colors[i]);}
                 ImGui::SameLine();
-                const float componentWidth=std::max(30.0f, avail - (sliderX - controlsX) - fw - spacing);
+                const float componentWidth=std::max(30.0f,fullWidth-fw-2-18-2-tmiWidth);
                 if(c.node->type=="Grade"?kit::gradeSlider("##componentSlider",&val,defs[i],k.name=="gamma",componentWidth):kit::colorCorrectSlider("##componentSlider", &val, defs[i], k.hi - defs[i],componentWidth))commit(i,val);
                 startGesture();
+                ImGui::SameLine(0,1);
+                const ImVec2 arrow=ImGui::GetCursorScreenPos();const float ah=ImGui::GetFrameHeight();
+                ImGui::InvisibleButton("##scrub",ImVec2(16,ah),ImGuiButtonFlags_MouseButtonLeft|ImGuiButtonFlags_MouseButtonRight);
+                ImGuiIO& io=ImGui::GetIO();
+                if(ImGui::IsItemActivated()){slot.arrowStart[i]=cur[i];slot.arrowMouse[i]=io.MousePos.x;slot.arrowDragged[i]=false;slot.arrowButton[i]=io.MouseDown[1]?1:0;c.app.checkpoint();}
+                const double speed=io.KeyShift?10:io.KeyAlt?.1:1;
+                if(ImGui::IsItemActive()&&std::fabs(io.MousePos.x-slot.arrowMouse[i])>3){slot.arrowDragged[i]=true;commit(i,slot.arrowStart[i]+(io.MousePos.x-slot.arrowMouse[i])*.005*speed);}
+                if(ImGui::IsItemDeactivated()&&!slot.arrowDragged[i]&&ImGui::IsItemHovered())commit(i,slot.arrowStart[i]+(slot.arrowButton[i]?-.01:.01)*speed);
+                ImDrawList* arrows=ImGui::GetWindowDrawList();arrows->AddRectFilled(arrow,ImVec2(arrow.x+16,arrow.y+ah),IM_COL32(62,62,62,255));arrows->AddRect(arrow,ImVec2(arrow.x+16,arrow.y+ah),IM_COL32(25,25,25,255));
+                const float cy=arrow.y+ah*.5f;arrows->AddTriangleFilled(ImVec2(arrow.x+2,cy),ImVec2(arrow.x+7,cy-5),ImVec2(arrow.x+7,cy+5),IM_COL32(205,205,205,255));arrows->AddTriangleFilled(ImVec2(arrow.x+14,cy),ImVec2(arrow.x+9,cy-5),ImVec2(arrow.x+9,cy+5),IM_COL32(205,205,205,255));
+                if(ImGui::IsItemHovered()){ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);ImGui::SetTooltip("Left click: +0.01; right click: -0.01\nDrag to scrub; Shift: 10x; Alt: 0.1x");}
                 ImGui::PopID();
+            }
+            if(wheel) {
+                const float height=4*ImGui::GetFrameHeightWithSpacing()-ImGui::GetStyle().ItemSpacing.y;
+                const float tx=controlsX+fullWidth-tmiWidth;
+                auto tmi=colorwheel::toTMI(slot.model.rgb);
+                const char* names[]={"Temperature (R - B)","Magenta / green","Intensity (RGB together)"};
+                for(int i=0;i<3;++i) {
+                    ImGui::PushID(100+i);const ImVec2 p(tx+i*20,top);
+                    ImGui::SetCursorScreenPos(p);ImGui::InvisibleButton("##tmi",ImVec2(18,height));
+                    ImGuiIO& io=ImGui::GetIO();
+                    if(ImGui::IsItemActivated()){slot.tmiStart=tmi;slot.tmiMouse=io.MousePos.y;c.app.checkpoint();}
+                    if(ImGui::IsItemActive()&&ImGui::IsMouseDown(0)) {
+                        auto next=slot.tmiStart;next[i]+=(slot.tmiMouse-io.MousePos.y)*.005*(io.KeyShift?10:io.KeyAlt?.1:1);
+                        if(ImGui::IsMouseDoubleClicked(0))next[i]=0;
+                        slot.model.end();slot.model.sync(colorwheel::fromTMI(next));publishWheel();tmi=next;
+                    }
+                    ImDrawList* d=ImGui::GetWindowDrawList();const float x=p.x+10,mid=p.y+height*.5f,half=height*.5f-3;
+                    d->AddLine(ImVec2(x,p.y+2),ImVec2(x,p.y+height-2),IM_COL32(0,0,0,255));
+                    for(int tick=-10;tick<=10;++tick){float y=mid-half*tick/10.f;d->AddLine(ImVec2(x-(tick%5?2:4),y),ImVec2(x+3,y),IM_COL32(30,30,30,255));}
+                    const float y=mid-half*(float)std::clamp(colorwheel::signedRoot(tmi[i]),-1.0,1.0);
+                    d->AddRectFilled(ImVec2(x-4,y-2),ImVec2(x+5,y+3),IM_COL32(25,25,25,255));d->AddRectFilled(ImVec2(x-3,y-1),ImVec2(x+4,y+2),IM_COL32(98,82,39,255));
+                    d->AddText(ImGui::GetFont(),8,ImVec2(p.x,p.y+1),IM_COL32(120,120,120,255),"1");
+                    if(ImGui::IsItemHovered()||ImGui::IsItemActive()){ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);ImGui::SetTooltip("%s: %.6g\nDrag vertically; double-click resets; Shift: fast; Alt: fine",names[i],tmi[i]);}
+                    ImGui::PopID();
+                }
+
             }
             ImGui::SetCursorScreenPos(ImVec2(controlsX, top + 4 * ImGui::GetFrameHeightWithSpacing()));
             ImGui::Dummy(ImVec2(1, 0));
@@ -1259,6 +1345,7 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
         bool dragging = false;
         json working;
         std::set<std::string> hidden;
+        bool allRanges = true;
     };
     static std::map<std::string, State> states;
     State& stt = states[c.node->name + "/" + k.name];
@@ -1283,7 +1370,7 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
         stt.sel = k.options.empty() ? "" : k.options[0];
     const double period = c.node->type == "HueCorrect" ? k.hi - k.lo : 0;
     auto curveColour = [ranges](const std::string& n) -> ImU32 {
-        if (ranges) return n == "shadow" ? IM_COL32(90, 130, 250, 255) : n == "midtone" ? IM_COL32(220, 100, 180, 255) : IM_COL32(220, 220, 235, 255);
+        if (ranges) return n == "highlight" ? IM_COL32(150, 155, 132, 255) : IM_COL32(200, 210, 215, 255);
         std::string l = n;
         for (auto& ch : l) ch = (char)std::tolower((unsigned char)ch);
         if (l == "red" || l == "r" || l.find("r_") == 0 || l.find("red") != std::string::npos) return IM_COL32(230, 80, 80, 255);
@@ -1294,47 +1381,63 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
         if (l.find("lum") != std::string::npos) return IM_COL32(240, 240, 240, 255);
         return IM_COL32(230, 230, 230, 255);
     };
-    ImGui::NewLine();
-    // the curve list
-    const float listW = 90;
+    if (!ranges) ImGui::NewLine();
+    const float listW = ranges ? 100.f : 90.f;
+    const float rangeHeight = std::clamp((ImGui::GetContentRegionAvail().x-listW-10)*.94f,220.f,560.f);
+    const ImVec2 listOrigin=ImGui::GetCursorScreenPos();
     ImGui::BeginGroup();
+    if(ranges) {
+        auto* d=ImGui::GetWindowDrawList();
+        d->AddRectFilled(listOrigin,ImVec2(listOrigin.x+listW,listOrigin.y+rangeHeight-16),IM_COL32(56,56,56,255));
+        d->AddRect(listOrigin,ImVec2(listOrigin.x+listW,listOrigin.y+rangeHeight-16),IM_COL32(39,39,39,255));
+        ImGui::PushFont(theme().regular,13);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(0,0));
+        ImGui::PushStyleColor(ImGuiCol_Header,IM_COL32(250,151,22,255));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered,IM_COL32(255,170,40,255));
+    }
     for (auto& n : k.options) {
         ImGui::PushID(n.c_str());
-        bool vis = !stt.hidden.count(n);
-        if (ImGui::Checkbox("##vis", &vis)) {
-            if (vis) stt.hidden.erase(n);
-            else stt.hidden.insert(n);
+        if(!ranges) {
+            bool vis = !stt.hidden.count(n);
+            if (ImGui::Checkbox("##vis", &vis)) {
+                if (vis) stt.hidden.erase(n); else stt.hidden.insert(n);
+            }
+            ImGui::SameLine();
         }
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Text, curveColour(n));
-        if (ImGui::Selectable(n.c_str(), stt.sel == n, 0, ImVec2(listW - 30, 0))) stt.sel = n;
+        const bool selected=ranges ? stt.allRanges || stt.sel==n : stt.sel==n;
+        ImGui::PushStyleColor(ImGuiCol_Text,ranges?(selected?IM_COL32(0,0,0,255):IM_COL32(210,210,210,255)):curveColour(n));
+        if (ImGui::Selectable(n.c_str(),selected,0,ImVec2(listW-(ranges?2:30),ranges?13:0))) {stt.sel=n;stt.allRanges=false;}
         ImGui::PopStyleColor();
         ImGui::PopID();
     }
+    if(ranges) {
+        ImGui::PopStyleColor(2);ImGui::PopStyleVar();ImGui::PopFont();
+        ImGui::SetCursorScreenPos(ImVec2(listOrigin.x+10,listOrigin.y+rangeHeight-14));
+    }
     const bool derived = ranges && stt.sel == "midtone";
-    ImGui::BeginDisabled(derived);
-    if (ImGui::SmallButton("reset")) {
+    ImGui::BeginDisabled(derived && !stt.allRanges);
+    if (ranges ? ImGui::Button("reset",ImVec2(80,14)) : ImGui::SmallButton("reset")) {
         c.app.checkpoint();
-        std::string s = stt.sel;
-        json d = k.def.is_object() && k.def.contains(s) ? k.def[s] : json();
-        change(c, k.name, [s, d, def = k.def](json& j) {
+        std::string selected = stt.sel;
+        json d = k.def.is_object() && k.def.contains(selected) ? k.def[selected] : json();
+        const bool all=ranges && stt.allRanges;
+        change(c, k.name, [selected, d, all, def = k.def](json& j) {
+            if(all){j=def;return;}
             if (!j.is_object()) j = def.is_object() ? def : json::object();
-            if (d.is_null()) j.erase(s);
-            else j[s] = d;
+            if (d.is_null()) j.erase(selected); else j[selected] = d;
         });
     }
     ImGui::EndDisabled();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("reset the selected curve");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip(ranges&&stt.allRanges?"reset all ranges":"reset the selected curve");
     ImGui::EndGroup();
-    ImGui::SameLine();
-    // the graph
+    ImGui::SameLine(0,ranges?6.f:ImGui::GetStyle().ItemSpacing.x);
     const float w = std::max(120.0f, ImGui::GetContentRegionAvail().x - 4);
-    const float h = ranges ? std::clamp(w * 1.05f, 240.0f, 440.0f) : std::clamp(w * 0.6f, 140.0f, 260.0f);
+    const float h = ranges ? rangeHeight : std::clamp(w * 0.6f, 140.0f, 260.0f);
     ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     double ylo = std::min(0.0, k.lo), yhi = std::max(1.0, k.hi);
     if (c.node->type == "HueCorrect") ylo = 0, yhi = 2;
-    for (auto& n : k.options)
+    if (!ranges) for (auto& n : k.options)
         for (auto& p : curveOf(n))
             if (p.is_array() && p.size() >= 2 && p[1].is_number()) {
                 ylo = std::min(ylo, p[1].get<double>());
@@ -1343,14 +1446,15 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
     const double pad = (yhi - ylo) * 0.05;
     ylo -= pad;
     yhi += pad;
+    const double xlo=k.lo-(ranges?.05:0),xhi=k.hi+(ranges?.05:0);
     auto toS = [&](double x, double y) {
-        return ImVec2(p0.x + (float)((x - k.lo) / (k.hi - k.lo) * w), p0.y + h - (float)((y - ylo) / (yhi - ylo) * h));
+        return ImVec2(p0.x + (float)((x - xlo) / (xhi - xlo) * w), p0.y + h - (float)((y - ylo) / (yhi - ylo) * h));
     };
     auto fromS = [&](ImVec2 s, double& x, double& y) {
-        x = k.lo + (s.x - p0.x) / w * (k.hi - k.lo);
+        x = xlo + (s.x - p0.x) / w * (xhi - xlo);
         y = ylo + (p0.y + h - s.y) / h * (yhi - ylo);
     };
-    dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), IM_COL32(32, 32, 32, 255));
+    dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), ranges?IM_COL32(13,13,13,255):IM_COL32(32,32,32,255));
     if (c.node->type == "HueCorrect") {  // the hues along the bottom
         for (int i = 0; i < 60; ++i) {
             auto hue = [](float t) {
@@ -1362,50 +1466,65 @@ void curvesKnob(Ctx& c, const KnobDef& k, float avail) {
                                         hue((i + 1) / 60.0f), hue((i + 1) / 60.0f), hue(i / 60.0f));
         }
     }
-    const int divisions = ranges ? 10 : 4;
-    for (int g = 0; g <= divisions; ++g) {  // grid
-        const float gx = p0.x + w * g / divisions, gy = p0.y + h * g / divisions;
-        const ImU32 grid = ranges ? IM_COL32(48, 73, 45, 255) : IM_COL32(55, 55, 55, 255);
-        dl->AddLine(ImVec2(gx, p0.y), ImVec2(gx, p0.y + h), grid);
-        dl->AddLine(ImVec2(p0.x, gy), ImVec2(p0.x + w, gy), grid);
-        if (ranges) {
-            char text[16]; std::snprintf(text, sizeof text, "%.1f", g / 10.0);
-            const float tx = std::min(gx + 2, p0.x + w - ImGui::CalcTextSize(text).x - 2);
-            dl->AddText(ImVec2(tx, p0.y + h - ImGui::GetTextLineHeight()), IM_COL32(128, 158, 110, 255), text);
+    if(ranges) {
+        for(int i=0;i<=20;++i) {
+            const double v=i/20.;const auto p=toS(v,v);
+            const ImU32 grid=i%2?IM_COL32(25,42,25,255):IM_COL32(46,74,43,255);
+            dl->AddLine(ImVec2(p.x,p0.y),ImVec2(p.x,p0.y+h),grid);
+            dl->AddLine(ImVec2(p0.x,p.y),ImVec2(p0.x+w,p.y),grid);
+            if(i%2==0) {
+                char text[12];std::snprintf(text,sizeof text,"%.1g",v);
+                dl->AddText(ImGui::GetFont(),12,ImVec2(p.x+2,p0.y+h-14),IM_COL32(95,145,68,255),text);
+                dl->AddText(ImGui::GetFont(),12,ImVec2(p0.x+3,p.y-13),IM_COL32(95,145,68,255),text);
+            }
         }
-    }
-    {  // y = 0 and y = 1
-        ImVec2 a = toS(k.lo, 0), b = toS(k.hi, 0);
-        dl->AddLine(a, b, IM_COL32(80, 80, 80, 255));
-        a = toS(k.lo, 1), b = toS(k.hi, 1);
-        dl->AddLine(a, b, IM_COL32(70, 70, 70, 255));
+        const auto zero=toS(0,0);
+        dl->AddLine(ImVec2(zero.x,p0.y),ImVec2(zero.x,p0.y+h),IM_COL32(225,240,70,255));
+        dl->AddLine(ImVec2(p0.x,zero.y),ImVec2(p0.x+w,zero.y),IM_COL32(80,140,50,255));
+    } else {
+        for(int g=0;g<=4;++g){const float gx=p0.x+w*g/4,gy=p0.y+h*g/4;dl->AddLine(ImVec2(gx,p0.y),ImVec2(gx,p0.y+h),IM_COL32(55,55,55,255));dl->AddLine(ImVec2(p0.x,gy),ImVec2(p0.x+w,gy),IM_COL32(55,55,55,255));}
+        for(double y:{0.,1.}){auto a=toS(k.lo,y),b=toS(k.hi,y);dl->AddLine(a,b,IM_COL32(75,75,75,255));}
     }
     auto drawCurve = [&](const std::string& n, bool selected) {
         LookupCurve cv = LookupCurve::fromJson(curveOf(n), {}, period);
         const cc::RangeCurve rangeCurve(val, n == "shadow" ? "shadow" : "highlight");
         ImU32 col = curveColour(n);
-        if (!selected) col = (col & 0x00ffffff) | 0x70000000;
+        if (!selected && !ranges) col = (col & 0x00ffffff) | 0x70000000;
         ImVec2 prev;
         for (int i = 0; i <= 200; ++i) {
-            const double x = k.lo + (k.hi - k.lo) * i / 200.0;
+            const double x = xlo + (xhi - xlo) * i / 200.0;
             double y = cv.pts.empty() ? x : cv.eval(x);
             if (ranges && n != "midtone") y = rangeCurve.eval(x);
             ImVec2 s = toS(x, y);
             s.y = std::clamp(s.y, p0.y - 2, p0.y + h + 2);
-            if (i) dl->AddLine(prev, s, col, selected ? 2.0f : 1.0f);
+            if (i) dl->AddLine(prev, s, col, ranges ? 1.4f : selected ? 2.0f : 1.0f);
             prev = s;
         }
-        if (selected && !(ranges && n == "midtone"))
-            for (auto& [x, y] : cv.pts) dl->AddCircleFilled(toS(x, y), 4, col);
+        if ((selected || (ranges && stt.allRanges)) && !(ranges && n == "midtone"))
+            for (auto& [x, y] : cv.pts) dl->AddCircleFilled(toS(x, y), ranges?2.5f:4.f, col);
     };
     dl->PushClipRect(p0, ImVec2(p0.x + w, p0.y + h), true);
     for (auto& n : k.options)
         if (n != stt.sel && !stt.hidden.count(n)) drawCurve(n, false);
     if (!stt.sel.empty()) drawCurve(stt.sel, true);
+    if(ranges) {
+        const auto middle=toS(.32,1),high=toS(.68,.32);
+        dl->AddText(ImGui::GetFont(),12,ImVec2(p0.x+2,toS(0,1).y-16),curveColour("shadow"),"shadow");
+        dl->AddText(ImGui::GetFont(),12,ImVec2(middle.x,middle.y-16),curveColour("midtone"),"midtone");
+        dl->AddText(ImGui::GetFont(),12,high,curveColour("highlight"),"highlight");
+    }
     dl->PopClipRect();
     dl->AddRect(p0, ImVec2(p0.x + w, p0.y + h), IM_COL32(15, 15, 15, 255));
     ImGui::InvisibleButton("##graph", ImVec2(w, h));
     const ImVec2 m = ImGui::GetIO().MousePos;
+    if(ranges && stt.allRanges && ImGui::IsItemActivated()) {
+        float best=8*8;
+        for(const char* name:{"shadow","highlight"})for(const auto& point:curveOf(name)) {
+            const auto screen=toS(point[0].get<double>(),point[1].get<double>());
+            const float distance=(screen.x-m.x)*(screen.x-m.x)+(screen.y-m.y)*(screen.y-m.y);
+            if(distance<best){best=distance;stt.sel=name;}
+        }
+    }
     json pts = curveOf(stt.sel);
     auto nearest = [&]() {
         int best = -1;
@@ -1903,7 +2022,7 @@ void knobBody(Ctx& c, const KnobDef& k) {
                 c.app.checkpoint();
                 change(c, k.name, [enabled](json& j) { j = enabled ? "A" : "none"; });
             }
-            ImGui::SameLine();
+            ImGui::SameLine(0,c.node->type=="Merge"?4.f:ImGui::GetStyle().ItemSpacing.x);
         }
         auto optionLabel=[&](const std::string& value){
             if((c.node->type!="Merge" && c.node->type!="Grade") || (k.name!="mask_channel" && k.name!="unpremult"))return value;
@@ -1917,9 +2036,9 @@ void knobBody(Ctx& c, const KnobDef& k) {
                 }
             ImGui::EndCombo();
         }
-        if((c.node->type=="Grade" || c.node->type=="ColorCorrect") && (k.name=="mask_channel" || k.name=="unpremult")) {
-            ImGui::SameLine(0,3);
-            if(ImGui::SmallButton("="))ImGui::OpenPopup("##channelOptions");
+        if((c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge") && (k.name=="mask_channel" || k.name=="unpremult")) {
+            ImGui::SameLine(0,c.node->type=="Merge"?6.f:3.f);
+            if(c.node->type=="Merge"?ImGui::Button("=",ImVec2(18,ImGui::GetFrameHeight())):ImGui::SmallButton("="))ImGui::OpenPopup("##channelOptions");
             if(ImGui::BeginPopup("##channelOptions")) {
                 for(const char* channel:{"none","A"})if(ImGui::Selectable(channel==std::string("A")?"Use rgba.alpha":"None")){
                     c.app.checkpoint();change(c,k.name,[value=std::string(channel)](json& j){j=value;});
@@ -3558,15 +3677,27 @@ void drawKnobs(Ctx& c, const NodeDef& def, const std::string& tab) {
             if(k.name=="metadata_from" || k.name=="range_from")k.width=40;
             if(k.name=="mask_channel"){k.type=Knob::Choice;}
             if(k.name=="unpremult" && c.node->type=="Grade")k.width=std::max(100.f,ImGui::GetContentRegionAvail().x-kit::labelWidth()-90);
-            if(k.name=="mask_channel")k.width=std::max(100.f,ImGui::GetContentRegionAvail().x-kit::labelWidth()-(c.node->type=="Grade"?222:210));
+            if(k.name=="mask_channel")k.width=std::max(100.f,ImGui::GetContentRegionAvail().x-kit::labelWidth()-(c.node->type=="Merge"?218:222));
             knob(c,k);
+            if(c.node->type=="Merge" && k.name=="mix")ImGui::Dummy(ImVec2(1,12));
         }
         return;
     }
     if(c.node->type=="ColorCorrect") {
+        struct RangeLabelWidth {float previous;~RangeLabelWidth(){kit::setLabelWidth(previous);}} labels{kit::setLabelWidth(tab=="Ranges"?104:kit::labelWidth())};
         bool open=true;
-        for(const auto& k:def.knobs) {
+        for(auto k:def.knobs) {
             if(k.tab!=tab || !whenOk(c.node,def,k))continue;
+            if(tab=="Ranges") {
+                if(k.type==Knob::Divider)continue;
+                if(k.name=="lookup"){ImGui::PushID(k.name.c_str());curvesKnob(c,k,ImGui::GetContentRegionAvail().x);ImGui::PopID();continue;}
+                if(k.name=="mask_channel")k.width=std::max(100.f,ImGui::GetContentRegionAvail().x-kit::labelWidth()-222);
+                if(k.name=="unpremult")k.width=std::max(100.f,ImGui::GetContentRegionAvail().x-kit::labelWidth()-90);
+                if(k.name=="enable_mix_luminance"){
+                    kit::rowLabel("mix luminance");bool enabled=c.node->params.flag(k.name,true);
+                    if(kit::checkbox("##lumEnable",&enabled)){c.app.checkpoint();change(c,k.name,[enabled](json& j){j=enabled;});}continue;
+                }
+            }
             if(k.type==Knob::Divider) {
                 const auto title=dividerLabel(c,k);
                 if(title.empty()){ImGui::Spacing();ImGui::Separator();open=true;}
@@ -3575,6 +3706,7 @@ void drawKnobs(Ctx& c, const NodeDef& def, const std::string& tab) {
         }
         return;
     }
+
     bool card = false, open = true, started = false;
     int n = 0;
     for (auto& k : def.knobs) {
@@ -3763,8 +3895,8 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
     struct CompactMerge {
         bool enabled, reference=false, previousReference=false;
         float label=0;ImU32 muted=0;
-        CompactMerge(bool on,bool ref):enabled(on),reference(ref){if(on){
-            label=kit::setLabelWidth(ref?108:82);
+        CompactMerge(bool on,bool ref,bool merge):enabled(on),reference(ref){if(on){
+            label=kit::setLabelWidth(merge?88:108);
             previousReference=kit::setReferenceFields(ref);
             muted=theme().muted;if(ref)theme().muted=IM_COL32(220,220,220,255);
             ImGui::PushFont(theme().regular,ref?15:14);
@@ -3775,7 +3907,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
             ImGui::PushStyleColor(ImGuiCol_FrameBg,IM_COL32(58,58,58,255));
         }}
         ~CompactMerge(){if(enabled){theme().muted=muted;kit::setReferenceFields(previousReference);kit::setLabelWidth(label);ImGui::PopStyleColor();ImGui::PopStyleVar(4);ImGui::PopFont();}}
-    } compactMerge(n->type=="Merge" || n->type=="Grade" || n->type=="ColorCorrect",n->type=="Grade" || n->type=="ColorCorrect");
+    } compactMerge(n->type=="Merge" || n->type=="Grade" || n->type=="ColorCorrect",n->type=="Merge" || n->type=="Grade" || n->type=="ColorCorrect",n->type=="Merge");
     // the header: a card with the category colour as a strip down its left side, the name in
     // the medium weight, the type muted after it
     const ImU32 cc = categoryColor(categoryOf(n->type));

@@ -369,6 +369,9 @@ add_test(NAME exr COMMAND welder_exr_tests)
 add_executable(welder_colorcorrect_tests tests/colorcorrect_tests.cpp)
 target_link_libraries(welder_colorcorrect_tests PRIVATE strata_core)
 add_test(NAME colorcorrect COMMAND welder_colorcorrect_tests)
+add_executable(welder_colorwheel_tests tests/colorwheel_tests.cpp)
+target_include_directories(welder_colorwheel_tests PRIVATE src)
+add_test(NAME colorwheel COMMAND welder_colorwheel_tests)
 
 # OFX host tests need the sample plugins: tools/build_test_plugins.sh <openfx> build/ofx-test-plugins
 add_executable(welder_ofx_tests tests/ofx_tests.cpp)
