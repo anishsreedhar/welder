@@ -307,7 +307,10 @@ struct Reader {
         AVPixelFormat outFmt = alpha ? AV_PIX_FMT_RGBA64 : AV_PIX_FMT_RGB48;
         const int flags = SWS_BICUBIC | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP;
         const bool yuv = d && !(d->flags & AV_PIX_FMT_FLAG_RGB);
-        const int* coef = yuv ? coefficientsFor(frame->colorspace, H, dec->codec_id == AV_CODEC_ID_MJPEG) : nullptr;
+        // QuickTime can carry a matrix in the track even when the frame has no tag.
+        const AVColorSpace matrix = frame->colorspace == AVCOL_SPC_UNSPECIFIED
+            ? fmt->streams[si]->codecpar->color_space : frame->colorspace;
+        const int* coef = yuv ? coefficientsFor(matrix, H, dec->codec_id == AV_CODEC_ID_MJPEG) : nullptr;
         bool grey = d && d->nb_components <= 2;  // grey images: full range unless tagged otherwise
         bool full = isFullRange(frame) || (grey && frame->color_range != AVCOL_RANGE_MPEG);
         const int n = alpha ? 4 : 3;
@@ -756,6 +759,10 @@ Writer::Writer(const std::string& path, int W, int H, bool alpha, const WriterOp
     d.frame->format = pf;
     d.frame->width = W;
     d.frame->height = H;
+    d.frame->colorspace = d.enc->colorspace;
+    d.frame->color_range = d.enc->color_range;
+    d.frame->color_primaries = d.enc->color_primaries;
+    d.frame->color_trc = d.enc->color_trc;
     if ((e = av_frame_get_buffer(d.frame, 0)) < 0) throw RenderError("out of memory: " + averr(e));
     d.pkt = av_packet_alloc();
     d.open = true;

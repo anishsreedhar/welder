@@ -266,6 +266,9 @@ static ncnn::Layer* warpCreator(void*) { return new WarpLayer; }
 // ---------------------------------------------------------------- GPU
 
 static std::mutex g_gpuM;
+#if defined(_WIN32) && NCNN_VULKAN
+static void releaseGpu();
+#endif
 static int gpuDevice() {  // -1 = none
     static int dev = -2;
     std::lock_guard<std::mutex> l(g_gpuM);
@@ -274,7 +277,13 @@ static int gpuDevice() {  // -1 = none
         const char* off = std::getenv("STRATA_NO_GPU");
         if (!(off && *off && *off != '0')) {
 #if NCNN_VULKAN
-            if (ncnn::create_gpu_instance() == 0 && ncnn::get_gpu_count() > 0) dev = ncnn::get_default_gpu_index();
+            if (ncnn::create_gpu_instance() == 0) {
+#if defined(_WIN32)
+                // Release Vulkan resources while the Windows driver and ncnn DLLs are still loaded.
+                std::atexit(releaseGpu);
+#endif
+                if (ncnn::get_gpu_count() > 0) dev = ncnn::get_default_gpu_index();
+            }
 #endif
         }
     }
@@ -368,6 +377,14 @@ static std::map<std::string, std::shared_ptr<Model>>& modelCache() {
     static auto* m = new std::map<std::string, std::shared_ptr<Model>>;  // never destroyed (GPU teardown order)
     return *m;
 }
+
+#if defined(_WIN32) && NCNN_VULKAN
+static void releaseGpu() {
+    std::lock_guard<std::mutex> l(g_modelM);
+    modelCache().clear();
+    ncnn::destroy_gpu_instance();
+}
+#endif
 
 static FILE* openFile(const fs::path& p) {
 #if defined(_WIN32)
