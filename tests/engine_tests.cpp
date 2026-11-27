@@ -2921,11 +2921,21 @@ int main(int argc, char** argv) {
             std::string error;auto forward=color::convert(color::kDefaultConfig,color::kLinearRec709,space,&error),back=color::convert(color::kDefaultConfig,space,color::kLinearRec709,&error);CHECK(forward && back);if(!forward || !back)continue;
             float values[3]={.02f,.18f,.9f};forward->apply(values,1,3);back->apply(values,1,3);CHECK_NEAR(values[0],.02,1e-5);CHECK_NEAR(values[2],.9,1e-5);
         }
-        if(const char* python=std::getenv("STRATA_TEST_PYTHON")){
+        // Even a callback scheduled after output must be refused before any frame is written.
+        {
+            auto c = comp(json::array({{{"name","W"},{"type","Write"},{"params",{{"after_render","pass"},{"allow_write_python",true}}}}}));
+            Engine engine;
+            bool denied = false;
+            try { c->find("W")->beginExecute(engine, 1, 1); }
+            catch (const RenderError& e) { denied = std::string(e.what()).find("--allow-write-python") != std::string::npos; }
+            CHECK(denied);
+        }
+        if(std::getenv("STRATA_TEST_PYTHON")){
             const auto dir=tmp/("write-callbacks-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));std::filesystem::create_directories(dir);
             const auto log=(dir/"callbacks.txt").string();const auto code="with open("+json(log).dump()+", 'a') as f: f.write(event+' '+str(frame)+chr(10))";
-            auto c=comp(json::array({{{"name","C"},{"type","Constant"},{"params",{{"format",{4,4}}}}},{{"name","W"},{"type","Write"},{"inputs",{"C"}},{"params",{{"file",(dir/"out.####.exr").string()},{"callback_python",python},{"before_render",code},{"before_frame",code},{"after_frame",code},{"after_render",code},{"render_progress",code}}}}}));
-            Node* w=c->find("W");Engine e;w->beginExecute(e,1,2);w->execute(e,1);w->execute(e,2);w->finishExecute(true);
+            auto c=comp(json::array({{{"name","C"},{"type","Constant"},{"params",{{"format",{4,4}}}}},{{"name","W"},{"type","Write"},{"inputs",{"C"}},{"params",{{"file",(dir/"out.####.exr").string()},{"before_render",code},{"before_frame",code},{"after_frame",code},{"after_render",code},{"render_progress",code}}}}}));
+            EngineOptions options; options.allowWritePython = true;
+            Node* w=c->find("W");Engine e(options);w->beginExecute(e,1,2);w->execute(e,1);w->execute(e,2);w->finishExecute(true);
             std::ifstream f(log);const std::string content((std::istreambuf_iterator<char>(f)),{});CHECK(content.find("before_render")!=std::string::npos);CHECK(content.find("after_render")!=std::string::npos);CHECK(content.find("render_progress")!=std::string::npos);CHECK(std::count(content.begin(),content.end(),'\n')==8);
         }
     });

@@ -104,6 +104,7 @@ struct RenderRequest {
     bool proxy = false;                  // at the project's proxy scale
     bool frameServer = false;            // several background processes, frames split between them
     bool continueOnError = true;         // a failed frame is logged and the render goes on
+    bool allowWritePython = false;
 };
 
 struct BatchStatus {
