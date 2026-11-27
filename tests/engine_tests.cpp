@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iterator>
 #include <string>
 #include <vector>
@@ -8913,10 +8914,14 @@ Connections:  {
     test("SharedCache: a waiter whose build was cancelled elsewhere builds it itself (playback stuck on a frame)", [] {
         retime::SharedCache<int> cache(2);
         std::atomic<bool> aThrew{false};
+        std::promise<void> builderStarted, cancelBuilder;
+        auto started=builderStarted.get_future();
+        auto cancel=cancelBuilder.get_future().share();
         std::thread a([&] {
             try {
-                cache.get(7, [] {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                cache.get(7, [&] {
+                    builderStarted.set_value();
+                    cancel.wait();
                     throw RenderCancelled();  // the read-ahead engine building it was cancelled
                     return std::shared_ptr<const int>();
                 });
@@ -8924,11 +8929,13 @@ Connections:  {
                 aThrew = true;
             }
         });
-        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        started.wait();
+        auto waiter=std::async(std::launch::async,[&]{return cache.get(7, [] { return std::make_shared<const int>(42); });});
+        cancelBuilder.set_value();
         std::shared_ptr<const int> got;
         bool bThrew = false;
         try {
-            got = cache.get(7, [] { return std::make_shared<const int>(42); });
+            got = waiter.get();
         } catch (const RenderCancelled&) {
             bThrew = true;
         }
@@ -8939,15 +8946,23 @@ Connections:  {
         // a running build is never evicted by later finished ones
         retime::SharedCache<int> small(1);
         std::atomic<int> builds{0};
+        std::promise<void> slowStarted, releaseSlow;
+        auto slowReady=slowStarted.get_future();
+        auto release=releaseSlow.get_future().share();
         std::thread slow([&] {
             small.get(1, [&] {
                 ++builds;
-                std::this_thread::sleep_for(std::chrono::milliseconds(120));
+                slowStarted.set_value();
+                release.wait();
                 return std::make_shared<const int>(1);
             });
         });
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        // Keep key 1 genuinely in flight while key 2 is built and trimmed.
+        // Sleep-based ordering allowed a busy CI runner to finish key 1 first,
+        // making its later eviction legitimate and the assertion flaky.
+        slowReady.wait();
         small.get(2, [] { return std::make_shared<const int>(2); });
+        releaseSlow.set_value();
         small.get(1, [&] {
             ++builds;
             return std::make_shared<const int>(1);
