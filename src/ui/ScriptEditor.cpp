@@ -8,6 +8,7 @@
 #include "Panels.h"
 #include "imgui_internal.h"
 #include "PanelKit.h"
+#include "FontRendering.h"
 #include "ScriptRunner.h"
 #include "core/Brand.h"
 #include "ml/ML.h"
@@ -24,6 +25,8 @@ struct EditorState {
     bool dirty = false;          // not written to script_editor.py yet
     std::string file;            // the .py it was opened from / saved to ("" = the scratch buffer)
     uint64_t shownSerial = 0;
+    bool history=true;
+    bool wasRunning=false;
     bool follow = true;          // the output scrolls with new lines
 };
 EditorState& ed() {
@@ -72,7 +75,7 @@ void load() {
 
 void saveScratch() {
     EditorState& s = ed();
-    if (!s.dirty) return;
+    if (!s.dirty || !s.history) return;
     std::error_code ec;
     fs::create_directories(scratchPath().parent_path(), ec);
     std::ofstream f(scratchPath(), std::ios::binary);
@@ -129,7 +132,9 @@ void runBuffer(App& app, ImGuiID codeId) {
     saveScratch();
     std::string sel = selectedCode(codeId);
     const std::string label = ed().file.empty() ? "Script Editor" : fs::path(ed().file).filename().string();
-    r.runCode(app, sel.empty() ? ed().code : sel, sel.empty() ? label : label + " (selection)");
+    const std::string code=sel.empty()?ed().code:sel;
+    if(app.preferences.value("script_echo",false))app.message(code);
+    r.runCode(app,code,sel.empty()?label:label+" (selection)");
 }
 
 }  // namespace
@@ -140,8 +145,12 @@ void drawScriptEditor(App& app, UiState& ui) {
         saveScratch();
         return;
     }
+    ed().history=app.preferences.value("script_history",true);
+    if(!ed().history&&!ed().loaded){ed().loaded=true;ed().code=kExample;}
     load();
     EditorState& s = ed();
+    if(s.wasRunning && !r.running() && r.lastExitCode()==0 && app.preferences.value("script_clear_success",false)){s.code.clear();s.dirty=true;}
+    s.wasRunning=r.running();
     ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 46, ImGui::GetFontSize() * 34), ImGuiCond_FirstUseEver);
     bool open = true;
     if (!ImGui::Begin(ui.win("Script Editor").c_str(), &open)) {
@@ -219,11 +228,11 @@ void drawScriptEditor(App& app, UiState& ui) {
     // ---- the code, then the output
     const float avail = ImGui::GetContentRegionAvail().y;
     const float codeH = std::max(ImGui::GetTextLineHeight() * 4, avail * 0.58f);
-    if (theme().medium) ImGui::PushFont(theme().medium);
+    ImGui::PushFont(preferenceFont(app.preferences.value("script_font",std::string("Courier New"))),uiFontPixels(app.preferences.value("script_font_size",10.f),theme().uiScale));
     if (ImGui::InputTextMultiline("##code", s.code.data(), s.code.capacity() + 1, ImVec2(-1, codeH),
                                   ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_CallbackResize, resizeCb, &s.code))
         s.dirty = true;
-    if (theme().medium) ImGui::PopFont();
+    ImGui::PopFont();
     if (ImGui::IsItemDeactivated()) saveScratch();
     const bool codeFocused = ImGui::IsItemActive();
     if (codeFocused && !running && ImGui::GetIO().KeyCtrl &&
@@ -387,9 +396,9 @@ void editPythonButtons(App& app, Node* n) {
                     setButtons(app, n->name, bs);
                 }
             } else {
-                if (theme().medium) ImGui::PushFont(theme().medium);
+                ImGui::PushFont(preferenceFont(app.preferences.value("script_font",std::string("Courier New"))),uiFontPixels(app.preferences.value("script_font_size",10.f),theme().uiScale));
                 inputStr("##code", t, true, ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 5), ImGuiInputTextFlags_AllowTabInput);
-                if (theme().medium) ImGui::PopFont();
+                ImGui::PopFont();
                 if (ImGui::IsItemDeactivatedAfterEdit() && t != cur) {
                     bs[i]["code"] = t;
                     setButtons(app, n->name, bs);

@@ -590,6 +590,10 @@ struct UiState {
 };
 
 void drawMenuBar(App& app, UiState& ui);
+void drawPreferences(App& app, UiState& ui);
+ImFont* preferenceFont(const std::string& family,int style=0);
+void applyPreferenceTheme(const App& app);
+ImU32 preferenceColor(const char* key,ImU32 fallback);
 // Saved workspaces (#103): six slots, switched with Shift+F1-F6. Slot 1 is "Compositing", the default
 // layout until a layout is saved over it. Each is a layout .ini in <config>/workspaces.
 constexpr int kWorkspaceSlots = 6;

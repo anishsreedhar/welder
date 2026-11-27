@@ -12,8 +12,10 @@
 #include <cstring>
 
 #include "Panels.h"
+#include "PreferenceSettings.h"
 #include "imgui_internal.h"
 #include "SystemFonts.h"
+#include "FontRendering.h"
 
 namespace strata::ui {
 
@@ -53,7 +55,7 @@ void prepareNodeLabelFonts() {
         file.seekg(0); file.read(reinterpret_cast<char*>(bytes.data()), (std::streamsize)length);
         if (!file || !systemFontDataSupported(bytes, face.index)) { gLabelFailed.insert(request); continue; }
         void* data = IM_ALLOC(bytes.size()); std::memcpy(data, bytes.data(), bytes.size());
-        ImFontConfig config; config.FontNo = face.index;
+        ImFontConfig config=crispFontConfig(); config.FontNo = face.index;
         std::snprintf(config.Name, sizeof config.Name, "%s", request.first.c_str());
         ImFont* font = ImGui::GetIO().Fonts->AddFontFromMemoryTTF(data, (int)bytes.size(), 14, &config);
         if (font) {
@@ -64,6 +66,25 @@ void prepareNodeLabelFonts() {
     }
 }
 const std::vector<std::string>& nodeLabelFamilies(){return gLabelFamilies;}
+ImFont* preferenceFont(const std::string& family,int style) {
+    style=std::clamp(style,0,3);auto i=gLabelFonts.find(family);
+    if(i!=gLabelFonts.end() && i->second[style])return i->second[style];
+    if(gLabelFaces.count(family) && !gLabelFailed.count({family,style}))gLabelRequested.insert({family,style});
+    return theme().regular;
+}
+ImU32 preferenceColor(const char* key,ImU32 fallback) {
+    const auto& p=prefs::runtime();auto i=p.find(key);if(i==p.end()||!i->is_array()||i->size()!=4)return fallback;
+    return ImGui::ColorConvertFloat4ToU32(ImVec4((*i)[0],(*i)[1],(*i)[2],(*i)[3]));
+}
+void applyPreferenceTheme(const App& app) {
+    const auto& p=app.preferences;if(p.empty())return;auto& c=ImGui::GetStyle().Colors;
+    auto set=[&](ImGuiCol id,const char* key){c[id]=ImGui::ColorConvertU32ToFloat4(preferenceColor(key,ImGui::ColorConvertFloat4ToU32(c[id])));};
+    set(ImGuiCol_WindowBg,"ui_background");set(ImGuiCol_ChildBg,"ui_background");set(ImGuiCol_PopupBg,"ui_base");
+    set(ImGuiCol_TitleBg,"ui_base");set(ImGuiCol_Text,"ui_label");set(ImGuiCol_Button,"ui_button");set(ImGuiCol_CheckMark,"ui_highlight");
+    set(ImGuiCol_SliderGrabActive,"ui_highlight");set(ImGuiCol_NavHighlight,"ui_highlight");
+    theme().canvas=preferenceColor("graph_color",theme().canvas);theme().tileText=preferenceColor("node_text",theme().tileText);
+    theme().text=preferenceColor("ui_label",theme().text);theme().accent=preferenceColor("ui_highlight",theme().accent);
+}
 ImFont* timelineReferenceFont(){
     const auto it=gLabelFonts.find("Verdana");
     if(it!=gLabelFonts.end() && it->second[0])return it->second[0];
@@ -71,8 +92,8 @@ ImFont* timelineReferenceFont(){
     return theme().regular;
 }
 ImFont* nodeLabelFont(const Node* n) {
-    const std::string family=n->ui.value("note_font",std::string("Verdana"));
-    const int style = (n->ui.value("note_bold",false)?1:0)+(n->ui.value("note_italic",false)?2:0);
+    const std::string family=n->ui.value("note_font",prefs::runtime().value("graph_font",std::string("Verdana")));
+    const int style = (n->ui.value("note_bold",prefs::runtime().value("graph_bold",false))?1:0)+(n->ui.value("note_italic",prefs::runtime().value("graph_italic",false))?2:0);
     auto it=gLabelFonts.find(family);
     if(it!=gLabelFonts.end() && it->second[style])return it->second[style];
     if (gLabelFaces.count(family) && !gLabelFailed.count({family,style})) gLabelRequested.insert({family,style});

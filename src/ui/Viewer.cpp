@@ -819,6 +819,7 @@ static bool drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
     ImGui::Begin(((vn?vn->name:std::string("Viewer1"))+"###"+winName).c_str(), &open, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
     if (!open) {
+        if(vn && app.preferences.value("viewer_delete_on_close",false)){const std::string name=vn->name;app.checkpoint();app.edit([name](Comp& c){if(auto* node=c.find(name))c.removeNode(node);});}
         ImGui::End();
         return false;
     }
@@ -872,8 +873,8 @@ static bool drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
         // plate and comp can be flipped at the same spot; only the very first image fits, or one
         // that would land entirely off screen (checked once the viewport size is known).
         if (firstOfNode && r.image) {
-            if (!hadImage) v.fitPending = true;
-            else v.checkOnScreen = true;
+            if (!hadImage) v.fitPending = !app.preferences.value("viewer_prevent_autozoom",false);
+            else v.checkOnScreen = !app.preferences.value("viewer_prevent_autozoom",false);
             if (std::getenv("STRATA_DEBUG_AHEAD"))
                 std::fprintf(stderr, "refit: %s %dx%d -> %s %dx%d (frame %g)\n", v.res.node.c_str(), v.res.format.width,
                              v.res.format.height, r.node.c_str(), r.format.width, r.format.height, r.frame);
@@ -1819,7 +1820,7 @@ static void startFlipbook(App& app, UiState& ui, int first, int last) {
     fb.gamma = ui.viewer.gamma;
     fb.matte = ui.viewer.matte;
     fb.display.alphaChannel = ui.viewer.alphaChannel;
-    fb.display.checkerboard = ui.viewer.checkerboard;
+    fb.display.checkerboard = app.preferences.value("flipbook_background",std::string("black"))=="checkerboard";
     fb.display.clippingWarning = ui.viewer.clippingWarning;
     fb.scale = ui.viewer.reqScale > 0 ? ui.viewer.reqScale : 1.0;
     const auto& image = ui.viewer.res;
@@ -2071,7 +2072,8 @@ void drawViewer(App& app, UiState& ui) {
         if (tabClosed(vn)) continue;
         const std::string title = vn->name + "###viewer_" + vn->name;
         if (!ImGui::FindWindowByName(title.c_str()) || ui.newViewer == vn->name) {  // first time: a tab beside the main viewer
-            if (mainWin && mainWin->DockId) ImGui::SetNextWindowDockID(mainWin->DockId, ImGuiCond_Always);
+            if(app.preferences.value("viewer_own_window",false))ImGui::SetNextWindowDockID(0,ImGuiCond_Always);
+            else if (mainWin && mainWin->DockId) ImGui::SetNextWindowDockID(mainWin->DockId, ImGuiCond_Always);
             ImGui::SetNextWindowFocus();
             if (ui.newViewer == vn->name) ui.newViewer.clear();
         }

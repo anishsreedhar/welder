@@ -288,6 +288,7 @@ void drawCurveEditor(App& app, UiState& ui) {
         if (cs.empty()) continue;
         groups.push_back({n, cs});
         all.insert(all.end(), cs.begin(), cs.end());
+        if(all.size()>=(size_t)app.preferences.value("curves_visible",100))break;
     }
     // drop selections of keys that no longer exist
     for (auto it = st.sel.begin(); it != st.sel.end();) {
@@ -413,7 +414,7 @@ void drawCurveEditor(App& app, UiState& ui) {
     auto V = [&](float y) { return st.v0 + (graphBottom - y) / (sz.y - rulerH) * (st.v1 - st.v0); };
 
     dl->PushClipRect(p0, p1, true);
-    dl->AddRectFilled(p0, p1, IM_COL32(21, 24, 27, 255));
+    dl->AddRectFilled(p0, p1, preferenceColor("curve_background",IM_COL32(21,24,27,255)));
     dl->AddRectFilled(ImVec2(p0.x, graphBottom), p1, IM_COL32(34, 37, 41, 255));
     // grid
     double fs = niceStep(st.f1 - st.f0, sz.x, 70), vs = niceStep(st.v1 - st.v0, sz.y, 40);
@@ -434,7 +435,7 @@ void drawCurveEditor(App& app, UiState& ui) {
     }
     // ruler (click / drag to change frame)
     const float playhead = X(app.frame);
-    const ImU32 playheadColor = IM_COL32(245, 159, 49, 255);
+    const ImU32 playheadColor = preferenceColor("curve_current",IM_COL32(245,159,49,255));
     dl->AddLine(ImVec2(playhead, p0.y), ImVec2(playhead, p1.y), playheadColor);
     dl->AddTriangleFilled(ImVec2(playhead, graphBottom), ImVec2(playhead - 4, graphBottom + 7),
                           ImVec2(playhead + 4, graphBottom + 7), playheadColor);

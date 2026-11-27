@@ -28,6 +28,7 @@
 #include <utility>
 
 #include "GL.h"
+#include "FontRendering.h"
 #include "Panels.h"
 #include "McpService.h"
 #include "ScriptRunner.h"
@@ -521,7 +522,9 @@ int main(int argc, char** argv) {
         return ok ? 0 : 1;
     }
     // The splash stays up while plug-ins are found and the file loads (not for scripted screenshots).
-    const bool useSplash = opt.screenshot.empty() && !opt.idScan && !safeMode && !envFlag("WELDER_NO_SPLASH") &&
+    bool splashSetting=true;
+    try {std::ifstream saved(fs::path(configDir())/"settings.json");if(saved){auto j=json::parse(saved);splashSetting=j.value("preferences",json::object()).value("splash_enabled",true);}}catch(...){}
+    const bool useSplash = splashSetting && opt.screenshot.empty() && !opt.idScan && !safeMode && !envFlag("WELDER_NO_SPLASH") &&
                            !envFlag("STRATA_NO_SPLASH");
     if (useSplash) splash::show();
     registerBuiltinNodes();
@@ -604,7 +607,7 @@ int main(int argc, char** argv) {
 #endif
     // settings (the disk cache size); screenshots run without a disk cache
     app.settingsPath = (fs::path(configDir()) / "settings.json").string();
-    if (opt.screenshot.empty()) app.loadSettings();
+    if (opt.screenshot.empty() || envFlag("STRATA_TEST_LOAD_PREFS")) app.loadSettings();
     if (const char* dc = std::getenv("STRATA_TEST_DISKCACHE"); dc && *dc && !opt.screenshot.empty()) {  // tests: a disk cache there
         app.setCacheDir(dc);
         app.setDiskCacheGB(1);
@@ -627,20 +630,20 @@ int main(int argc, char** argv) {
         if (app.uiScaleSetting > 0) scale = std::clamp(app.uiScaleSetting, 0.5f, 3.0f);
         else if (const char* e = std::getenv("WELDER_UI_SCALE"); e && std::atof(e) > 0) scale = std::clamp((float)std::atof(e), 0.5f, 3.0f);
     }
+    configureFontRendering(*io.Fonts);
     // Roboto: Regular for labels and menus (the default font), Medium for values, names and
     // headers, a small Medium for the uppercase section headers
     if (!font.empty()) {
         const std::string regular = (fs::path(font).parent_path() / "Roboto-Regular.ttf").string();
         const bool haveRegular = fs::exists(regular);
-        ImFontConfig cfg;
-        cfg.OversampleH = 2;
+        ImFontConfig cfg=crispFontConfig();
         theme().regular = io.Fonts->AddFontFromFileTTF(haveRegular ? regular.c_str() : font.c_str(), 13.f * scale, &cfg);
         theme().medium = io.Fonts->AddFontFromFileTTF(font.c_str(), 13.f * scale, &cfg);
         theme().small = io.Fonts->AddFontFromFileTTF(font.c_str(), 11.5f * scale, &cfg);
     }
 #ifdef _WIN32
     if(fs::exists("C:/Windows/Fonts/arial.ttf")) {
-        ImFontConfig cfg;cfg.OversampleH=2;cfg.OversampleV=2;
+        ImFontConfig cfg=crispFontConfig();
         theme().regular=io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/arial.ttf",13.f*scale,&cfg);
         theme().medium=io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/arial.ttf",13.f*scale,&cfg);
         io.FontDefault=theme().regular;
@@ -649,6 +652,7 @@ int main(int argc, char** argv) {
     theme().uiScale = scale;
     loadNodeLabelFonts();
     applyTheme(app.themeName);
+    applyPreferenceTheme(app);
 
     ImGui_ImplGlfw_InitForOpenGL(win, true);
     ImGui_ImplOpenGL3_Init("#version 330");
@@ -658,8 +662,10 @@ int main(int argc, char** argv) {
 
     splash::pump();
     UiState ui;
+    if(opt.screenshot.empty())ui.loadWorkspace=app.preferences.value("startup_workspace",1);
+    ui.renderFrameServer=app.preferences.value("frame_server",false);
     PaneMenu paneMenu(ui);
-    if (opt.screenshot.empty()) ui.lastCrash = crash::takePreviousReport();
+    if (opt.screenshot.empty() && !app.preferences.value("suppress_crash_report",false)) ui.lastCrash = crash::takePreviousReport();
     if (envFlag("STRATA_TEST_PERF")) {  // screenshots: the Performance panel open
         ui.showPerf = true;
         app.setProfiling(true);
@@ -752,7 +758,18 @@ int main(int argc, char** argv) {
         };
         auto frameStart = std::chrono::steady_clock::now();
 
+        static bool wasFocused=true,resumePrecache=false;
+        const bool focused=glfwGetWindowAttrib(win,GLFW_FOCUSED)!=0;
+        if(wasFocused && !focused) {
+            if(app.preferences.value("clear_background_cache",false))app.clearCaches();
+            if(app.preferences.value("pause_background_cache",false)){resumePrecache=app.precaching();app.setPrecache(false);}
+        }
+        if(!wasFocused && focused && resumePrecache){app.setPrecache(true);resumePrecache=false;}wasFocused=focused;
         prepareNodeLabelFonts();
+        if(!app.preferences.empty()) {
+            io.FontDefault=preferenceFont(app.preferences.value("ui_font",std::string("Verdana")),(app.preferences.value("ui_font_bold",false)?1:0)+(app.preferences.value("ui_font_italic",false)?2:0));
+            ImGui::GetStyle().FontSizeBase=uiFontPixels(app.preferences.value("ui_font_size",11.f),theme().uiScale);
+        }
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         // Screenshot regression input is applied after GLFW's physical mouse polling.
@@ -786,6 +803,7 @@ int main(int argc, char** argv) {
         }
         if (!ui.pendingTheme.empty()) {  // Preferences > Theme
             applyTheme(ui.pendingTheme);
+            applyPreferenceTheme(app);
             ui.pendingTheme.clear();
         }
         if (ui.loadWorkspace) {  // Workspace > a saved workspace (Shift+F1-F6): its layout, between frames (#103)

@@ -17,6 +17,8 @@
 #include "App.h"
 #include "GL.h"
 #include "Panels.h"
+#include "PreferenceSettings.h"
+#include <sstream>
 #include "core/NetPath.h"
 #include "nodes/NodeUtils.h"
 #include "nodes/Keyer.h"
@@ -33,7 +35,7 @@ namespace strata::ui {
 
 namespace {
 
-constexpr float kNodeW = 100, kNodeH = 22, kNodeHSub = 34, kDot = 12, kStub = 30;
+float kNodeW = 100, kNodeH = 22, kNodeHSub = 34, kDot = 12, kStub = 30;
 
 bool hasPos(const Node* n) { return n->ui.contains("x") && n->ui.contains("y"); }
 ImVec2 pos(const Node* n) {
@@ -79,6 +81,7 @@ std::string expandLabel(const Node* n, std::string t) {
 
 std::string subtitleOnly(const Node* n);
 std::string nodeTitle(const Node* n) {
+    if(!prefs::runtime().value("graph_autolabel",true))return n->name;
     if (n->type == "Keyer") return n->name + " (" + n->params.str("operation", "luminance key") + ")";
     return n->type == "Merge" ? n->name + " (" + n->params.str("operation", "over") + ")" : n->name;
 }
@@ -183,7 +186,7 @@ std::string subtitleOnly(const Node* n) {
 bool hexagonal(const Node* n) { return n->type == "Viewer" || n->type == "FrameHold" || n->type == "TimeOffset"; }
 
 // the classic postage stamp: Reads show a thumbnail above their name (Node tab: postage stamp).
-bool hasStamp(const Node* n) { return n->ui.value("postage_stamp", n->type == "Read") && !isAnnotation(n) && n->type!="Dot" && n->type!="Viewer"; }
+bool hasStamp(const Node* n) { return prefs::runtime().value("stamp_mode",std::string("Current frame"))!="Off" && n->ui.value("postage_stamp", n->type == "Read") && !isAnnotation(n) && n->type!="Dot" && n->type!="Viewer"; }
 constexpr float kStampW = 100;
 float stampHeight(const Node* n) { return hasStamp(n) ? 64.0f : 0.0f; }
 
@@ -251,7 +254,7 @@ ImVec2 size(const Node* n) {
     if (hasStamp(n) && n->type=="Read") return evenSize(kStampW, 90.0f + (subtitle(n).empty() ? 0.0f : 16.0f));
     if (n->type == "Viewer") return evenSize(std::max(kNodeW, ImGui::CalcTextSize(n->name.c_str()).x + 28), kNodeH);
     // Graph units are pixels at zoom 1, so measure the name at the base font size.
-    const std::string sizingTitle = n->type == "Keyer" ? n->name : nodeTitle(n);
+    const std::string sizingTitle = !prefs::runtime().value("graph_autolabel",true)?n->name:n->type == "Keyer" ? n->name : nodeTitle(n);
     float w = std::max(kNodeW, std::ceil(ImGui::CalcTextSize(sizingTitle.c_str()).x / 10.0f) * 10.0f + 20.0f);
     const float stamp = stampHeight(n);
     if (stamp > 0) w = std::max(w, kStampW + 8);
@@ -333,9 +336,15 @@ ImU32 nodeColor(const Node* n) {
         auto c = n->params.vec<4>("tile_color", 0, {0.5, 0.5, 0.5, 1});
         return ImGui::ColorConvertFloat4ToU32(ImVec4((float)c[0], (float)c[1], (float)c[2], 1));
     }
+    const std::string category = categoryOf(n->type);
+    const auto& pref=prefs::runtime();
+    if(!pref.value("node_autocolor",true))return preferenceColor("node_other",theme().tile);
+    for(int pass=0;pass<2;++pass)for(const auto& row:pref["node_colors"]) {
+        const std::string match=row.value("match",std::string());std::istringstream words(match);std::string word;
+        while(words>>word)if(word==(pass==0?n->type:category)){auto c=row.value("color",json::array({.5,.5,.5,1.}));return ImGui::ColorConvertFloat4ToU32(ImVec4(c[0],c[1],c[2],c[3]));}
+    }
     if (n->type == "Viewer" || n->type == "Read") return IM_COL32(195, 195, 195, 255);
     if (n->type == "Write") return IM_COL32(180, 190, 0, 255);
-    const std::string category = categoryOf(n->type);
     if (category == "Color") return IM_COL32(125, 158, 207, 255);
     if (category == "Filter") return IM_COL32(204, 122, 66, 255);
     if (category == "Transform") return IM_COL32(147, 99, 151, 255);
@@ -603,7 +612,7 @@ void createNode(App& app, UiState& ui, const std::string& type, const json& para
                 for (Node* o : c.outputsOf(s))
                     for (size_t k = 0; k < o->inputs.size(); ++k)
                         if (o->inputs[k] == s) c.setInput(o, (int)k, n);
-            c.setInput(n, 0, s);
+            c.setInput(n, type=="Merge" && app.preferences.value("merge_connect_a",true)?1:0, s);
         }
         app.selection = {n->name};
         app.openPanel(n->name);
@@ -793,7 +802,7 @@ bool graphShake(GraphState::Shake& s, ImVec2 delta, double now) {
         if (std::fabs(d) < 0.5f) return;
         const int sg = d > 0 ? 1 : -1;
         if (sg != sign) {
-            if (sign != 0 && run >= 50 && now - legStart <= 0.3) s.flips.push_back(now);
+            if (sign != 0 && run >= 50*3/std::max(.5,prefs::runtime().value("shake_sensitivity",3.0)) && now - legStart <= 0.3) s.flips.push_back(now);
             sign = sg;
             run = 0;
             legStart = now;
@@ -1817,6 +1826,8 @@ static void frameNodes(App& app, UiState& ui, ImVec2 winSize) {
 // ------------------------------------------------------------------ panel
 
 void drawNodeGraph(App& app, UiState& ui) {
+    kNodeW=app.preferences.value("tile_width",100.f);kNodeH=app.preferences.value("tile_height",22.f);kNodeHSub=kNodeH+12;
+    kDot=12*app.preferences.value("dot_size",1.f);kStub=app.preferences.value("top_arrow_length",30.f);
     GraphState& g = ui.graph;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ui.beginPanel("Node Graph", ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -1871,9 +1882,12 @@ void drawNodeGraph(App& app, UiState& ui) {
     g.canvasSize = sz;
     g.hovered = hovered;
 
+    if(app.preferences.value("panels_match_selection",false)) {
+        for(const auto& name:app.panels)if(app.selection.count(name))app.panelsCollapsed.erase(name);else app.panelsCollapsed.insert(name);
+    }
     // Grid: dots (a coarser step when zoomed out, so there are never too many)
-    if (theme().name != "graphite") {
-        float step = 25 * g.zoom;
+    if (app.preferences.value("show_grid",theme().name != "graphite")) {
+        float step = std::max(1.f,app.preferences.value("grid_width",25.f)) * g.zoom;
         while (step < 14) step *= 2;
         float sx = std::fmod(-g.pan.x * g.zoom, step), sy = std::fmod(-g.pan.y * g.zoom, step);
         if (sx < 0) sx += step;
@@ -2012,7 +2026,7 @@ void drawNodeGraph(App& app, UiState& ui) {
         if (len < 1e-3f) return;
         d.x /= len;
         d.y /= len;
-        float a = 9 * std::max(0.6f, g.zoom), w = 4.5f * std::max(0.6f, g.zoom);
+        float a = app.preferences.value("arrow_head_length",9.f) * std::max(0.6f, g.zoom), w = app.preferences.value("arrow_head_width",9.f)*.5f * std::max(0.6f, g.zoom);
         ImVec2 base(tip.x - d.x * a, tip.y - d.y * a);
         dl->AddTriangleFilled(tip, ImVec2(base.x - d.y * w, base.y + d.x * w), ImVec2(base.x + d.y * w, base.y - d.x * w), col);
     };
@@ -2148,7 +2162,7 @@ void drawNodeGraph(App& app, UiState& ui) {
             Node* src = n->input(i);
             std::string label = n->inputName(i);
             bool isMask = label == "mask";
-            const ImU32 col = IM_COL32(5, 5, 5, 255);
+            const ImU32 col = preferenceColor(dir.x<-.5f?"arrow_right":dir.x>.5f?"arrow_left":dir.y<0?"arrow_down":"arrow_up",IM_COL32(5,5,5,255));
             if (g.drag == GraphState::Drag::FromInput && g.dragNode == n->name && g.dragInput == i) continue;
             Node* from = src && hiddenIn.count(src) ? hiddenIn[src] : src;  // on a collapsed backdrop: from the backdrop
             if (src && !vis(from)) src = nullptr;  // (connections across levels aren't drawn)
@@ -2178,7 +2192,7 @@ void drawNodeGraph(App& app, UiState& ui) {
                 pipes.push_back({src, n, i, a, b, pts});
                 if (n->type == "Viewer") {
                     for (size_t k = 1; k < pts.size(); ++k) dashedPipe(pts[k - 1], pts[k], col);
-                } else dl->AddPolyline(pts.data(), (int)pts.size(), col, 0, std::max(1.3f, 1.8f * g.zoom));
+                } else dl->AddPolyline(pts.data(), (int)pts.size(), col, 0, std::max(.5f,app.preferences.value("arrow_width",2.f)*g.zoom));
                 const ImVec2 pb = pts[pts.size() - 2];  // the last corner (or a): the arrow and the grab point sit on the last stretch
                 arrow(b, pb, col);
                 ImVec2 d(b.x - pb.x, b.y - pb.y);
@@ -2202,7 +2216,7 @@ void drawNodeGraph(App& app, UiState& ui) {
                 // Keep unused side arrows visible and draggable, but don't label
                 // a spare Merge input until it is actually connected.
                 const float side = isMask ? 1.f : -1.f;
-                const float t = 6 * std::max(0.6f, g.zoom);
+                const float t = app.preferences.value("side_arrow_length",4.f)*1.5f * std::max(0.6f, g.zoom);
                 ImVec2 b = S(ip);
                 ImVec2 tip(b.x + side * g.zoom, b.y), back(b.x + side * t * 1.3f, b.y);
                 dl->AddTriangleFilled(tip, ImVec2(back.x, back.y - t * 0.75f), ImVec2(back.x, back.y + t * 0.75f), app.selection.count(n->name)?IM_COL32(255,190,92,255):IM_COL32(5,5,5,255));
@@ -2233,7 +2247,7 @@ void drawNodeGraph(App& app, UiState& ui) {
                 ImVec2 end(ip.x + dir.x * stub, ip.y + dir.y * stub);
                 ImVec2 a = S(end), b = S(ip);
                 ImU32 sc = app.selection.count(n->name)?IM_COL32(255,190,92,255):IM_COL32(5,5,5,255);
-                dl->AddLine(a, b, sc, std::max(1.3f, 1.8f * g.zoom));
+                dl->AddLine(a, b, sc, std::max(.5f,app.preferences.value("arrow_width",2.f)*g.zoom));
                 arrow(b, a, sc);
                 handles.push_back({n, i, a});
                 // (a mask's or a spare A2's name only close up: it would sit on its neighbour's)
@@ -2347,12 +2361,12 @@ void drawNodeGraph(App& app, UiState& ui) {
         if (disabled) bc = ImVec4(.48f, .48f, .48f, 1);
         // Selection keeps a blue-gray frame around the orange inset.
         const ImU32 selectionFrame=IM_COL32(142,160,188,255);
-        const ImU32 selectionFill=IM_COL32(255,190,92,255);
-        const ImU32 topColor = ImGui::GetColorU32(ImVec4(bc.x + (1 - bc.x) * .20f, bc.y + (1 - bc.y) * .20f, bc.z + (1 - bc.z) * .20f, 1));
-        const ImU32 bottomColor = ImGui::GetColorU32(ImVec4(bc.x * .72f, bc.y * .72f, bc.z * .72f, 1));
+        const ImU32 selectionFill=preferenceColor("node_selected",IM_COL32(255,190,92,255));
+        const ImU32 topColor = !app.preferences.value("node_shade",true)?base:ImGui::GetColorU32(ImVec4(bc.x + (1 - bc.x) * .20f, bc.y + (1 - bc.y) * .20f, bc.z + (1 - bc.z) * .20f, 1));
+        const ImU32 bottomColor = !app.preferences.value("node_shade",true)?base:ImGui::GetColorU32(ImVec4(bc.x * .72f, bc.y * .72f, bc.z * .72f, 1));
         const ImU32 edge = IM_COL32(8, 8, 8, 255);
         const float rad = 0;
-        const ImU32 textColor = !sel && (.2126f * bc.x + .7152f * bc.y + .0722f * bc.z) < .18f
+        const ImU32 textColor = app.preferences.contains("node_text")?preferenceColor("node_text",IM_COL32(5,5,5,255)):!sel && (.2126f * bc.x + .7152f * bc.y + .0722f * bc.z) < .18f
                                    ? IM_COL32(240, 240, 240, 255) : IM_COL32(5, 5, 5, 255);
         if (hexagonal(n)) {
             const float in = (p1.y - p0.y) * (n->type == "Viewer" ? .22f : .5f);
@@ -2602,6 +2616,7 @@ void drawNodeGraph(App& app, UiState& ui) {
                         graphToggleBackdrop(app, hit);
                         g.drag = GraphState::Drag::None;
                     } else if (hit->type == "Group" && io.KeyCtrl) graphEnter(app, ui);
+                    else if(hit->type=="Viewer" && !app.preferences.value("viewer_double_click_settings",true))activateViewer(app,ui,hit->name);
                     else app.openPanel(hit->name);
                 }
             } else {
@@ -2715,7 +2730,7 @@ void drawNodeGraph(App& app, UiState& ui) {
             // under / over another's (x), or level with one (y) - when it comes within a few pixels;
             // drag on past and it lets go. Connected nodes first. Ctrl held: no snapping.
             g.snapX = g.snapY = std::numeric_limits<float>::quiet_NaN();
-            if (g.moved && !io.KeyCtrl) {
+            if (g.moved && !io.KeyCtrl && app.preferences.value("snap_node",true)) {
                 Node* lead = nullptr;
                 const ImVec2 start = G(g.dragStartScreen);
                 for (auto& [name, p] : g.moveOrig)
@@ -2773,7 +2788,7 @@ void drawNodeGraph(App& app, UiState& ui) {
                     // the closest within reach on each axis; pipes and linked nodes reach further
                     float bestX = 1e9f, bestY = 1e9f, sx = 0, sy = 0;
                     for (const Target& t : targets) {
-                        const float thr = (t.linked ? 16.0f : 10.0f) / g.zoom;
+                        const float thr = app.preferences.value("snap_threshold",7.f)*(t.linked?1.6f:1.f) / g.zoom;
                         const float dd = t.v - (t.xAxis ? cx : cy);
                         const float score = std::fabs(dd) - (t.linked ? 6.0f / g.zoom : 0.0f);  // linked wins a near-tie
                         if (std::fabs(dd) >= thr) continue;
@@ -2803,11 +2818,15 @@ void drawNodeGraph(App& app, UiState& ui) {
                     }
                 }
             }
+            if(g.moved && !io.KeyCtrl && app.preferences.value("snap_grid",false) && !g.moveOrig.empty()) {
+                const ImVec2 anchor=g.moveOrig.begin()->second;const float gx=app.preferences.value("grid_width",110.f),gy=app.preferences.value("grid_height",24.f);
+                d.x=std::round((anchor.x+d.x)/gx)*gx-anchor.x;d.y=std::round((anchor.y+d.y)/gy)*gy-anchor.y;
+            }
             if (g.moved)
                 for (auto& [name, p] : g.moveOrig)
                     if (Node* m = app.node(name)) setPos(m, ImVec2(p.x + d.x, p.y + d.y));
             // shaken (4+ quick back-and-forths): the nodes come out of their pipes, the chain closes up
-            if (g.moved && !g.shake.done && graphShake(g.shake, io.MouseDelta, ImGui::GetTime())) {
+            if (g.moved && !g.shake.done && app.preferences.value("shake_disconnect",true) && graphShake(g.shake, io.MouseDelta, ImGui::GetTime())) {
                 g.shake.done = true;
                 std::set<std::string> names;
                 for (auto& [name, p] : g.moveOrig)

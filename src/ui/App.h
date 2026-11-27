@@ -280,6 +280,9 @@ public:
     // The cache folder (Preferences; "" = the default): the disk cache, Blender, ML jobs, temporary files.
     std::string cacheDirSetting;
     void setCacheDir(const std::string& dir);
+    json preferences = json::object();
+    json preferenceSnapshot() const;
+    void applyPreferences(const json& values);
     void loadSettings();
     void saveSettings();
     // ---- is there a newer Welder? (#85; Shell.cpp asks GitHub at most every 12 hours, Help > Check for Updates any time)
@@ -314,6 +317,7 @@ public:
     // changes away, removes it. Opening a script with a newer autosave (or starting with an untitled
     // one left over) sets `recovery`, and the UI offers it.
     double autosaveSecs = 30;
+    double lastUserBusy_ = 0;
     void tickAutosave(bool userBusy);  // each UI frame; userBusy: a drag is under way (wait for it)
     void discardAutosave();            // the current comp's (its changes were thrown away)
     struct Recovery {

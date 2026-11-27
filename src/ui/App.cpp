@@ -1,5 +1,6 @@
 #include "core/Crash.h"
 #include "App.h"
+#include "PreferenceSettings.h"
 
 #include <cstring>
 #include "core/Brand.h"
@@ -386,11 +387,15 @@ ImagePtr App::renderCached(Engine& e, Node* n, double f, const Box& show, bool* 
     return img;
 }
 
+static void applyPathSubstitutions(const json& p);
 void App::loadSettings() {
+    preferences=prefs::defaults();
     try {
         std::ifstream in(settingsPath);
         if (in) {
             json j = json::parse(in);
+            preferences=prefs::normalize(j.value("preferences",json::object()));
+            maxPanels=preferences.value("max_panels",10);
             diskCacheGB = j.value("disk_cache_gb", diskCacheGB);
             pythonInterpreter = j.value("python_interpreter", pythonInterpreter);
             runInitScript = j.value("python_run_init", runInitScript);
@@ -438,6 +443,8 @@ void App::loadSettings() {
     if (const char* e = std::getenv("STRATA_DISK_CACHE_GB")) gb = std::atof(e);
     setDiskCacheGB(gb);
     setPlaybackCacheGB(playbackCacheGB);
+    prefs::runtime()=preferenceSnapshot();
+    applyPathSubstitutions(prefs::runtime());
 }
 
 void App::setPlaybackCacheGB(double gb) {
@@ -454,6 +461,7 @@ void App::saveSettings() {
         if (in) j = json::parse(in);
     } catch (...) {
     }
+    j["preferences"] = preferenceSnapshot();
     j["disk_cache_gb"] = diskCacheGB;
     j["python_interpreter"] = pythonInterpreter;
     j["python_run_init"] = runInitScript;
@@ -485,6 +493,51 @@ void App::saveSettings() {
     if (cacheDirSetting.empty()) j.erase("cache_dir");
     else j["cache_dir"] = cacheDirSetting;
     writeFileAtomic(settingsPath, j.dump(2), nullptr);
+}
+
+static void applyPathSubstitutions(const json& p) {
+#ifdef _WIN32
+    const char* target="windows";
+#elif defined(__APPLE__)
+    const char* target="osx";
+#else
+    const char* target="linux";
+#endif
+    std::vector<std::pair<std::string,std::string>> mappings;
+    for(const auto& row:p["path_substitutions"]) {
+        const std::string dest=row.value(target,std::string());if(dest.empty())continue;
+        for(const char* source:{"windows","osx","linux"})if(std::string(source)!=target) {
+            const std::string from=row.value(source,std::string());if(!from.empty())mappings.emplace_back(from,dest);
+        }
+    }
+    netpath::setSubstitutions(std::move(mappings));
+}
+
+json App::preferenceSnapshot() const {
+    json p=prefs::normalize(preferences);
+    p["autosave_force"]=autosaveSecs;p["disk_cache_gb"]=diskCacheGB;p["playback_cache_gb"]=playbackCacheGB;
+    p["cache_dir"]=cacheDirSetting;p["max_panels"]=maxPanels;p["theme"]=themeName;
+    p["ui_scale"]=uiScaleSetting;p["scale_mode"]=uiScaleSetting>0?"manual":"auto";
+    p["python_interpreter"]=pythonInterpreter;p["python_run_init"]=runInitScript;
+    p["mcp_enabled"]=mcpEnabled;p["mcp_port"]=mcpPort;p["mcp_remote"]=mcpAllowRemote;
+    p["gpu_enabled"]=gpu::enabled();p["check_updates"]=checkUpdates;p["unc_paths"]=uncPaths;
+    p["ask_match_project"]=askMatchProject;p["right_angle_pipes"]=rightAnglePipes;p["alt_drag_cuts"]=altDragCuts;
+    p["middle_drag_zooms"]=middleDragZooms;p["roto_show_points"]=rotoShowPoints;return p;
+}
+void App::applyPreferences(const json& values) {
+    preferences=prefs::normalize(values);prefs::runtime()=preferences;const auto& p=preferences;
+    applyPathSubstitutions(p);
+    autosaveSecs=p["autosave_force"];maxPanels=p["max_panels"];
+    themeName=p["theme"];themeChosen=true;uiScaleSetting=p["scale_mode"]=="manual"?std::clamp(p["ui_scale"].get<float>(),.5f,3.f):0;
+    pythonInterpreter=p["python_interpreter"];runInitScript=p["python_run_init"];
+    mcpEnabled=p["mcp_enabled"];mcpPort=p["mcp_port"];mcpAllowRemote=p["mcp_remote"];
+    checkUpdates=p["check_updates"];uncPaths=p["unc_paths"];netpath::enabled()=uncPaths;
+    askMatchProject=p["ask_match_project"];rightAnglePipes=p["right_angle_pipes"];altDragCuts=p["alt_drag_cuts"];middleDragZooms=p["middle_drag_zooms"];
+    rotoShowPoints=p["roto_show_points"];
+    gpu::setEnabled(p["gpu_enabled"].get<bool>()&&p["input_gpu"].get<bool>());
+    diskCacheGB=p["disk_cache_gb"];setDiskCacheGB(diskCacheGB);setPlaybackCacheGB(p["playback_cache_gb"]);
+    if(cacheDirSetting!=p["cache_dir"].get<std::string>())setCacheDir(p["cache_dir"]);
+    while((int)panels.size()>maxPanels)panels.pop_back();saveSettings();clearCaches();
 }
 
 void App::setCacheDir(const std::string& dir) {
@@ -586,14 +639,14 @@ void App::restore(const std::string& snap) {
 
 void App::checkpoint() {
     undo_.push_back(snapshot());
-    if (undo_.size() > 100) undo_.erase(undo_.begin());
+    if (undo_.size() > (size_t)preferences.value("undo_size",100)) undo_.erase(undo_.begin());
     redo_.clear();
     dirty = true;
 }
 
 void App::pushUndoState(const std::string& before) {
     undo_.push_back(before);
-    if (undo_.size() > 100) undo_.erase(undo_.begin());
+    if (undo_.size() > (size_t)preferences.value("undo_size",100)) undo_.erase(undo_.begin());
     redo_.clear();
     dirty = true;
 }
@@ -3285,9 +3338,11 @@ void App::frameServerLoop(const RenderRequest& r, const std::vector<Node*>& writ
         return t;
     };
     const int cores = (int)std::max(1u, std::thread::hardware_concurrency());
-    const int seqWorkers = seqs.empty() ? 0 : std::clamp(cores / 8, 2, 4);
+    const int requested=preferences.value("frame_server_processes",std::clamp(cores/8,2,4));
+    const int seqWorkers = seqs.empty() ? 0 : std::clamp(requested,1,cores);
     const int nWorkers = seqWorkers + (int)movies.size();
-    const int threadsEach = std::max(1, cores / std::max(1, nWorkers));
+    const int budget=preferences.value("render_limits",std::string()).find("no renderer limits")==0?cores:std::max(1,cores-2);
+    const int threadsEach = std::max(1, budget / std::max(1, nWorkers));
     struct Worker {
         std::unique_ptr<Process> p;
         fs::path log;
@@ -3377,8 +3432,14 @@ void App::frameServerLoop(const RenderRequest& r, const std::vector<Node*>& writ
 bool App::newComp() {
     json j = {{"strata", 1}, {"format", {{"width", 1920}, {"height", 1080}}}, {"frame_range", {1, 100}}, {"fps", 24},
               {"nodes", json::array()}};
+    if(!preferences.empty()) {
+        const bool ocio=preferences.value("color_mode",std::string("Welder"))=="OCIO";
+        std::string config=preferences.value("ocio_config",std::string());if(config.empty())config=ocio?color::kDefaultConfig:"";
+        j["project"]={{"color",{{"config",config},{"working",preferences.value("working_space",std::string("linear"))},
+            {"integer",preferences.value("integer_transform",std::string("sRGB"))},{"view",preferences.value("viewer_transform",std::string("sRGB"))}}}};
+    }
     // New comps are ACES: ACEScg working space, the ACES 2.0 SDR viewer.
-    if (color::haveOCIO())
+    if (preferences.empty() && color::haveOCIO())
         j["project"] = {{"color", {{"config", color::kDefaultConfig}, {"working", "ACEScg"},
                                    {"integer", color::kSrgbTexture}, {"display", ""}, {"view", ""}}}};
     edit([this, j](Comp&) {
@@ -3532,19 +3593,28 @@ bool App::save(const std::string& path, std::string* err) {
 
 std::string App::autosavePath(const std::string& forComp) const {
     const fs::path dir = (settingsPath.empty() ? fs::path(brand::configDir()) : fs::path(settingsPath).parent_path()) / "autosave";
-    if (forComp.empty()) return (dir / "untitled.weld").string();
+
     uint64_t h = 1469598103934665603ull;  // FNV-1a of the path: the same name on every run and platform
     for (unsigned char ch : forComp) h = (h ^ ch) * 1099511628211ull;
     char hex[20];
     std::snprintf(hex, sizeof hex, "%012llx", (unsigned long long)(h & 0xffffffffffffull));
-    return (dir / (fs::path(forComp).stem().string() + "-" + hex + ".weld")).string();
+    std::string pattern=preferences.value("autosave_filename",std::string("${settings}/autosave/${project}-${hash}.weld"));
+    if(pattern.empty())pattern="${settings}/autosave/${project}-${hash}.weld";
+    if(forComp.empty() && pattern=="${settings}/autosave/${project}-${hash}.weld")return (dir/"untitled.weld").string();
+    auto replace=[&](const std::string& token,const std::string& value){size_t at=0;while((at=pattern.find(token,at))!=std::string::npos){pattern.replace(at,token.size(),value);at+=value.size();}};
+    replace("${settings}",dir.parent_path().string());replace("${cache}",cacheRoot());replace("${project}",forComp.empty()?"untitled":fs::path(forComp).stem().string());replace("${hash}",hex);
+    const fs::path path(pattern);const fs::path resolved=path.is_absolute()?path:dir/path;
+    if(!forComp.empty() && recentKey(resolved.lexically_normal().string())==recentKey(fs::path(forComp).lexically_normal().string()))return (dir/(fs::path(forComp).stem().string()+"-"+hex+".weld")).string();
+    return resolved.string();
 }
 
 void App::tickAutosave(bool userBusy) {
-    if (!dirty || autosaveSecs <= 0 || userBusy || autosaveBusy_) return;
     const double now = steadySeconds();
+    if(userBusy){lastUserBusy_=now;return;}
+    if (!dirty || autosaveSecs <= 0 || autosaveBusy_) return;
     if (lastAutosave_ == 0) lastAutosave_ = now;
-    if (now - lastAutosave_ < autosaveSecs) return;
+    const double idle=preferences.value("autosave_idle",5.0);
+    if (now - lastAutosave_ < autosaveSecs && (idle<=0 || now-lastUserBusy_<idle || now-lastAutosave_<idle)) return;
     lastAutosave_ = now;
     // Serialise here (the UI thread owns the comp; this is quick), write on a thread (the disk may not be).
     json j = comp->toJson();
@@ -3806,6 +3876,7 @@ void App::openPanel(const std::string& name) {
         panelFocus = name;
         return;
     }
+    if(!preferences.value("reopen_new_panel",true) && std::find(panels.begin(),panels.end(),name)!=panels.end()){panelsToExpand.insert(name);panelFocus=name;return;}
     panelsToExpand.insert(name);
     closePanel(name);
     panels.push_front(name);

@@ -1463,7 +1463,7 @@ void drawViewer3DPane(App& app, UiState& ui, ImVec2 p0, ImVec2 size, bool intera
         if (!down) {
             s.nav = View3DState::Nav::None;
         } else if (io.MouseDelta.x != 0 || io.MouseDelta.y != 0) {
-            double dx = io.MouseDelta.x, dy = io.MouseDelta.y;
+            double dx = io.MouseDelta.x*app.preferences.value("camera_speed",1.0), dy = io.MouseDelta.y*app.preferences.value("camera_speed",1.0);
             View3DState::Nav nav = s.nav;
             // left + middle together dollies, like Maya
             if (nav == View3DState::Nav::Tumble && ImGui::IsMouseDown(ImGuiMouseButton_Middle)) nav = View3DState::Nav::Dolly;

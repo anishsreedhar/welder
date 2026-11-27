@@ -1,6 +1,7 @@
 #include "NetPath.h"
 
 #include <cctype>
+#include <algorithm>
 #include <chrono>
 #include <mutex>
 
@@ -84,6 +85,21 @@ std::string toUnc(const std::string& path) {
     for (auto& ch : root) ch = forward ? (ch == '\\' ? '/' : ch) : (ch == '/' ? '\\' : ch);
     if (rest.empty()) rest = forward ? "/" : "\\";
     return root + rest;
+}
+
+namespace {
+std::mutex substitutionMutex;
+std::vector<std::pair<std::string,std::string>> substitutions;
+}
+void setSubstitutions(std::vector<std::pair<std::string,std::string>> mappings) {
+    std::lock_guard<std::mutex> guard(substitutionMutex);substitutions=std::move(mappings);
+    std::stable_sort(substitutions.begin(),substitutions.end(),[](const auto& a,const auto& b){return a.first.size()>b.first.size();});
+}
+std::string substitute(const std::string& path) {
+    std::lock_guard<std::mutex> guard(substitutionMutex);
+    for(const auto& [from,to]:substitutions)if(!from.empty() && path.compare(0,from.size(),from)==0 &&
+        (path.size()==from.size()||from.back()=='/'||from.back()=='\\'||path[from.size()]=='/'||path[from.size()]=='\\'))return to+path.substr(from.size());
+    return path;
 }
 
 int convertComp(Comp& c) {

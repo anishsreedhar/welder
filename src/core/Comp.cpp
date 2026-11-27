@@ -1,5 +1,6 @@
 #include <map>
 #include "Comp.h"
+#include "NetPath.h"
 
 #include <algorithm>
 #include <cctype>
@@ -429,7 +430,8 @@ std::string absolutePath(const std::string& p) {
     return ec ? p : a.string();
 }
 
-std::string Comp::resolvePath(const std::string& p) const {
+std::string Comp::resolvePath(const std::string& original) const {
+    const std::string p=netpath::substitute(original);
     if (p.empty() || isAbsolutePath(p)) return p;
     std::filesystem::path fp(p);
     std::filesystem::path base = baseDir;
