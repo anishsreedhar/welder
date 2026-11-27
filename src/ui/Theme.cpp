@@ -7,9 +7,13 @@
 #include <cstdlib>
 #include <array>
 #include <filesystem>
+#include <fstream>
+#include <limits>
+#include <cstring>
 
 #include "Panels.h"
 #include "imgui_internal.h"
+#include "SystemFonts.h"
 
 namespace strata::ui {
 
@@ -20,30 +24,52 @@ ThemeColors& theme() {
 
 static std::map<std::string, std::array<ImFont*,4>> gLabelFonts;
 static std::vector<std::string> gLabelFamilies = {"Roboto"};
+static std::map<std::string, std::array<SystemFontFace,4>> gLabelFaces;
+static std::set<std::pair<std::string,int>> gLabelRequested, gLabelFailed;
+static std::map<std::pair<std::filesystem::path,int>, ImFont*> gLoadedLabelFaces;
 void loadNodeLabelFonts() {
     gLabelFonts.clear(); gLabelFamilies={"Roboto"};
-#ifdef _WIN32
-    const char* root=std::getenv("WINDIR");
-    const std::filesystem::path dir=std::filesystem::path(root?root:"C:/Windows")/"Fonts";
-    const std::vector<std::pair<std::string,std::array<const char*,4>>> families={
-        {"Verdana",{"verdana.ttf","verdanab.ttf","verdanai.ttf","verdanaz.ttf"}},
-        {"Arial",{"arial.ttf","arialbd.ttf","ariali.ttf","arialbi.ttf"}},
-        {"Consolas",{"consola.ttf","consolab.ttf","consolai.ttf","consolaz.ttf"}}};
-    for(const auto& [name,files]:families) {
-        bool all=true;for(auto file:files)all=all&&std::filesystem::exists(dir/file);
-        if(!all)continue;
-        std::array<ImFont*,4> fonts{};
-        for(int i=0;i<4;++i)fonts[i]=ImGui::GetIO().Fonts->AddFontFromFileTTF((dir/files[i]).string().c_str(),14);
-        gLabelFonts[name]=fonts;gLabelFamilies.push_back(name);
+    gLabelFaces.clear(); gLabelRequested.clear(); gLabelFailed.clear(); gLoadedLabelFaces.clear();
+    for (auto& family : systemFontFamilies()) {
+        gLabelFaces[family.name] = std::move(family.faces);
+        gLabelFamilies.push_back(std::move(family.name));
     }
-    if(gLabelFamilies.size()>1)gLabelFamilies.erase(gLabelFamilies.begin());
-#endif
+}
+void prepareNodeLabelFonts() {
+    // Add faces between frames, when the font atlas is unlocked. Loading only
+    // used faces keeps large system font collections from slowing startup.
+    auto requests = std::move(gLabelRequested); gLabelRequested.clear();
+    for (const auto& request : requests) {
+        const auto& face = gLabelFaces.at(request.first)[request.second];
+        const auto cacheKey = std::make_pair(face.path, face.index);
+        if (auto loaded = gLoadedLabelFaces.find(cacheKey); loaded != gLoadedLabelFaces.end()) {
+            gLabelFonts[request.first][request.second] = loaded->second;
+            continue;
+        }
+        std::ifstream file(face.path, std::ios::binary | std::ios::ate);
+        const auto length = file ? file.tellg() : std::streampos(-1);
+        if (length <= 0 || length > std::numeric_limits<int>::max()) { gLabelFailed.insert(request); continue; }
+        std::vector<unsigned char> bytes((size_t)length);
+        file.seekg(0); file.read(reinterpret_cast<char*>(bytes.data()), (std::streamsize)length);
+        if (!file || !systemFontDataSupported(bytes, face.index)) { gLabelFailed.insert(request); continue; }
+        void* data = IM_ALLOC(bytes.size()); std::memcpy(data, bytes.data(), bytes.size());
+        ImFontConfig config; config.FontNo = face.index;
+        std::snprintf(config.Name, sizeof config.Name, "%s", request.first.c_str());
+        ImFont* font = ImGui::GetIO().Fonts->AddFontFromMemoryTTF(data, (int)bytes.size(), 14, &config);
+        if (font) {
+            if (face.symbol) for (int code : systemFontSymbolRemaps(bytes, face.index)) font->AddRemapCodepoint((ImWchar)code, (ImWchar)(code + 0xf000));
+            gLoadedLabelFaces[cacheKey] = font; gLabelFonts[request.first][request.second] = font;
+        }
+        else { IM_FREE(data); gLabelFailed.insert(request); }
+    }
 }
 const std::vector<std::string>& nodeLabelFamilies(){return gLabelFamilies;}
 ImFont* nodeLabelFont(const Node* n) {
     const std::string family=n->ui.value("note_font",std::string("Verdana"));
+    const int style = (n->ui.value("note_bold",false)?1:0)+(n->ui.value("note_italic",false)?2:0);
     auto it=gLabelFonts.find(family);
-    if(it!=gLabelFonts.end())return it->second[(n->ui.value("note_bold",false)?1:0)+(n->ui.value("note_italic",false)?2:0)];
+    if(it!=gLabelFonts.end() && it->second[style])return it->second[style];
+    if (gLabelFaces.count(family) && !gLabelFailed.count({family,style})) gLabelRequested.insert({family,style});
     return n->ui.value("note_bold",false)?theme().medium:theme().regular;
 }
 

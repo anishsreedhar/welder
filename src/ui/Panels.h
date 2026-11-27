@@ -46,6 +46,7 @@ struct ThemeColors {
 };
 ThemeColors& theme();
 void loadNodeLabelFonts();
+void prepareNodeLabelFonts();  // load requested faces before ImGui starts its next frame
 const std::vector<std::string>& nodeLabelFamilies();
 ImFont* nodeLabelFont(const Node* node);
 // the theme's accent at an alpha (0-255)

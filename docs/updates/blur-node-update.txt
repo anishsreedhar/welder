@@ -1,0 +1,35 @@
+WELDER BLUR NODE — DEVELOPMENT UPDATE
+Same version: 0.2.6 / PFX Build 001. Same launcher: Welder.bat.
+
+We have updated the Blur node’s interface and corrected several control, masking, expression and font behaviors. The attached image uses actual screenshots from the working Welder editor.
+
+1. Updated Blur panel
+The panel now brings Channels, Size, Filter, Quality, Crop, Mask and Mix into a compact layout. Size can use one linked value or separate horizontal and vertical values. The filter menu provides box, triangle, quadratic and gaussian, with gaussian remaining the default. Quality controls the speed/smoothness trade-off, Crop limits bounding-box growth, and Mix blends from the original image at 0 to the full effect at 1.
+
+2. Smoother numeric editing
+Size and Quality use whole-number wheel steps by default. Small high-resolution wheel movements now accumulate instead of being lost. Fractional controls remain smooth, typed decimal values are supported, and numeric display precision has been increased. Shift gives finer adjustments; Ctrl gives larger steps.
+
+3. Channels and Roto masking
+The channel menus include all, none, rgb, rgba, alpha, individual channel selection, custom layer/channel names and the standard Other channels choices. These include depth, forward/backward motion, deep, mask, sample and cutout channels.
+
+Connecting a new Roto or RotoPaint to Blur’s mask input automatically enables rgba.alpha. The mask can still be disabled manually. Inject copies the selected mask into mask.a for downstream use. Invert reverses the mask, while Fringe restricts the effect to its soft transition edge. Selecting a channel name does not create pixel data: that data must be supplied by the input image.
+
+4. Working curve expressions
+Fixed the issue where applying an expression to a plain value discarded the original value, causing curve to read zero. Expressions now retain the original value or animation beneath them.
+
+Example: with an original Size of 6, curve*2 produces 12. Changing the underlying value to 7 produces 14. curve(frame-1) samples the original animation one frame earlier.
+
+The expression editor now previews the result at the current frame. Apply updates the control without closing the editor; OK applies and closes it. Linked Size components can share the expression. Numeric edits, keyframe changes and project save/load preserve the expression and its underlying value. Invalid results show an error before they can be applied.
+
+5. Animation and Node controls
+The animation menu provides key creation/removal, No animation, reset to default, Curve Editor, Dope Sheet, expressions, interpolation, copy/paste, animation-file import/export and predefined animations.
+
+The Node tab includes Label, font family/style, bold, italic, size and color, plus Hide Input, Cached, Disable, Dope Sheet, Bookmark, Postage Stamp, Static Frame and Lifetime Range.
+
+6. Installed machine fonts
+The font picker now discovers installed Windows font families and named styles, rather than listing only a few predefined families. It supports search, font collections and symbol fonts. We verified 260 font/style choices on the development PC. The list follows each computer’s installed fonts; matching label appearance on another computer requires the chosen font to be installed there.
+
+7. Saving and reliability
+Improved .nk handling for Blur Quality, Inject and mask selection. Project saving/loading, expression evaluation, keyframe edits, UI actions, numeric scrolling, image rendering and text/symbol font rendering were checked. The startup splash-screen timing crash encountered during testing was also fixed.
+
+All source changes remain in the existing project repository. No application version or build number was increased, and Welder.bat remains the launcher.

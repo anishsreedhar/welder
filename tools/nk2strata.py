@@ -2739,6 +2739,12 @@ class Translator:
             if "crop" in k:
                 params["crop"] = flag("crop", True)
             common_mix_mask()
+            num("quality", dest="quality")
+            if "inject" in k:
+                params["inject"] = flag("inject")
+            if "maskChannelInput" in k:
+                ch = str(k["maskChannelInput"])
+                params["mask_channel"] = "none" if ch == "none" else channel_name(ch)
             self.translated += 1
             return self.emit(nk_name, klass, "Blur", [main[0] if main else None] + masks[:1], params, k)
 

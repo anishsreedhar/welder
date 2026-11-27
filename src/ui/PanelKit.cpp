@@ -1,4 +1,5 @@
 #include "PanelKit.h"
+#include "NumericWheel.h"
 
 #include <algorithm>
 #include <cctype>
@@ -98,7 +99,7 @@ bool takeAltClick() {
     return r;
 }
 
-bool valueField(const char* id, double* v, float width, const char* prefix, bool isInt, double speed, double lo, double hi) {
+bool valueField(const char* id, double* v, float width, const char* prefix, bool isInt, double speed, double lo, double hi, double wheelStep) {
     const double before = *v;
     ImGui::SetNextItemWidth(width);
     const bool medium = theme().medium && !gReferenceFields;
@@ -128,7 +129,7 @@ bool valueField(const char* id, double* v, float width, const char* prefix, bool
         const double a = std::fabs(*v);
         const bool whole = a >= 10 && a < 1e7 && *v == std::round(*v);  // 1350, not 1350.00
         const bool twoDp = a < 1e5 && std::fabs(*v * 100 - std::round(*v * 100)) < 1e-7;
-        changed = ImGui::DragScalar(id, ImGuiDataType_Double, v, (float)speed, nullptr, nullptr, gReferenceFields ? "%.6g" : whole ? "%.0f" : twoDp ? "%.2f" : "%.4g", fl);
+        changed = ImGui::DragScalar(id, ImGuiDataType_Double, v, (float)speed, nullptr, nullptr, gReferenceFields ? "%.15g" : whole ? "%.0f" : twoDp ? "%.2f" : "%.15g", fl);
     }
     if(idleReference)ImGui::PopStyleColor();
     if (ImGui::IsItemHovered() && !(GImGui->CurrentItemFlags & ImGuiItemFlags_Disabled)) {
@@ -136,11 +137,13 @@ bool valueField(const char* id, double* v, float width, const char* prefix, bool
         ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
         const auto& io=ImGui::GetIO();
         if(io.MouseWheel!=0 && !io.KeyAlt) {
-            double step=isInt?1.:.1;
+            double step=isInt?1.:wheelStep;
             if(io.KeyShift)step*=.1;
             if(io.KeyCtrl)step*=10.;
             if(isInt)step=std::max(1.,step);
-            double next=*v+io.MouseWheel*step;
+            static std::map<ImGuiID, NumericWheel> wheels;
+            double next=wheels[ImGui::GetItemID()].advance(*v, io.MouseWheel, step,
+                isInt || (wheelStep>=1. && !io.KeyShift), ImGui::GetTime());
             if(isInt){next=std::round(next);if(hi>lo)next=std::clamp(next,lo,hi);}
             if(std::isfinite(next) && next!=*v){
                 *v=next;changed=true;ImGui::MarkItemEdited(ImGui::GetItemID());
@@ -151,9 +154,12 @@ bool valueField(const char* id, double* v, float width, const char* prefix, bool
         }
     }
     if(gReferenceFields && !ImGui::TempInputIsActive(ImGui::GetID(id))) {
-        char text[48];std::snprintf(text,sizeof text,isInt?"%.0f":"%.6g",*v);
+        char text[48];std::snprintf(text,sizeof text,isInt?"%.0f":"%.15g",*v);
         const ImVec2 p=ImGui::GetItemRectMin();
-        ImGui::GetWindowDrawList()->AddText(ImVec2(p.x+(prefix&&*prefix?22:4),p.y+ImGui::GetStyle().FramePadding.y),theme().value,text);
+        auto* draw = ImGui::GetWindowDrawList();
+        draw->PushClipRect(p, ImGui::GetItemRectMax(), true);
+        draw->AddText(ImVec2(p.x+(prefix&&*prefix?22:4),p.y+ImGui::GetStyle().FramePadding.y),theme().value,text);
+        draw->PopClipRect();
     }
     if (altClickItem()) {  // Alt+click: a keyframe, not an edit
         *v = before;
@@ -247,7 +253,13 @@ bool tickSlider(const char* id, double* v, double lo, double hi, float width, bo
     if(gReferenceFields) {
         std::vector<std::pair<double,bool>> ticks;std::vector<std::pair<double,double>> labels;
         for(int i=0;i<=60;++i)ticks.emplace_back(i/60.,i%10==0);
-        if(log && lo>0) {
+        if (log && lo == 0 && hi == 100) {
+            ticks.clear();
+            for (double v : {0., .1, .2, .3, .4, .6, .8, 1., 2., 3., 4., 6., 8., 10., 20., 30., 40., 50., 60., 70., 80., 90., 100.}) {
+                ticks.emplace_back(toT(v, lo, hi, log), true);
+                labels.emplace_back(v, toT(v, lo, hi, log));
+            }
+        } else if(log && lo>0) {
             ticks.clear();
             for(double v=.1;v<=10.001;v+=v<1?.02:.2)ticks.emplace_back(toT(v,lo,hi,log),false);
             for(double v:{.1,.2,.3,.4,.6,.8,1.,2.,3.,4.,6.,8.,10.})labels.emplace_back(v,toT(v,lo,hi,log));

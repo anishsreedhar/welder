@@ -4,12 +4,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 
 #include "Panels.h"
 #include "core/NetPath.h"
 #include "PanelKit.h"
 #include "nodes/Track.h"
 #include "core/Expr.h"
+#include "core/ExprValue.h"
 #include "color/Color.h"
 #include "nodes/BlenderNode.h"
 #include "nodes/Cryptomatte.h"
@@ -78,7 +80,10 @@ bool keyAt(const json& e, double frame) {
 
 void setKey(json& e, double frame, double val) {
     if (!animated(e)) {
+        const json previous = e;
+        if (params::isExpr(previous)) val = expr::baseValue(previous, frame, val);
         e = json{{"keys", json::array({json::array({frame, val})})}, {"interp", "smooth"}};
+        if (params::isExpr(previous)) e["expr"] = previous["expr"];
         return;
     }
     json& keys = e["keys"];
@@ -93,12 +98,14 @@ void setKey(json& e, double frame, double val) {
 
 void removeKey(json& e, double frame) {
     if (!animated(e)) return;
+    const double previous = params::evalCurve(e, frame);
+    const std::string expression = params::isExpr(e) ? e["expr"].get<std::string>() : "";
     json& keys = e["keys"];
     json kept = json::array();
     for (auto& k : keys)
         if (std::fabs(k[0].get<double>() - frame) >= 1e-6) kept.push_back(k);
-    if (kept.empty()) e = 0.0;
-    else if (kept.size() == 1) e = kept[0][1];
+    if (kept.empty()) e = expr::withExpression(previous, expression, frame, previous);
+    else if (kept.size() == 1) e = expr::withExpression(kept[0][1], expression, frame, kept[0][1].get<double>());
     else keys = kept;
 }
 
@@ -119,12 +126,20 @@ json& expand(json& v, int n, const std::vector<double>& defs) {
 }
 
 // Set component k (or all if k < 0). Animated components get a key at `frame`.
-void setComp(json& v, int n, int k, double val, double frame, const std::vector<double>& defs) {
+void setComp(json& v, int n, int k, double val, double frame, const std::vector<double>& defs, const std::vector<double>* displayed = nullptr) {
     json& a = expand(v, n, defs);
     for (int c = 0; c < n; ++c) {
         if (k >= 0 && c != k) continue;
         json& e = n == 1 ? a : a[c];
-        if (animated(e)) setKey(e, frame, val);
+        if (params::isExpr(e)) {
+            // Numeric edits adjust the underlying curve instead of deleting
+            // the expression. The result continues to be evaluated normally.
+            double shown = displayed ? (*displayed)[c] : params::evalScalar(e, frame, defs[c]);
+            double base = expr::baseValue(e, frame, defs[c]) + val - shown;
+            if (animated(e)) setKey(e, frame, base);
+            else e["value"] = base;
+        }
+        else if (animated(e)) setKey(e, frame, val);
         else e = val;
     }
 }
@@ -228,6 +243,7 @@ void change(Ctx& c, const std::string& key, std::function<void(json&)> fn) {
 // The expression editor ("=" over a knob, or its animation menu): one line per component.
 struct ExprEdit {
     bool request = false;
+    bool linked = false;
     std::string node, knob, error;
     int n = 1;
     std::vector<double> cur, defs;
@@ -250,6 +266,7 @@ void openExprEditor(Ctx& c, const KnobDef& k, int n, const std::vector<double>& 
             if (params::isExpr(e)) gExpr.text[i] = e["expr"].get<std::string>();
         }
     }
+    gExpr.linked = k.splittable && n == 2 && cur[0] == cur[1] && gExpr.text[0] == gExpr.text[1];
 }
 
 // The expression of each component ("" if none) and the first error.
@@ -261,7 +278,7 @@ std::vector<std::string> exprsOf(const json& v, int n, const Node* node, double 
         r[i] = e["expr"].get<std::string>();
         if (err && err->empty()) {
             std::string e2;
-            expr::eval(r[i], frame, node, e.contains("keys") ? &e : nullptr, 0, &e2);
+            expr::eval(r[i], frame, node, &e, 0, &e2);
             if (!e2.empty()) *err = e2;
         }
     }
@@ -274,9 +291,11 @@ void drawExprEditor(App& app) {
         gExpr.request = false;
     }
     ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Expression##edit", nullptr, ImGuiWindowFlags_NoSavedSettings)) return;
+    ImGui::SetNextWindowSizeConstraints(ImVec2(520, 0), ImVec2(520, FLT_MAX));
+    if (!ImGui::BeginPopupModal("Expression##edit", nullptr, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize)) return;
     ImGui::Text("%s.%s", gExpr.node.c_str(), gExpr.knob.c_str());
-    ImGui::TextDisabled("frame, Node.knob, Node.knob.x, parent.knob, sin(), random(), [value Node.knob] ... (empty: no expression)");
+    ImGui::TextWrapped("Use curve for the original value or keyframes, e.g. curve*2. curve(frame-1) samples a frame earlier. Empty removes the expression.");
+    if (gExpr.n == 2) ImGui::Checkbox("Link components", &gExpr.linked);
     static const char* comps4[] = {"r", "g", "b", "a"};
     static const char* compsXYZ[] = {"x", "y", "z", "w"};
     bool enter = false;
@@ -287,20 +306,41 @@ void drawExprEditor(App& app) {
             ImGui::TextUnformatted(gExpr.n == 4 ? comps4[i] : compsXYZ[i]);
             ImGui::SameLine(30);
         }
+        if (i > 0 && gExpr.linked) gExpr.text[i] = gExpr.text[0];
+        ImGui::BeginDisabled(i > 0 && gExpr.linked);
         char buf[1024];
         std::snprintf(buf, sizeof buf, "%s", gExpr.text[i].c_str());
         ImGui::SetNextItemWidth(-1);
         if (i == 0 && ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
         if (ImGui::InputText("##e", buf, sizeof buf, ImGuiInputTextFlags_EnterReturnsTrue)) enter = true;
         gExpr.text[i] = buf;
+        ImGui::EndDisabled();
         ImGui::PopID();
     }
     if (gExpr.n > 1 && ImGui::SmallButton("same for all")) {
         for (int i = 1; i < gExpr.n; ++i) gExpr.text[i] = gExpr.text[0];
     }
+    gExpr.error.clear();
+    if (Node* node = app.node(gExpr.node)) {
+        const json* stored = findParam(node, gExpr.knob);
+        for (int i = 0; i < gExpr.n; ++i) {
+            const json previous = stored && (!stored->is_array() || !stored->empty()) ? (stored->is_array() ? (*stored)[std::min(i, (int)stored->size()-1)] : *stored) : json(gExpr.defs[i]);
+            const json candidate = expr::withExpression(previous, gExpr.text[i], app.frame, gExpr.cur[i]);
+            std::string error;
+            const double result = gExpr.text[i].empty() ? expr::baseValue(candidate, app.frame, gExpr.cur[i])
+                : expr::eval(gExpr.text[i], app.frame, node, &candidate, gExpr.cur[i], &error);
+            if (error.empty() && !std::isfinite(result)) error = "Expression result must be a finite number";
+            if (!error.empty() && gExpr.error.empty()) gExpr.error = error;
+            if (gExpr.n > 1) ImGui::Text("%s = %.10g  (frame %g)", gExpr.n == 4 ? comps4[i] : compsXYZ[i], result, app.frame);
+            else ImGui::Text("Value = %.10g  (frame %g)", result, app.frame);
+        }
+    }
     if (!gExpr.error.empty()) ImGui::TextColored(ImVec4(1, 0.45f, 0.35f, 1), "%s", gExpr.error.c_str());
     ImGui::Separator();
-    if (ImGui::Button("OK") || enter) {
+    ImGui::BeginDisabled(!gExpr.error.empty());
+    const bool apply = ImGui::Button("Apply"); ImGui::SameLine();
+    const bool close = ImGui::Button("OK") || enter;
+    if ((apply || close) && gExpr.error.empty()) {
         gExpr.error.clear();
         for (auto& t : gExpr.text)
             if (!t.empty()) {
@@ -313,32 +353,22 @@ void drawExprEditor(App& app) {
         if (gExpr.error.empty()) {
             app.checkpoint();
             ExprEdit ed = gExpr;
-            app.edit([ed](Comp& comp) {
+            const double frame = app.frame;
+            app.edit([ed, frame](Comp& comp) {
                 Node* nd = comp.find(ed.node);
                 if (!nd) return;
                 json& v = slotFor(nd, ed.knob);
                 json& a = expand(v, ed.n, ed.defs);
                 for (int i = 0; i < ed.n; ++i) {
                     json& e = ed.n == 1 ? a : a[i];
-                    if (ed.text[i].empty()) {
-                        if (params::isExpr(e)) {  // the expression goes; its animation (or value) stays
-                            if (e.contains("keys")) e.erase("expr");
-                            else e = ed.cur[i];
-                        }
-                    } else {
-                        json o = {{"expr", ed.text[i]}};
-                        if (params::isAnimated(e)) {  // keep its curve for `curve`
-                            o["keys"] = e["keys"];
-                            if (e.contains("interp")) o["interp"] = e["interp"];
-                        }
-                        e = o;
-                    }
+                    e = expr::withExpression(e, ed.text[i], frame, ed.cur[i]);
                 }
                 nd->paramsChanged();
             });
-            ImGui::CloseCurrentPopup();
+            if (close) ImGui::CloseCurrentPopup();
         }
     }
+    ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
@@ -450,6 +480,8 @@ bool linkedKnobRow(Ctx& c, const KnobDef& k, int n, const std::vector<double>& c
     return true;
 }
 
+#include "BlurControls.h"
+
 void keyButton(Ctx& c, const KnobDef& k, int n, const std::vector<double>& cur, const std::vector<double>& defs) {
     const json* vp = findParam(c.node, k.name);
     const json v = vp ? *vp : json();
@@ -467,7 +499,7 @@ void keyButton(Ctx& c, const KnobDef& k, int n, const std::vector<double>& cur, 
     ImVec2 p = ImGui::GetCursorScreenPos();
     float h = ImGui::GetFrameHeight();
     ImGui::PushID("key");
-    const bool reference=c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked";
+    const bool reference=c.node->type=="Blur" || c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked";
     const float keyWidth=reference?h:h*.8f;
     bool clicked = ImGui::InvisibleButton("##k", ImVec2(keyWidth, h));
     gKeyHovered = ImGui::IsItemHovered();
@@ -499,6 +531,12 @@ void keyButton(Ctx& c, const KnobDef& k, int n, const std::vector<double>& cur, 
         });
     }
     if (ImGui::BeginPopupContextItem("##keymenu")) {
+        if (c.node->type == "Blur") {
+            blurAnimationMenu(c, k, n, cur, defs, v);
+            ImGui::EndPopup();
+            ImGui::PopID();
+            return;
+        }
         if (ImGui::MenuItem("Set key", nullptr, false, !onKey)) {
             c.app.checkpoint();
             change(c, k.name, [n, cur, defs, frame](json& val) {
@@ -525,8 +563,7 @@ void keyButton(Ctx& c, const KnobDef& k, int n, const std::vector<double>& cur, 
                 for (int i = 0; i < n; ++i) {
                     json& e = n == 1 ? a : a[i];
                     if (params::isExpr(e)) {
-                        if (e.contains("keys")) e.erase("expr");
-                        else e = cur[i];
+                        e = expr::withExpression(e, "", 0, cur[i]);
                     }
                 }
             });
@@ -587,6 +624,7 @@ void label(const KnobDef& k) {
         return;
     }
     if (!k.hideLabel && k.type != Knob::Bool) {  // checkboxes carry their label on the right, as is standard
+        if (gDef && gDef->type == "Blur") ImGui::SetCursorPosX(8);
         kit::rowLabel(k.label.c_str(), k.tip.c_str());
         if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) gLabelReset = true;  // (#76)
     } else
@@ -625,7 +663,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
     // expression-driven: purple (red when it fails); animated: blue
     if (hasX) ImGui::PushStyleColor(ImGuiCol_FrameBg, exprErr.empty() ? ImVec4(0.33f, 0.2f, 0.45f, 1.0f) : ImVec4(0.5f, 0.16f, 0.16f, 1.0f));
     else if (anim) ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.16f, 0.27f, 0.42f, 1.0f));
-    const bool referenceControls=c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked";
+    const bool referenceControls=c.node->type=="Blur" || c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked";
     float avail = ImGui::GetContentRegionAvail().x - (k.noAnim ? 0 : ImGui::GetFrameHeight() * (referenceControls?1.f:.8f) + ImGui::GetStyle().ItemSpacing.x);
     if (k.half) {  // half the row, when both halves have room for a field and a slider; else the whole row
         const float half = (ImGui::GetContentRegionAvail().x - kit::labelWidth() * 0.55f) * 0.5f - 8;
@@ -634,7 +672,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
 
     auto commit = [&](int comp, double val) {
         if(ImGui::GetIO().MouseWheel!=0 && ImGui::IsItemHovered())c.app.checkpoint();
-        change(c, k.name, [n, comp, val, frame, defs](json& j) { setComp(j, n, comp, val, frame, defs); });
+        change(c, k.name, [n, comp, val, frame, defs, cur](json& j) { setComp(j, n, comp, val, frame, defs, &cur); });
     };
     auto startGesture = [&]() {
         if (ImGui::IsItemActivated()) c.app.checkpoint();
@@ -644,11 +682,12 @@ void numericKnob(Ctx& c, const KnobDef& k) {
     // a value field, then (unless noSlider) a slider filling the row
     (void)sflags;
     const double dragSpeed = k.type == Knob::Int ? 0.2 : std::max(0.001, (k.hi - k.lo) / 400.0);
+    const double wheelStep = c.node->type == "Blur" && (k.name == "size" || k.name == "quality") ? 1.0 : 0.1;
     // a value field (drag it, or click to type), then (unless noSlider) a slider with ticks filling the row
     auto scalarRow = [&](int comp, bool isInt, float sliderRoom) {
-        const float fw = k.width > 0 ? k.width : (c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked") ? 72.f : std::round(ImGui::GetFontSize() * 5.6f);
+        const float fw = k.width > 0 ? k.width : (c.node->type=="Blur" || c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked") ? 72.f : std::round(ImGui::GetFontSize() * 5.6f);
         double fv = cur[std::max(0, comp)];
-        if (kit::valueField("##v", &fv, k.noSlider ? fw : fw, nullptr, isInt, dragSpeed)) commit(comp, fv);
+        if (kit::valueField("##v", &fv, k.noSlider ? fw : fw, nullptr, isInt, dragSpeed, 0, 0, wheelStep)) commit(comp, fv);
         const char* tk = std::getenv("STRATA_TEST_ALTKEY");
         if (!tk) tk = std::getenv("STRATA_TEST_EXPOSE");
         if (!tk) tk = std::getenv("STRATA_TEST_VIEWERCLICK");
@@ -713,7 +752,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
             }
         };
         const float buttonW = k.button.empty() ? 0 : ImGui::CalcTextSize(k.button.c_str()).x + ImGui::GetStyle().FramePadding.x * 2 + sp;
-        if ((c.node->type=="Transform" || c.node->type=="TransformMasked") && uniformMode) {
+        if ((c.node->type=="Transform" || c.node->type=="TransformMasked" || c.node->type=="Blur") && uniformMode) {
             scalarRow(-1,false,avail-icon-sp);
             ImGui::SameLine();
             if(ImGui::Button("2",ImVec2(icon,icon)))splitOpen.insert(ek);
@@ -744,7 +783,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
                 std::string pre = cl[i];
                 if (pre.size() == 1) pre[0] = (char)std::toupper((unsigned char)pre[0]);
                 double fv = cur[i];
-                if (kit::valueField("##c", &fv, each, pre.c_str(), false, dragSpeed)) commit(i, fv);
+                if (kit::valueField("##c", &fv, each, pre.c_str(), false, dragSpeed, 0, 0, wheelStep)) commit(i, fv);
                 if (const char* tk = std::getenv("STRATA_TEST_ALTKEY"); tk && k.name == tk && i == 1) {  // tests: the second box
                     ImVec2 ra = ImGui::GetItemRectMin(), rb = ImGui::GetItemRectMax();
                     gTestKnobPos = ImVec2((ra.x + rb.x) * 0.5f, (ra.y + rb.y) * 0.5f);
@@ -1038,7 +1077,8 @@ void numericKnob(Ctx& c, const KnobDef& k) {
                          k.type == Knob::Color || k.type == Knob::Box))
         ImGui::OpenPopup("##expose");
     if (ImGui::BeginPopup("##expose")) {
-        exposeMenuItems(c, k, n, defs);
+        if (c.node->type == "Blur") blurAnimationMenu(c, k, n, cur, defs, v);
+        else exposeMenuItems(c, k, n, defs);
         ImGui::EndPopup();
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
@@ -1757,6 +1797,7 @@ static void gradeChannelsKnob(Ctx& c,const KnobDef& k,float avail) {
 }
 
 void channelsKnob(Ctx& c, const KnobDef& k, float avail) {
+    if(c.node->type=="Blur"){blurChannelKnob(c,k,avail,false);return;}
     if(c.node->type=="Grade" || c.node->type=="ColorCorrect"){gradeChannelsKnob(c,k,avail);return;}
     if(c.node->type=="Merge"){mergeChannelsKnob(c,k,avail);return;}
     const bool abRow = c.node->type == "Merge" && (k.name == "Achannels" || k.name == "Bchannels");
@@ -2009,6 +2050,21 @@ void knobBody(Ctx& c, const KnobDef& k) {
             change(c, k.name, [b](json& j) { j = b; });
         }
     } else if (k.type == Knob::Choice) {
+        if (c.node->type == "Blur" && k.name == "mask_channel") {
+            blurChannelKnob(c, k, avail, true);
+            ImGui::PopID();
+            return;
+        }
+        if (c.node->type == "Blur" && k.name == "filter") {
+            const std::string filter = p.str("filter", "gaussian");
+            if (kit::beginCombo("##filter", filter.c_str(), k.width)) {
+                for (const auto& option : k.options) if (blurMenuOption(option, option == filter)) {
+                    c.app.checkpoint(); change(c, k.name, [option](json& j) { j = option; });
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopID(); return;
+        }
         std::string cur = getString(c.node, k.name, k.def.is_string() ? k.def.get<std::string>() : "");
         if ((c.node->type == "ColorCorrect" || c.node->type == "Merge" || c.node->type=="Grade") && k.name == "mask_channel" && !c.node->input(c.node->type == "Merge"?2:1) && !findParam(c.node, k.name)) cur = "none";
         if (k.name == "file_type" && !findParam(c.node, k.name)) {  // Write: from the file's extension
@@ -3677,6 +3733,14 @@ void buttonAction(Ctx& c, const std::string& action) {
 // holds the knobs up to the next divider; "@card" opens one with no title; an
 // untitled divider is a line.
 void drawKnobs(Ctx& c, const NodeDef& def, const std::string& tab) {
+    if (c.node->type == "Blur") {
+        for (auto k : def.knobs) {
+            if (k.tab != tab || !whenOk(c.node, def, k)) continue;
+            if (k.name == "mask_channel") k.width = std::max(85.f, ImGui::GetContentRegionAvail().x - kit::labelWidth() - 205);
+            knob(c, k);
+        }
+        return;
+    }
     if(c.node->type=="Transform" || c.node->type=="TransformMasked") {
         for(const char* name:{"translate","rotate","scale","skewX","skewY","skew_order","center","invert","filter","clamp","black_outside","motionblur","shutter","shutteroffset","shuttercustomoffset","mask_channel","invert_mask"}) {
             auto it=std::find_if(def.knobs.begin(),def.knobs.end(),[&](const KnobDef& k){return k.name==name;});
@@ -3781,14 +3845,18 @@ static void mergeNodeTab(Ctx& c) {
     std::string& buffer=labels[n->name];
     if(ImGui::GetActiveID()!=ImGui::GetID("##label"))buffer=n->ui.value("label",std::string());
     char label[4096];std::snprintf(label,sizeof label,"%s",buffer.c_str());
-    ImGui::InputTextMultiline("##label",label,sizeof label,ImVec2(ImGui::GetContentRegionAvail().x,155));
+    ImGui::InputTextMultiline("##label",label,sizeof label,ImVec2(ImGui::GetContentRegionAvail().x,c.node->type=="Blur"?46:155));
     buffer=label;
     if(ImGui::IsItemDeactivatedAfterEdit())setUi("label",buffer);
     kit::rowLabel("Font");
     std::string family=n->ui.value("note_font",std::string("Verdana"));
     const float width=std::max(80.f,ImGui::GetContentRegionAvail().x-191);
     if(kit::beginCombo("##font",family.c_str(),width)){
-        for(auto& f:nodeLabelFamilies())if(ImGui::Selectable(f.c_str(),f==family))setUi("note_font",f);
+        static char search[128] = "";
+        ImGui::InputTextWithHint("##fontSearch", "Search installed fonts", search, sizeof search);
+        auto lower = [](std::string text) { for(char& ch : text) ch=(char)std::tolower((unsigned char)ch); return text; };
+        const std::string query = lower(search);
+        for(auto& f:nodeLabelFamilies())if((query.empty() || lower(f).find(query)!=std::string::npos) && ImGui::Selectable(f.c_str(),f==family))setUi("note_font",f);
         ImGui::EndCombo();
     }
     ImGui::SameLine();bool bold=n->ui.value("note_bold",false);
@@ -3839,7 +3907,7 @@ static void mergeNodeTab(Ctx& c) {
 
 // The Node tab every node has (the classic): label, colours, hide input, disable, lifetime.
 void nodeTab(Ctx& c) {
-    if(c.node->type=="Merge" || c.node->type=="Grade"){mergeNodeTab(c);return;}
+    if(c.node->type=="Blur" || c.node->type=="Merge" || c.node->type=="Grade"){mergeNodeTab(c);return;}
     Node* n = c.node;
     // ui-only fields (no re-render): label, font size, tile colour, hide input
     auto setUi = [&](const std::string& key, json v, bool undoStep = true) {
@@ -3926,11 +3994,11 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
     struct CompactMerge {
         bool enabled, reference=false, previousReference=false;
         float label=0;ImU32 muted=0;
-        CompactMerge(bool on,bool ref,bool merge):enabled(on),reference(ref){if(on){
-            label=kit::setLabelWidth(merge?88:108);
+        CompactMerge(bool on,bool ref,bool merge,bool blur):enabled(on),reference(ref){if(on){
+            label=kit::setLabelWidth(blur?66:merge?88:108);
             previousReference=kit::setReferenceFields(ref);
             muted=theme().muted;if(ref)theme().muted=IM_COL32(220,220,220,255);
-            ImGui::PushFont(theme().regular,ref?15:14);
+            ImGui::PushFont(theme().regular,blur?13:ref?15:14);
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ref?ImVec2(3,2):ImVec2(3,1));
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ref?ImVec2(2,3):ImVec2(4,3));
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,0);
@@ -3938,7 +4006,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
             ImGui::PushStyleColor(ImGuiCol_FrameBg,IM_COL32(58,58,58,255));
         }}
         ~CompactMerge(){if(enabled){theme().muted=muted;kit::setReferenceFields(previousReference);kit::setLabelWidth(label);ImGui::PopStyleColor();ImGui::PopStyleVar(4);ImGui::PopFont();}}
-    } compactMerge(n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked"),n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked"),n->type=="Merge");
+    } compactMerge(n->type=="Merge" || n->type=="Grade" || (n->type=="Blur" || n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked"),n->type=="Merge" || n->type=="Grade" || (n->type=="Blur" || n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked"),n->type=="Merge",n->type=="Blur");
     // the header: a card with the category colour as a strip down its left side, the name in
     // the medium weight, the type muted after it
     const ImU32 cc = categoryColor(categoryOf(n->type));
@@ -3975,7 +4043,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
     }
     if (keepOpen && ImGui::IsItemHovered() && !ImGui::IsPopupOpen("panel_menu"))
         ImGui::SetTooltip("Right-click: float this panel in a window of its own, or reset all its knobs to default");
-    if((n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && n->type!="TransformMasked"))) {
+    if((n->type!="Merge" && n->type!="Grade" && (n->type!="Blur" && n->type!="ColorCorrect" && n->type!="Transform" && n->type!="TransformMasked"))) {
         const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(mn, ImVec2(mn.x + 3, mx.y), cc, 2.0f, ImDrawFlags_RoundCornersLeft);
@@ -3994,17 +4062,17 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
 
     // Name (rename on Enter). Merge keeps its name field in the panel header.
     const ImVec2 bodyCursor=ImGui::GetCursorScreenPos();
-    if((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked")))ImGui::SetCursorScreenPos(ImVec2(headerMin.x+22,headerMin.y+1));
+    if((n->type=="Merge" || n->type=="Grade" || (n->type=="Blur" || n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked")))ImGui::SetCursorScreenPos(ImVec2(headerMin.x+22,headerMin.y+1));
     {
         static std::string nameBuf;
-        if((n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && n->type!="TransformMasked"))){
+        if((n->type!="Merge" && n->type!="Grade" && (n->type!="Blur" && n->type!="ColorCorrect" && n->type!="Transform" && n->type!="TransformMasked"))){
             kit::rowLabel("name");
         }
         if (ImGui::GetActiveID() != ImGui::GetID("##name")) nameBuf = n->name;
         char tmp[128];
         std::strncpy(tmp, nameBuf.c_str(), sizeof(tmp) - 1);
         tmp[sizeof(tmp) - 1] = 0;
-        ImGui::SetNextItemWidth((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked"))?headerMax.x-headerMin.x-50:std::min(220.0f, ImGui::GetContentRegionAvail().x));
+        ImGui::SetNextItemWidth((n->type=="Merge" || n->type=="Grade" || (n->type=="Blur" || n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked"))?headerMax.x-headerMin.x-50:std::min(220.0f, ImGui::GetContentRegionAvail().x));
         bool enter = ImGui::InputText("##name", tmp, sizeof(tmp), ImGuiInputTextFlags_EnterReturnsTrue);
         if (ImGui::GetActiveID() == ImGui::GetID("##name")) nameBuf = tmp;
         if ((enter || ImGui::IsItemDeactivatedAfterEdit()) && std::string(tmp) != n->name) {
@@ -4018,7 +4086,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
         }
     }
 
-    if((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked")))ImGui::SetCursorScreenPos(bodyCursor);
+    if((n->type=="Merge" || n->type=="Grade" || (n->type=="Blur" || n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked")))ImGui::SetCursorScreenPos(bodyCursor);
     const NodeDef* def = nodeDef(n->type);
     gDef = def;
     // Tabs, as is standard: the node's own (named after it), any others its knobs
@@ -4294,7 +4362,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
                 ImGui::EndTabItem();
             }
         const bool nodeOpen = ImGui::BeginTabItem("Node", nullptr, tabFlags("Node"));
-        if (def && !def->help.empty() && (n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && n->type!="TransformMasked"))) {  // the node's help on the tab row, cut to fit (all of it on hover)
+        if (def && !def->help.empty() && (n->type!="Merge" && n->type!="Grade" && (n->type!="Blur" && n->type!="ColorCorrect" && n->type!="Transform" && n->type!="TransformMasked"))) {  // the node's help on the tab row, cut to fit (all of it on hover)
             ImVec2 r0 = ImGui::GetItemRectMin(), r1 = ImGui::GetItemRectMax();
             ImGuiWindow* w = ImGui::GetCurrentWindow();
             const float x0 = r1.x + 12, x1 = w->WorkRect.Max.x - 4;

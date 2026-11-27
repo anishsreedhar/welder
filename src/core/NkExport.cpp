@@ -820,6 +820,8 @@ struct Writer {
             if (type == "Sharpen") copy("amount");
             if (type == "Blur") {
                 copy("filter");
+                copy("quality");
+                if (p.value("inject", false)) raw("inject", "true");
                 if (has("crop")) raw("crop", p.value("crop", true) ? "true" : "false");
             }
             if (type != "Dilate") mixMask();

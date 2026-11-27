@@ -330,6 +330,35 @@ Viewer { frame_range 1010-1050 name Viewer1 }
 
 
 class Knobs(unittest.TestCase):
+    def test_blur_reference_controls(self):
+        for algorithm in ("box", "triangle", "quadratic", "gaussian"):
+            _, _, nodes = convert("""
+Constant { inputs 0 name Source }
+Blur {
+ name Blur1
+ channels rgb
+ size {6 3}
+ filter %s
+ quality 25
+ crop false
+ maskChannelInput none
+ inject true
+ invert_mask true
+ fringe true
+ mix 0.5
+}
+""" % algorithm)
+            p = nodes["Blur1"]["params"]
+            self.assertEqual(p["filter"], algorithm)
+            self.assertEqual(p["size"], [6, 3])
+            self.assertEqual(p["quality"], 25)
+            self.assertEqual(p["mask_channel"], "none")
+            self.assertTrue(p["inject"])
+            self.assertTrue(p["invert_mask"])
+            self.assertTrue(p["fringe"])
+            self.assertFalse(p["crop"])
+            self.assertEqual(p["mix"], .5)
+
     def test_root(self):
         comp, _, _ = convert('Root { inputs 0 first_frame 1001 last_frame 1100 fps 23.976 '
                              'format "2048 1152 0 0 2048 1152 1 MyFmt" }\n')

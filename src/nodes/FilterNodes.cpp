@@ -311,23 +311,43 @@ protected:
 // channels, crop (clip the expanded bbox to the format), mix, mask (input 1).
 class BlurNode : public BlurBase {
 public:
+    ChannelSet channels(Engine& e, double f) override {
+        auto result = Node::channels(e, f);
+        if (params.flag("inject", false) && input(1) && channelIndex(result, "mask.a") < 0)
+            result.push_back("mask.a");
+        return result;
+    }
+    int identityInput(double f) override {
+        // Injection still needs rendering when size is zero; otherwise the engine drops mask.a.
+        if (params.flag("inject", false) && input(1)) return -1;
+        return BlurBase::identityInput(f);
+    }
     Box dod(Engine& e, double f) override {
         auto [rx, ry] = radius(f, e.scale());
         Box b = e.dod(input(0), f).pad(rx, ry);
-        if (params.flag("crop", true)) b = b.intersect(nodeFormat(e, this, input(0), f).box().unite(e.dod(input(0), f)));
+        if (params.flag("crop", true)) b = b.intersect(e.dod(input(0), f));
         return b;
     }
     void render(RenderArgs& a, Image& out) override {
         std::vector<int> idx;
         ImagePtr src = blurInto(a, out, idx);
         MaskMix mm = MaskMix::setup(a, this, 1);
-        if (!mm.active()) return;
-        for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
-            for (int x = out.bounds.x1; x < out.bounds.x2; ++x) {
-                float w = mm.weight(x, y);
-                float* o = out.px(x, y);
-                for (int i : idx) o[i] = lerpf(src->at(x, y, src->ch(out.channels[i])), o[i], w);
-            }
+        if (mm.active())
+            for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
+                for (int x = out.bounds.x1; x < out.bounds.x2; ++x) {
+                    float w = mm.weight(x, y);
+                    float* o = out.px(x, y);
+                    for (int i : idx) o[i] = lerpf(src->at(x, y, src->ch(out.channels[i])), o[i], w);
+                }
+        if (params.flag("inject", false) && input(1)) {
+            const auto mask = a.fetch(input(1), a.region);
+            const int mc = mask->ch(resolveChannelName(params.str("mask_channel", "none")));
+            const int oc = out.ch("mask.a");
+            if (oc >= 0)
+                for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
+                    for (int x = out.bounds.x1; x < out.bounds.x2; ++x)
+                        out.px(x, y)[oc] = mc >= 0 ? mask->at(x, y, mc) : 0.0f;
+        }
     }
 };
 
