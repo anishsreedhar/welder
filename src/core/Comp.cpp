@@ -380,6 +380,9 @@ bool Comp::rename(Node* n, const std::string& newName) {
     if (old == newName) return true;
     for (auto& o : nodes) {
         if (o->group == old) o->group = newName;  // a group's members follow it
+        if (o->type == "Keyer")
+            for (const char* link : {"input_link", "output_link"})
+                if (o->params.str(link) == old) o->params.data[link] = newName;
         if (o->params.data.dump().find("\"expr\"") != std::string::npos) renameReferences(o->params.data, {{old, newName}});
     }
     return true;

@@ -3707,9 +3707,39 @@ int main(int argc, char** argv) {
             {{"name", "KM"}, {"type", "Keyer"}, {"inputs", {"Mid"}}},
         }), 8, 8);
         const float kd = px(render(*c, "KD"), 2, 2, "A"), km = px(render(*c, "KM"), 2, 2, "A");
-        CHECK(kd < 0.1f);                // dark: mostly keyed out
-        CHECK_NEAR(km, 0.5, 1e-4);       // mid grey: half (the ramp is symmetric about 0.5)
+        CHECK_NEAR(kd, 0.1, 1e-4);       // the default ramp is linear
+        CHECK_NEAR(km, 0.5, 1e-4);
         CHECK(kd < km);
+    });
+
+    test("Keyer: redscreen measures the selected layer and combines into the selected channel", [] {
+        auto c = comp(json::array({
+            {{"name", "Plate"}, {"type", "Constant"}, {"params", {{"color", {0.25, 0.75, 0.25, 0.8}}}}},
+            {{"name", "Layers"}, {"type", "Shuffle"}, {"inputs", {"Plate"}},
+             {"params", {{"mapping", {{"screen.R", "G"}, {"screen.G", "R"}, {"screen.B", "B"}}}}}},
+            {{"name", "Key"}, {"type", "Keyer"}, {"inputs", {"Layers"}},
+             {"params", {{"input", "screen"}, {"operation", "redscreen keyer"}, {"output", "rgba.red"}}}},
+        }), 8, 8);
+        auto* key = c->find("Key");
+        const auto check = [&](const char* mode, float expected) {
+            key->params.data["combine"] = mode;
+            key->paramsChanged();
+            auto image = render(*c, "Key");
+            CHECK_NEAR(px(image, 2, 2, "R"), expected, 1e-5);
+            CHECK_NEAR(px(image, 2, 2, "A"), 0.8, 1e-5);
+        };
+        check("replace", 0.5f);
+        check("intersect", 0.25f);
+        check("union", 0.5f);
+        key->params.data["output"] = "G";
+        key->paramsChanged();
+        auto united = render(*c, "Key");
+        CHECK_NEAR(px(united, 2, 2, "G"), 0.75, 1e-5);
+        key->params.data["output"] = "none";
+        check("replace", 0.25f);
+        key->params.data["output"] = "matte.A";
+        key->paramsChanged();
+        CHECK_NEAR(px(render(*c, "Key"), 2, 2, "matte.A"), 0.5, 1e-5);
     });
 
     test("IBKColour: plates at two scales and from two engines at once stay right (#45)", [] {

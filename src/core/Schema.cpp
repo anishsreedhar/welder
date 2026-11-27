@@ -941,14 +941,19 @@ std::vector<NodeDef> build() {
                  "Pick objects in the viewer, "
                  "or type names (comma separated; <hex> for unnamed ids)."});
     d.push_back({"Keyer", "Keyer",
-                 {C("operation", "operation", "luminance key",
+                 {C("input", "input layer", "rgb", {"rgb"}),
+                  C("output", "output channel", "A", {"A", "R", "G", "B", "none"}),
+                  Same(Tip(Width(C("combine", "", "replace", {"replace", "intersect", "union"}), 100),
+                           "How the matte combines with the existing output channel"), true),
+                  Same(B("invert", "invert", false)),
+                  C("operation", "operation", "luminance key",
                     {"luminance key", "red keyer", "green keyer", "blue keyer", "alpha keyer", "saturation key", "min keyer",
-                     "max keyer", "greenscreen keyer", "bluescreen keyer"}),
+                     "max keyer", "greenscreen keyer", "bluescreen keyer", "redscreen keyer"}),
                   InfoRow("keyer_range", ""),
                   Comps({"range", "range", Knob::Box, json::array({0, 1, 1, 1}), 0, 1, {}, "0 below A, rising to 1 at B, 1 up to C, falling to 0 at D"},
-                        {"A", "B", "C", "D"}),
-                  B("invert", "invert", false)},
-                 "Pulls a key from luminance, a channel, saturation or screen dominance into alpha."});
+                        {"A", "B", "C", "D"})},
+                 "Pulls a matte from the selected layer and writes it to a channel. "
+                 "Intersect takes the lower value and union takes the higher value. Choose none to pass the input through."});
     d.push_back({"HueKeyer", "Keyer",
                  {F("hue", "hue", 120, 0, 360), F("width", "width", 40, 0, 180), F("softness", "softness", 30, 0, 180),
                   F("sat_threshold", "saturation threshold", 0.1, 0, 1), B("invert", "invert", false)},
