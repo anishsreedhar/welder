@@ -162,6 +162,9 @@ std::unique_ptr<Comp> Comp::fromJson(const json& j, const std::filesystem::path&
             if (it == byName.end()) throw RenderError(n->name + ": input '" + src + "' does not exist");
             n->inputs.push_back(it->second);
         }
+        // Older files used alpha implicitly when Blur had a connected mask.
+        if (n->type == "Blur" && n->input(1) && !n->params.has("mask_channel"))
+            n->params.data["mask_channel"] = "A";
         // [["size", "Noise1"], ["mix", null]] (in order), or {"size": "Noise1"}
         std::vector<std::pair<std::string, json>> knobs;
         const json& kj = pendingKnobs[i];
