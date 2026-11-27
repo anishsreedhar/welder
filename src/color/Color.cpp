@@ -64,10 +64,25 @@ int builtinKind(const std::string& s) {  // 0 linear, 1 sRGB, 2 raw, -1 unknown
     static const std::map<std::string, int> m = {
         {kLinearRec709, 0}, {"lin_rec709", 0}, {"lin_srgb", 0}, {"scene_linear", 0}, {"linear", 0},
         {"Linear Rec.709", 0}, {kSrgbTexture, 1}, {"srgb_texture", 1}, {"sRGB", 1}, {"sRGB - Texture", 1},
-        {"color_picking", 1}, {"texture_paint", 1}, {"srgb_tx", 1}, {"Raw", 2}, {"raw", 2}, {"data", 2}, {"none", 2}};
+        {"Gamma1.8",10},{"Gamma2.2",11},{"Gamma2.4",12},{"Gamma2.6",13},{"Gamma2.8",14},{"rec709",4},{"Cineon",5},{"ACES2065-1",3},{"lin_ap0",3},{"color_picking", 1}, {"texture_paint", 1}, {"srgb_tx", 1}, {"Raw", 2}, {"raw", 2}, {"data", 2}, {"none", 2}};
     auto it = m.find(s);
     return it == m.end() ? -1 : it->second;
 }
+
+class BuiltinTransform final:public Transform {
+    int source_,dest_;
+    static float decode(float v,int k){if(k==1)return srgbDecode(v);if(k>=10)return std::copysign(std::pow(std::fabs(v),k==10?1.8f:k==11?2.2f:k==12?2.4f:k==14?2.8f:2.6f),v);if(k==4)return v<.081f?v/4.5f:std::pow((v+.099f)/1.099f,1/.45f);if(k==5){const double black=std::pow(10.,(95.-685)*.002/.6);return (float)((std::pow(10.,(v*1023-685)*.002/.6)-black)/(1-black));}return v;}
+    static float encode(float v,int k){if(k==1)return srgbEncode(v);if(k>=10)return std::copysign(std::pow(std::fabs(v),1/(k==10?1.8f:k==11?2.2f:k==12?2.4f:k==14?2.8f:2.6f)),v);if(k==4)return v<.018f?4.5f*v:1.099f*std::pow(v,.45f)-.099f;if(k==5){const double black=std::pow(10.,(95.-685)*.002/.6);return (float)((std::log10(std::max(1e-20,(double)v*(1-black)+black))*.6/.002+685)/1023);}return v;}
+public:
+    BuiltinTransform(int s,int d):source_(s),dest_(d){}
+    void apply(float* rgb,long n,int stride)const override{
+        static const float toAp0[9]={0.439632981919f,0.382988698152f,0.177378319929f,0.0897764429588f,0.813439428749f,0.0967841282922f,0.0175411703832f,0.111546553302f,0.870912276314f},fromAp0[9]={2.52168618674f,-1.13413098824f,-0.387555198504f,-0.27647991423f,1.37271908767f,-0.0962391734383f,-0.015378064966f,-0.152975335867f,1.16835340083f};
+        for(long i=0;i<n;++i){float v[3];for(int c=0;c<3;++c)v[c]=decode(rgb[i*stride+c],source_);
+            if(source_==3 || dest_==3){const float* m=source_==3?fromAp0:toAp0;float r[3];for(int c=0;c<3;++c)r[c]=m[c*3]*v[0]+m[c*3+1]*v[1]+m[c*3+2]*v[2];std::copy(r,r+3,v);}
+            for(int c=0;c<3;++c)rgb[i*stride+c]=encode(v[c],dest_);
+        }
+    }
+};
 
 #ifdef STRATA_HAVE_OCIO
 std::map<std::string, std::pair<OCIO::ConstConfigRcPtr, std::string>>& configs() {
@@ -250,11 +265,13 @@ std::string canonical(const std::string& config, const std::string& space) {
     (void)config;
 #endif
     int k = builtinKind(space);
-    return k == 0 ? kLinearRec709 : k == 1 ? kSrgbTexture : k == 2 ? "Raw" : "";
+    return k==0?kLinearRec709:k==1?kSrgbTexture:k==2?"Raw":k==3?"ACES2065-1":k>=0?space:"";
 }
 
 TransformPtr convert(const std::string& config, const std::string& src, const std::string& dst, std::string* err) {
     if (src == dst) return identityT();
+    const int builtinSource=builtinKind(src),builtinDest=builtinKind(dst);
+    if((builtinSource>=4 || builtinDest>=4) && builtinSource>=0 && builtinDest>=0)return std::make_shared<BuiltinTransform>(builtinSource,builtinDest);
 #ifdef STRATA_HAVE_OCIO
     if (auto c = cfg(config, err)) {
         if (!c->getColorSpace(src.c_str())) {
@@ -275,9 +292,20 @@ TransformPtr convert(const std::string& config, const std::string& src, const st
         return nullptr;
     }
     if (a == b || a == 2 || b == 2) return identityT();
-    static auto dec = std::make_shared<FnTransform>(srgbDecode);
-    static auto enc = std::make_shared<FnTransform>(srgbEncode);
-    return a == 1 ? TransformPtr(dec) : TransformPtr(enc);
+    return std::make_shared<BuiltinTransform>(a,b);
+}
+
+TransformPtr convertWithContext(const std::string& config,const std::string& src,const std::string& dst,const std::map<std::string,std::string>& vars,std::string* err){
+#ifdef STRATA_HAVE_OCIO
+    if(!vars.empty())if(auto c=cfg(config,err)){
+        auto context=c->getCurrentContext()->createEditableCopy();std::string key="context|"+config+"|"+src+"|"+dst;
+        for(const auto& [k,v]:vars){context->setStringVar(k.c_str(),v.c_str());key+='|'+k+'='+v;}
+        return cached(key,[&]{return c->getProcessor(context,src.c_str(),dst.c_str());},err);
+    }
+#else
+    (void)vars;
+#endif
+    return convert(config,src,dst,err);
 }
 
 TransformPtr display(const std::string& config, const std::string& src, const std::string& d, const std::string& v,

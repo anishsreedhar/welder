@@ -1,7 +1,13 @@
+#include "../core/Process.h"
+#include "../core/ScriptApi.h"
+#include <chrono>
+#include <fstream>
+#include <thread>
 // Read, Write, Constant, CheckerBoard.
 #include <cctype>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <list>
 #include <future>
 #include <map>
@@ -64,7 +70,7 @@ public:
     }
 
     // The file frame for timeline frame `frame`, or nullopt for "black".
-    std::optional<int> fileFrame(double frame) const {
+    virtual std::optional<int> fileFrame(double frame) const {
         const int t = (int)std::floor(frame + 0.5);
         const std::string mode = params.str("frame_mode", "");
         double f = t;
@@ -137,9 +143,13 @@ public:
     static bool isFloatFile(const std::string& p) { return raster::isFloatFile(p); }
     // The file's colour space ("" = no conversion).
     std::string sourceSpace(const std::string& p) const {
-        if (params.flag("raw", false)) return "";
-        std::string cs = params.str("colorspace", "default");
-        if (cs == "default") cs = isFloatFile(p) ? color::workingOf(comp) : color::defaultIntegerSpace(comp);
+        if ((params.flag("raw",false) && !params.flag("aces_compliant",false))) return "";
+        std::string cs = params.flag("aces_compliant",false)?"ACES2065-1":params.str("colorspace", "default");
+        if(cs=="default"){
+            cs=isFloatFile(p)?color::workingOf(comp):color::defaultIntegerSpace(comp);
+            if(movie::isMoviePath(p)){const auto transfer=movie::probe(p).transfer;if(!transfer.empty())cs=transfer;}
+            else{std::string ext=std::filesystem::path(p).extension().string();for(char& c:ext)c=(char)std::tolower((unsigned char)c);if(ext==".dpx"){std::ifstream f(p,std::ios::binary);f.seekg(801);char transfer=0;if(f.get(transfer)){if(transfer==1 || transfer==3)cs="Cineon";else if(transfer==2)cs="linear";else if(transfer==6)cs="rec709";}}}
+        }
         if (cs == color::workingOf(comp)) return isFloatFile(p) ? "" : cs;
         return cs;
     }
@@ -716,32 +726,47 @@ private:
 //         and for h.264 / h.265 encoder, rate_control, bitrate, h264_profile /
 //         h265_profile, encoder_speed, keyframes; deep (EXR: the input's deep samples as a
 //         deep scanline EXR, see writeDeepFrame)
-class WriteNode : public Node {
+class WriteNode : public ReadNode {
 public:
-    int identityInput(double) override { return 0; }
-    void render(RenderArgs&, Image&) override {}
+    std::optional<int> fileFrame(double frame) const override{
+        double outputFrame=frame;const std::string mode=params.str("frame_mode","expression"),mapping=params.str("frame","");
+        if(!mapping.empty()){
+            std::string error;const double value=expr::eval(mapping,frame,this,nullptr,frame,&error);
+            if(!error.empty() || !std::isfinite(value))throw RenderError(name+": invalid output frame expression: "+error);
+            outputFrame=mode=="offset"?frame+value:mode=="start at"?frame-params.num("first",frame,comp->firstFrame)+value:value;
+        }
+        if(outputFrame<std::numeric_limits<int>::min() || outputFrame>std::numeric_limits<int>::max())throw RenderError(name+": output frame is out of range");
+        return (int)std::floor(outputFrame+.5);
+    }
+    int maxInputs() const override{return 1;}
+    int identityInput(double) override {return params.flag("read_file",false)?-1:0;}
+    bool timeDependent() const override{return params.flag("read_file",false)?ReadNode::timeDependent():Node::timeDependent();}
+    Format format(Engine& e,double f) override{if(params.flag("read_file",false)){if(params.flag("read_all_lines",false))load(f,e.scale());return ReadNode::format(e,f);}return Node::format(e,f);}
+    Box dod(Engine& e,double f) override{return params.flag("read_file",false)?ReadNode::dod(e,f):Node::dod(e,f);}
+    ChannelSet channels(Engine& e,double f) override{return params.flag("read_file",false)?ReadNode::channels(e,f):Node::channels(e,f);}
+    json metadata(double f) override{return params.flag("read_file",false)?ReadNode::metadata(f):Node::metadata(f);}
+    void render(RenderArgs& a, Image& out) override {if(params.flag("read_file",false))ReadNode::render(a,out);}
     bool isExecutable() const override { return !params.flag("disable", false); }
 
-    void beginExecute(Engine&, double, double) override {
-        session_ = true;
-        movie_.reset();
+    void beginExecute(Engine& engine,double first,double last) override {
+        callbackEngine_=&engine;
+        session_=true;first_=first;last_=last;movie_.reset();callback("before_render",first,0,params.str("file"));
     }
-    void finishExecute(bool) override {
-        session_ = false;
-        auto m = std::move(movie_);
-        if (m) m->close();
+    void finishExecute(bool success) override {
+        session_=false;auto m=std::move(movie_);if(m)m->close();if(success)callback("after_render",last_,1,params.str("file"));
     }
 
     // the classic file type: picking one sets the file's extension; typing a file
     // with another extension picks its type.
     void paramsChanged() override {
+        ReadNode::paramsChanged();
         std::string f = params.str("file"), t = params.str("file_type", "");
         auto dot = f.rfind('.');
         std::string ext = dot == std::string::npos ? "" : f.substr(dot + 1);
         for (auto& ch : ext) ch = (char)std::tolower((unsigned char)ch);
         if (!t.empty() && t != lastType_ && !f.empty()) {
             std::string want = t == "jpeg" ? "jpg" : t == "targa" ? "tga" : t == "tiff" ? "tif" : t;
-            if (ext != want && !(t == "tiff" && ext == "tiff") && !(t == "jpeg" && ext == "jpeg"))
+            if (!(t=="mov" && movie::isMoviePath(f)) && ext != want && !(t == "tiff" && ext == "tiff") && !(t == "jpeg" && ext == "jpeg"))
                 params.data["file"] = (dot == std::string::npos ? f : f.substr(0, dot)) + "." + want;
         } else if (f != lastFile_ && !ext.empty() && params.has("file_type")) {
             std::string ty = ext == "jpg" ? "jpeg" : ext == "tga" ? "targa" : ext == "tif" ? "tiff" : ext;
@@ -756,24 +781,34 @@ public:
     }
 
     void execute(Engine& e, double frame) override {
+        callbackEngine_=&e;
         // the classic "limit to range": frames outside it aren't written
         if (params.flag("use_limit", false) &&
             (frame < params.num("first", frame, -1e30) - 1e-9 || frame > params.num("last", frame, 1e30) + 1e-9))
             return;
         Node* in = input(0);
         if (!in) throw RenderError(name + ": no input connected");
-        std::string pattern = params.str("file");
-        if (pattern.empty()) throw RenderError(name + ": no output file set");
-        std::string p = comp->resolvePath(expandFramePattern(pattern, (int)std::floor(frame + 0.5)));
+        if(params.str("file_type")=="null"){
+            callback("before_frame",frame,0,"");e.renderRegion(in,frame,in->format(e,frame).box());callback("after_frame",frame,1,"");callback("render_progress",frame,1,"");return;
+        }
+        std::string pattern=e.scale()<1. && !params.str("proxy").empty()?params.str("proxy"):params.str("file");
+        if(pattern.empty())throw RenderError(name+": no output file set");
+        const int mappedFrame=*fileFrame(frame);
+        std::string p=comp->resolvePath(expandFramePattern(pattern,mappedFrame));
+        const auto parent=std::filesystem::path(p).parent_path();
+        if(!params.flag("create_directories",true) && !parent.empty() && !std::filesystem::exists(parent))throw RenderError(name+": output directory does not exist (enable create directories)");
+        const double progress=std::clamp((frame-first_+1)/std::max(1.,last_-first_+1),0.,1.);
+        callback("before_frame",frame,progress,p);
+        auto done=[&]{callback("after_frame",frame,progress,p);callback("render_progress",frame,progress,p);};
         if (params.flag("deep", false) && writesDeep(p)) {
-            writeDeepFrame(this, e, in, frame, p);
+            writeDeepFrame(this, e, in, frame, p);done();
             return;
         }
 
         Format fmt = in->format(e, frame);
         ChannelSet avail = e.channels(in, frame);
         ChannelSet want = parseChannels(params, "channels", "all", avail);
-        bool bboxWindow = params.str("data_window", "format") == "bbox";
+        bool bboxWindow = params.str("data_window", "format") == "bbox" || params.flag("autocrop",false);
         ImagePtr img = e.renderRegion(in, frame, bboxWindow ? e.dod(in, frame) : fmt.box());
         Image sel(img->bounds, want);
         sel.copyFrom(*img);
@@ -787,11 +822,30 @@ public:
         o.compression = params.str("compression", "zip");
         o.dwaLevel = (float)params.num("dwa_level", frame, 45.0);
         o.exrBboxDataWindow = params.str("data_window", "format") == "bbox";
-        o.raw = params.flag("raw", false);
+        o.aces=params.flag("aces_compliant",false);
+        o.raw=params.flag("raw",false) && !o.aces;
+        o.jpegQuality=(int)std::lround(std::clamp(params.num("jpeg_quality",frame,.75),0.,1.)*100);
+        o.jpegSubsampling=params.str("jpeg_subsampling","4:1:1");o.dpxBigEndian=params.flag("dpx_big_endian",true);o.dpxFill=params.flag("dpx_fill",true);
+        const std::map<std::string,int> transfer={{"user defined",0},{"printing density",1},{"linear",2},{"logarithmic",3},{"unspecified video",4},{"SMPTE 274M",5},{"ITU-R 709",6},{"ITU-R 601",7}};
+        const auto tr=params.str("dpx_transfer","auto");o.dpxTransfer=transfer.count(tr)?transfer.at(tr):params.str("colorspace")=="Cineon"?1:params.str("colorspace")=="linear"?2:0;
+        o.exrInterleave=params.str("interleave","all");o.exrFirstPart=params.str("first_part","rgba");o.exrFullLayerNames=params.flag("write_full_layer_names",false);o.exrStandardNames=params.flag("standard_layer_names",false);o.exrTruncateNames=params.flag("truncate_channel_names",false);
+        if(o.aces){for(const auto& ch:sel.channels)if(ch!="R" && ch!="G" && ch!="B" && ch!="A")throw RenderError(name+": ACES EXR requires only RGB or RGBA channels");o.exrType=ExrPixelType::Half;o.compression="none";o.exrInterleave="all";}
+        if(params.flag("autocrop",false)){
+            Box crop;bool found=false;const int nc=sel.nch();
+            for(int y=sel.bounds.y1;y<sel.bounds.y2;++y)for(int x=sel.bounds.x1;x<sel.bounds.x2;++x){bool nonzero=false;for(int c=0;c<nc;++c)nonzero=nonzero || sel.at(x,y,c)!=0;if(nonzero){if(!found){crop=Box(x,y,x+1,y+1);found=true;}else crop=Box(std::min(crop.x1,x),std::min(crop.y1,y),std::max(crop.x2,x+1),std::max(crop.y2,y+1));}}
+            if(found){Image trimmed(crop,sel.channels);trimmed.copyFrom(sel);sel=std::move(trimmed);o.exrBboxDataWindow=true;}
+        }
         {  // timecode from upstream (AddTimeCode), and the rest of the metadata (#99), for the file's header
             const json md = in->metadata(frame);
-            if (params.str("metadata", "all") == "all" && md.is_object()) o.metadata = md;
-            if (md.is_object() && md.contains("timecode") && md["timecode"].is_string()) {
+            const std::string policy=params.str("metadata","all");
+            if(md.is_object() && policy!="none" && policy!="timecode only")for(const auto& [k,v]:md.items()){
+                const bool input=k.rfind("input/",0)==0,exr=k.rfind("exr/",0)==0,standard=k=="timecode" || k=="fps" || k.rfind("cryptomatte/",0)==0;
+                if(policy=="all" || (policy=="all except input" && !input) || (policy=="default and exr" && (standard || exr)) || (policy=="default" && standard))o.metadata[k]=v;
+            }
+            if(!params.flag("metadata_noprefix",true) && o.metadata.is_object()){
+                json prefixed=json::object();for(const auto& [k,v]:o.metadata.items())prefixed[k.rfind("exr/",0)==0 || k.rfind("cryptomatte/",0)==0 || k=="fps" || k=="timecode"?k:"welder/"+k]=v;o.metadata=std::move(prefixed);
+            }
+            if (params.str("metadata","all")!="none" && md.is_object() && md.contains("timecode") && md["timecode"].is_string()) {
                 o.timecode = md["timecode"].get<std::string>();
                 o.timecodeFps = md.value("fps", comp->fps);
             }
@@ -800,23 +854,45 @@ public:
             bool fl = writesFloat(p, o);
             std::string cs = params.str("colorspace", "default");
             std::string working = color::workingOf(comp);
-            if (cs == "default") cs = fl ? working : color::defaultIntegerSpace(comp);
+            if(cs=="default"){
+                std::string ext=std::filesystem::path(p).extension().string();for(char& c:ext)c=(char)std::tolower((unsigned char)c);
+                cs=fl?working:movie::isMoviePath(p)?"Gamma2.2":ext==".dpx"?"Cineon":color::defaultIntegerSpace(comp);
+                if(ext==".dpx" && params.str("dpx_transfer","auto")=="auto")o.dpxTransfer=1;
+            }
+            if(o.aces)cs="ACES2065-1";
+            std::map<std::string,std::string> context;
+            for(int i=1;i<=4;++i){const auto key=params.str("context_key"+std::to_string(i));if(!key.empty())context[key]=params.str("context_value"+std::to_string(i));}
             std::string err;
-            auto t = color::convert(color::configOf(comp), working, cs, &err);
+            auto t=color::convertWithContext(color::configOf(comp),working,cs,context,&err);
             if (!t) throw RenderError(name + ": " + err);
-            if (fl) color::apply(*t, sel, false);
+            if (fl) color::apply(*t, sel, params.flag("premultiplied",false));
             else o.encode = [t](float* rgb, long n, int stride) { t->apply(rgb, n, stride); };
         }
         if (movie::isMoviePath(p)) {
-            writeMovie(p, sel, fmt, o, frame);
+            writeMovie(p,sel,fmt,o,frame);done();
             return;
         }
-        writeImage(p, sel, fmt, o);
+        writeImage(p,sel,fmt,o);done();
     }
 
 private:
     std::unique_ptr<movie::Writer> movie_;
     bool session_ = false;
+    double first_=1,last_=1;
+    Engine* callbackEngine_=nullptr;
+    void callback(const std::string& event,double frame,double progress,const std::string& path){
+        const auto code=params.str(event);if(code.empty())return;
+        auto args=scripting::pythonCommand(params.str("callback_python"));if(args.empty())throw RenderError(name+": no Python interpreter is configured for "+event);
+        json context={{"event",event},{"node_name",name},{"frame",frame},{"first_frame",first_},{"last_frame",last_},{"progress",progress},{"output_path",path}};
+        args.insert(args.end(),{"-c","import json,sys; globals().update(json.loads(sys.argv[1])); exec(compile(sys.argv[2], '<Write '+event+'>', 'exec'))",context.dump(),code});
+        const auto log=(std::filesystem::temp_directory_path()/("welder-write-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".log")).string();
+        std::string error;auto process=Process::start(args,log,&error);if(!process)throw RenderError(name+": "+event+": "+error);
+        const auto start=std::chrono::steady_clock::now();while(process->running()){
+            if(callbackEngine_ && callbackEngine_->cancelled()){process->kill();throw RenderCancelled();}
+            if(std::chrono::steady_clock::now()-start>std::chrono::minutes(5)){process->kill();throw RenderError(name+": Python callback timed out");}std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if(process->exitCode()!=0){std::ifstream f(log);std::string output((std::istreambuf_iterator<char>(f)),{});throw RenderError(name+": "+event+": "+output);}
+    }
 
     // deep samples only go to EXR
     static bool writesDeep(const std::string& p) {
@@ -835,7 +911,15 @@ private:
             if (fp.has_parent_path()) std::filesystem::create_directories(fp.parent_path());
             movie::WriterOptions mo;
             mo.codec = params.str("codec", "prores 422 hq");
-            mo.fps = comp->fps;
+            std::string extension=std::filesystem::path(p).extension().string();for(char& c:extension)c=(char)std::tolower((unsigned char)c);
+            if(params.str("file_type")=="mov" || (extension==".mp4" && mo.codec!="h.264" && mo.codec!="h.265" && mo.codec!="mpeg4"))mo.container="mov";
+            mo.fps=params.num("fps",frame,comp->fps);if(mo.fps<=0)throw RenderError(name+": FPS must be greater than zero");
+            mo.colorTransfer=o.raw?"linear":params.str("colorspace","default");if(mo.colorTransfer=="default")mo.colorTransfer="Gamma2.2";
+            mo.matrix=params.str("ycbcr_matrix","auto");mo.dataRange=params.str("data_range","video");mo.fastStart=params.flag("fast_start",true);
+            mo.timecode=params.flag("write_timecode",true)?o.timecode:"";
+            if(!params.str("audio_file").empty())mo.audioFile=comp->resolvePath(params.str("audio_file"));
+            mo.audioOffset=params.num("audio_offset",frame,0)/(params.str("audio_units","seconds")=="frames"?mo.fps:1.);
+            if(params.str("codec_family")=="Motion JPEG A")mo.codecTag="mjpa";
             mo.quality = (int)params.num("quality", frame, 90);
             mo.encoder = params.str("encoder", "auto");
             mo.rate = params.str("rate_control", "quality");

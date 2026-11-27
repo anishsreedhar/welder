@@ -17,14 +17,16 @@
 
 namespace strata::ui {
 
+ImFont* timelineReferenceFont();
+
 namespace {
 
 #define kAccent (themeAccent())  // the theme's accent
 constexpr ImU32 kKey = IM_COL32(90, 170, 255, 255);
 constexpr ImU32 kCache = IM_COL32(80, 200, 110, 230);
 
-float rulerHeight() { return 34.f*theme().uiScale; }
-float smallFont() { return std::round(ImGui::GetFontSize() * 0.85f); }
+float rulerHeight() { return 36.f*theme().uiScale; }
+float smallFont() { return 10.f*theme().uiScale; }
 
 std::string timecode(int frame, double fps) {
     const int n = std::max(1, (int)std::lround(fps));
@@ -76,8 +78,15 @@ bool frameEntry(const char* id, int value, bool tc, double fps, int& result) {
     char buf[48];
     const std::string initial = tc ? timecode(value, fps) : std::to_string(value);
     std::snprintf(buf, sizeof buf, "%s", initial.c_str());
-    if (!ImGui::InputText(id, buf, sizeof buf, ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll))
-        return false;
+    const bool idle=ImGui::GetActiveID()!=ImGui::GetID(id);
+    if(idle)ImGui::PushStyleColor(ImGuiCol_Text,IM_COL32(0,0,0,0));
+    const bool edited=ImGui::InputText(id,buf,sizeof buf,ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+    if(idle){
+        ImGui::PopStyleColor();
+        const auto a=ImGui::GetItemRectMin(),b=ImGui::GetItemRectMax(),size=ImGui::CalcTextSize(initial.c_str());
+        ImGui::GetWindowDrawList()->AddText(ImVec2((a.x+b.x-size.x)*.5f,(a.y+b.y-size.y)*.5f),ImGui::GetColorU32(ImGuiCol_Text),initial.c_str());
+    }
+    if(!edited)return false;
     const char* p = buf;
     while (*p == ' ') ++p;
     const bool relative = (*p == '+' || *p == '-') && p[1] == '=';
@@ -105,8 +114,11 @@ void drawIcon(ImDrawList* dl, const ImRect& r, Icon ic, ImU32 col) {
     const float s = std::min(r.GetWidth(), r.GetHeight()) * 0.5f;  // icon size
     const float t = std::max(1.5f, s * 0.13f);                     // bar thickness
     auto bar = [&](float x) { dl->AddRectFilled(ImVec2(x - t * 0.5f, c.y - s * 0.5f), ImVec2(x + t * 0.5f, c.y + s * 0.5f), col); };
-    auto diamond = [&](ImVec2 p, float d) {
-        dl->AddQuadFilled(ImVec2(p.x, p.y - d), ImVec2(p.x + d, p.y), ImVec2(p.x, p.y + d), ImVec2(p.x - d, p.y), col);
+    auto key=[&](bool right){
+        const float x=c.x+(right?1.f:-1.f)*s*.43f,y=c.y+s*.05f;
+        dl->AddCircle(ImVec2(x,y),s*.19f,col,12,1.f);
+        dl->AddLine(ImVec2(x,y+s*.19f),ImVec2(x,y+s*.65f),col,1.f);
+        dl->AddLine(ImVec2(x,y+s*.5f),ImVec2(x+(right?1.f:-1.f)*s*.19f,y+s*.5f),col,1.f);
     };
     switch (ic) {
         case Icon::PlayFwd: tri(dl, c, s, true, col); break;
@@ -132,11 +144,11 @@ void drawIcon(ImDrawList* dl, const ImRect& r, Icon ic, ImU32 col) {
             break;
         case Icon::KeyFwd:
             tri(dl, ImVec2(c.x - s * 0.2f, c.y), s * 0.8f, true, col);
-            diamond(ImVec2(c.x + s * 0.45f, c.y + s * 0.3f), s * 0.2f);
+            key(true);
             break;
         case Icon::KeyBack:
             tri(dl, ImVec2(c.x + s * 0.2f, c.y), s * 0.8f, false, col);
-            diamond(ImVec2(c.x - s * 0.45f, c.y + s * 0.3f), s * 0.2f);
+            key(false);
             break;
         case Icon::IncFwd:
             tri(dl, ImVec2(c.x - s * 0.22f, c.y), s * 0.7f, true, col);
@@ -146,12 +158,12 @@ void drawIcon(ImDrawList* dl, const ImRect& r, Icon ic, ImU32 col) {
             tri(dl, ImVec2(c.x - s * 0.22f, c.y), s * 0.7f, false, col);
             tri(dl, ImVec2(c.x + s * 0.22f, c.y), s * 0.7f, false, col);
             break;
-        case Icon::Repeat: {  // a circular arrow
-            const float rad = s * 0.42f;
-            dl->PathArcTo(c, rad, IM_PI * 0.15f, IM_PI * 1.75f, 16);
-            dl->PathStroke(col, 0, t);
-            ImVec2 e(c.x + rad * std::cos(IM_PI * 0.15f), c.y + rad * std::sin(IM_PI * 0.15f));
-            dl->AddTriangleFilled(ImVec2(e.x - s * 0.22f, e.y), ImVec2(e.x + s * 0.22f, e.y), ImVec2(e.x, e.y + s * 0.26f), col);
+        case Icon::Repeat: {
+            for(float sign:{-1.f,1.f}){
+                const float y=c.y+sign*2.5f;
+                dl->AddBezierCubic(ImVec2(c.x-sign*6,y-sign*2),ImVec2(c.x-sign*3,y+sign*1),ImVec2(c.x+sign*3,y+sign*1),ImVec2(c.x+sign*6,y),col,1.2f);
+                tri(dl,ImVec2(c.x+sign*6,y),4,sign>0,col);
+            }
             break;
         }
         case Icon::Bounce:  // arrows both ways
@@ -165,12 +177,10 @@ void drawIcon(ImDrawList* dl, const ImRect& r, Icon ic, ImU32 col) {
             tri(dl, ImVec2(c.x + s * 0.18f, c.y), s * 0.5f, true, col);
             bar(c.x + s * 0.52f);
             break;
-        case Icon::Cache:  // a stack of frames
-            for (int i = 2; i >= 0; --i) {
-                ImVec2 o(c.x - s * 0.3f + i * s * 0.18f, c.y - s * 0.3f + i * s * 0.12f);
-                dl->AddRectFilled(o, ImVec2(o.x + s * 0.55f, o.y + s * 0.42f), IM_COL32(50, 50, 50, 255));
-                dl->AddRect(o, ImVec2(o.x + s * 0.55f, o.y + s * 0.42f), col, 0, 0, std::max(1.0f, t * 0.7f));
-            }
+        case Icon::Cache:
+            dl->AddLine(ImVec2(c.x-7,c.y+5),ImVec2(c.x+7,c.y+5),col,1.f);
+            for(int i=0;i<6;++i)dl->AddLine(ImVec2(c.x-7+i*3,c.y+5),ImVec2(c.x-7+i*3,c.y+(i%2?3:1)),col,1.f);
+            tri(dl,ImVec2(c.x-2,c.y-2),5,true,col);
             break;
         case Icon::Lock:
         case Icon::Unlock: {
@@ -191,12 +201,30 @@ void drawIcon(ImDrawList* dl, const ImRect& r, Icon ic, ImU32 col) {
 bool iconButton(const char* id, Icon ic, float w, bool on = false, const char* tip = nullptr) {
     const float h = ImGui::GetFrameHeight();
     if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+    const bool flat=std::string(id)=="##loop" || std::string(id)=="##rangeLock" || std::string(id)=="##cacheRange";
+    if(flat){ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);ImGui::PushStyleColor(ImGuiCol_Button,IM_COL32(50,50,50,255));}
     bool r = ImGui::Button(id, ImVec2(w, h));
+    if(flat){ImGui::PopStyleColor();ImGui::PopStyleVar();}
     if (on) ImGui::PopStyleColor();
     ImRect rr(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
-    drawIcon(ImGui::GetWindowDrawList(), rr, ic, on ? kAccent : ImGui::GetColorU32(ImGuiCol_Text));
+    auto* d=ImGui::GetWindowDrawList();
+    if(!flat && !on){const bool hot=ImGui::IsItemHovered();const ImU32 top=hot?IM_COL32(95,95,95,255):IM_COL32(84,84,84,255),bottom=hot?IM_COL32(78,78,78,255):IM_COL32(70,70,70,255);d->AddRectFilledMultiColor(ImVec2(rr.Min.x+1,rr.Min.y+1),ImVec2(rr.Max.x-1,rr.Max.y-1),top,top,bottom,bottom);}
+    drawIcon(d,rr,ic,on?kAccent:IM_COL32(150,150,150,255));
+    if(std::string(id)=="##loop")d->AddTriangleFilled(ImVec2(rr.Max.x-5,rr.GetCenter().y+3),ImVec2(rr.Max.x-1,rr.GetCenter().y+3),ImVec2(rr.Max.x-3,rr.GetCenter().y+6),IM_COL32(145,145,145,255));
     if (tip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
     return r;
+}
+
+// Compact, borderless menus with the small arrow in the reference strip.
+bool timelineCombo(const char* id,const char* preview,float width){
+    const auto p=ImGui::GetCursorScreenPos();auto* d=ImGui::GetWindowDrawList();const float h=ImGui::GetFrameHeight();
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);ImGui::PushStyleColor(ImGuiCol_FrameBg,IM_COL32(50,50,50,255));
+    ImGui::SetNextItemWidth(width);const bool open=ImGui::BeginCombo(id,preview,ImGuiComboFlags_NoArrowButton);
+    ImGui::PopStyleColor();ImGui::PopStyleVar();
+    d->AddLine(ImVec2(p.x+width-1,p.y+2),ImVec2(p.x+width-1,p.y+h-2),IM_COL32(30,30,30,255));
+    const float x=p.x+width-9,y=p.y+h*.5f;
+    d->AddTriangleFilled(ImVec2(x-3,y-2),ImVec2(x+3,y-2),ImVec2(x,y+2),IM_COL32(145,145,145,255));
+    return open;
 }
 
 bool captureActionButton(const char* id,int kind,float width,const char* tip) {
@@ -260,8 +288,7 @@ std::vector<double> openKeys(App& app) {
 }  // namespace
 
 float timelineHeight() {
-    const ImGuiStyle& st = ImGui::GetStyle();
-    return std::round(8 + rulerHeight() + st.ItemSpacing.y + ImGui::GetFrameHeight());
+    return std::round(76.f*theme().uiScale);
 }
 
 // Called before the dockspace each frame: the timeline's node keeps its height when the
@@ -328,10 +355,17 @@ void lockTimelineHeight() {
 
 void drawTimeline(App& app, UiState& ui) {
     // floating: the same fixed height; under a maximized viewer: that plus its title bar
-    const float H = timelineHeight() + (ui.maximized == "Viewer" ? ImGui::GetFrameHeight() : 0.0f);
+    const float H = timelineHeight();
     ImGui::SetNextWindowSizeConstraints(ImVec2(160, H), ImVec2(FLT_MAX, FLT_MAX));  // at least tall enough; taller when dragged
+    ImGui::PushFont(timelineReferenceFont(),11.f*theme().uiScale);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(3,6.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(2,4));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,0);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,IM_COL32(50,50,50,255));
+    ImGui::PushStyleColor(ImGuiCol_Text,IM_COL32(190,190,190,255));
+    ImGui::PushStyleColor(ImGuiCol_Border,IM_COL32(31,31,31,255));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
-    ImGui::Begin(ui.win("Timeline").c_str(), nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::Begin(ui.win("Timeline").c_str(), nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
     ui.noteHover("Timeline");
     Comp& c = *app.comp;
@@ -394,7 +428,7 @@ void drawTimeline(App& app, UiState& ui) {
     // ---------------------------------------------------------- row 1: [first] ruler [last]
     // First / last fields: edit the project range (Global, unless locked) or the
     // custom range; Input shows the input's range read-only.
-    const float fieldW = std::max(40.0f, ImGui::CalcTextSize(tc ? "00:00:00:00" : "000000").x + 10);
+    const float fieldW = tc?92.f:50.f*theme().uiScale;
     auto rangeField = [&](const char* id, int value, bool isFirst, float x) {
         ImGui::SetCursorScreenPos(ImVec2(x, origin.y + 3));
         ImGui::SetNextItemWidth(fieldW);
@@ -427,14 +461,18 @@ void drawTimeline(App& app, UiState& ui) {
                                   isFirst ? "first" : "last");
         }
     };
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,IM_COL32(58,58,58,255));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(3,11));
     rangeField("##first", (int)std::floor(visA), true, origin.x);
-    rangeField("##last", (int)std::ceil(visB), false, origin.x + W - fieldW);
+    rangeField("##last", (int)std::ceil(visB), false, origin.x + W - fieldW - 16*theme().uiScale);
+    ImGui::PopStyleColor();ImGui::PopStyleVar(2);
 
     // the ruler
     const float gap = st.ItemSpacing.x;
-    const ImVec2 r0(origin.x + fieldW + gap, origin.y), r1(origin.x + W - fieldW - gap, origin.y + RH);
+    const ImVec2 r0(origin.x + fieldW + gap, origin.y), r1(origin.x + W - fieldW - 22*theme().uiScale, origin.y + RH);
     const float rw = std::max(20.0f, r1.x - r0.x);
-    const float margin = std::min(rw * 0.35f, std::max(6.0f, ImGui::CalcTextSize(label(last).c_str()).x * 0.5f * sf / ImGui::GetFontSize() + 2));
+    const float margin = tc?std::min(rw*.35f,ImGui::CalcTextSize(label(last).c_str()).x*.5f):6*theme().uiScale;
     const double span = std::max(1.0, (double)last - first);
     const float ppf = (float)((rw - 2 * margin) / span);  // pixels per frame
     auto xOf = [&](double fr) { return r0.x + margin + (float)(fr - first) * ppf; };
@@ -442,11 +480,12 @@ void drawTimeline(App& app, UiState& ui) {
 
     const float labelTop = r1.y - sf - 1;          // frame numbers under the ticks
     const float tickBase = labelTop - 1;           // ticks hang above them
-    const float curTop = r0.y;                     // the current frame's number, above the marker
-    const float markTop = r0.y + sf + 1;           // the marker
+    const float curTop = r0.y+3;                     // the current frame's number, above the marker
+    const float markTop = r0.y + sf + 3;           // the marker
     const float tickTop = tickBase - std::round(RH * 0.32f);
 
-    dl->AddRectFilled(r0, ImVec2(r0.x + rw, r1.y), IM_COL32(40, 40, 40, 255), 2);
+    dl->AddRectFilled(r0, ImVec2(r0.x + rw, r1.y), IM_COL32(45, 45, 45, 255), 0);
+    dl->AddRectFilled(r0,ImVec2(r0.x+rw,r0.y+3),IM_COL32(100,100,100,255));
     // outside in/out: darker; in/out: orange brackets
     if (marked) {
         const double a = ui.timelineDrag == 1 ? ui.timelineDragFrame : markIn;
@@ -474,7 +513,7 @@ void drawTimeline(App& app, UiState& ui) {
     const float labelW = ImGui::CalcTextSize(label(last).c_str()).x * sf / ImGui::GetFontSize();
     const int major = std::max(minor, niceStep((labelW * 2 + 30) / std::max(1e-6f, ppf)));  // roomy, as is standard
     const int mid = major % 5 == 0 && major / 5 >= minor && (major / 5) % minor == 0 ? major / 5 : (major % 2 == 0 && major / 2 >= minor ? major / 2 : major);
-    const ImU32 tickCol = IM_COL32(150, 150, 150, 255), labelCol = IM_COL32(170, 170, 170, 255);
+    const ImU32 tickCol = IM_COL32(175, 175, 175, 255), labelCol = IM_COL32(205, 205, 205, 255);
     auto floorTo = [](int v, int s) { return (int64_t)std::floor((double)v / s) * s; };
     for (int64_t fr = floorTo(first, minor); fr <= last; fr += minor) {
         if (fr < first) continue;
@@ -568,7 +607,7 @@ void drawTimeline(App& app, UiState& ui) {
         const float x = std::round(xOf(f)) + 0.5f;
         const float ms = std::round(sf * 0.45f);
         dl->AddTriangleFilled(ImVec2(x - ms, markTop), ImVec2(x + ms, markTop), ImVec2(x, markTop + ms * 1.3f), kAccent);
-        dl->AddLine(ImVec2(x, markTop + ms), ImVec2(x, tickBase), kAccent, 1.5f);
+        dl->AddLine(ImVec2(x, markTop + ms), ImVec2(x, tickBase), kAccent, 1.f);
         std::string s = label(f);
         float tw = font->CalcTextSizeA(sf, FLT_MAX, 0, s.c_str()).x;
         float tx = std::clamp(x - tw * 0.5f, r0.x + 1, std::max(r0.x + 1, r0.x + rw - tw - 1));
@@ -577,16 +616,16 @@ void drawTimeline(App& app, UiState& ui) {
 
     // ---------------------------------------------------------- row 2
     const float y2 = origin.y + RH + st.ItemSpacing.y;
-    const float bw = 28.f*theme().uiScale;  // transport buttons
+    const float bw = 30.f*theme().uiScale;  // transport buttons
     const float sp = 2;                                               // between transport buttons
-    const float frameW = std::max(48.0f, ImGui::CalcTextSize(tc ? "00:00:00:00" : "000000").x + 12);
+    const float frameW = tc?92.f:48.f*theme().uiScale;
     const float fpsW = 58*theme().uiScale;
     const float tfW = 35*theme().uiScale;
     const float modeW = 70*theme().uiScale;
-    const float incW = ImGui::CalcTextSize("000").x + 8;
-    const float countW = ImGui::CalcTextSize("000000").x + 10;
-    const float flipW = 22*theme().uiScale;
-    const float captureW = 22*theme().uiScale;
+    const float incW = 20.f*theme().uiScale;
+    const float countW = 50.f*theme().uiScale;
+    const float flipW = 20*theme().uiScale;
+    const float captureW = 20*theme().uiScale;
 
     // What fits: the less-used parts drop out as the panel narrows.
     struct Show { bool tf = true, inc = true, loop = true, keys = true, io = true, ends = true, actions = true, duration = true, steps = true; } show;
@@ -594,8 +633,8 @@ void drawTimeline(App& app, UiState& ui) {
         left = fpsW + (show.tf ? gap + tfW : 0) + gap + modeW;
         int nb = 2 /*play*/ + (show.steps ? 2 : 0) + (show.keys ? 2 : 0) + (show.ends ? 2 : 0) + (show.io ? 2 : 0) + (show.loop ? 1 : 0) +
                  (show.inc ? 2 : 0);
-        mid = nb * (bw + sp) + frameW + sp + (show.inc ? incW + sp : 0) + (show.inc ? 8 : 0) + (show.loop ? 6 : 0);
-        right = bw + (show.actions ? flipW + captureW + sp * 2 : 0) + (show.duration ? countW + sp : 0);
+        mid = nb*(bw+sp)+frameW+sp+(show.inc?incW+sp+8-20*theme().uiScale:0)+(show.loop?6-6*theme().uiScale:0)-(show.io?28*theme().uiScale:0);
+        right = 16*theme().uiScale + (show.actions ? flipW + captureW + 40*theme().uiScale + sp*4 : 0) + (show.duration ? countW + sp : 0);
     };
     float lw, mw, rwid;
     bool* drops[] = {&show.actions, &show.inc, &show.loop, &show.tf, &show.keys, &show.duration, &show.io, &show.ends, &show.steps};
@@ -607,6 +646,7 @@ void drawTimeline(App& app, UiState& ui) {
     widths(lw, mw, rwid);
     const bool leftFits = lw + mw + rwid + gap * 4 <= W || lw + mw + gap * 2 <= W;
     float midX = origin.x + (W - mw) * 0.5f;  // centred, as is standard
+    midX-=5*theme().uiScale;
     if (leftFits) midX = std::clamp(midX, origin.x + lw + gap * 2, std::max(origin.x + lw + gap * 2, origin.x + W - rwid - gap * 2 - mw));
     else midX = origin.x;  // very narrow: transport and overflow
 
@@ -616,10 +656,11 @@ void drawTimeline(App& app, UiState& ui) {
         char fpsPrev[32];
         const bool live = app.playing && ui.measuredFps > 0;
         std::snprintf(fpsPrev, sizeof fpsPrev, "%g", live ? std::round(ui.measuredFps * 10) / 10 : c.fps);
+        if(!live)std::snprintf(fpsPrev,sizeof fpsPrev,"%g*",c.fps);
         const bool slow = live && ui.measuredFps < c.fps * 0.95;
         if (slow) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.45f, 0.4f, 1));
         ImGui::SetNextItemWidth(fpsW);
-        if (ImGui::BeginCombo("##fps", fpsPrev)) {
+        if (timelineCombo("##fps",fpsPrev,fpsW)) {
             if (slow) ImGui::PopStyleColor();
             for (double r : {12.0, 15.0, 23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 59.94, 60.0}) {
                 char b[16];
@@ -638,7 +679,7 @@ void drawTimeline(App& app, UiState& ui) {
         if (show.tf) {
             ImGui::SameLine(0, gap);
             ImGui::SetNextItemWidth(tfW);
-            if (ImGui::BeginCombo("##tf", "TF")) {
+            if (timelineCombo("##tf","TF",tfW)) {
                 if (ImGui::Selectable("Frame", ui.timeFormat == 0)) ui.timeFormat = 0;
                 if (ImGui::Selectable("Timecode", ui.timeFormat == 1)) ui.timeFormat = 1;
                 ImGui::EndCombo();
@@ -649,7 +690,7 @@ void drawTimeline(App& app, UiState& ui) {
         ImGui::SameLine(0, gap);
         ImGui::SetNextItemWidth(modeW);
         int m = mode;
-        if (ImGui::Combo("##rangemode", &m, rangeLabels, 3)) chooseSource(m);
+        if(timelineCombo("##rangemode",rangeLabels[m],modeW)){for(int i=0;i<3;++i)if(ImGui::Selectable(rangeLabels[i],i==m))chooseSource(i);ImGui::EndCombo();}
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Global: the project frame range\nInput: the frame range of the viewed node's input (its Read nodes)\n"
                               "Custom: a range of your own; doesn't change the project");
@@ -665,13 +706,14 @@ void drawTimeline(App& app, UiState& ui) {
     static const char* kPlayback[] = {"Loop", "Bounce", "Play once (in/out)", "Play once (full range)"};
     if (show.loop) {
         static const Icon kLoop[] = {Icon::Repeat, Icon::Bounce, Icon::Once, Icon::Once};
-        if (iconButton("##loop", kLoop[ui.playMode], bw, false, kPlayback[ui.playMode])) setPlayMode((ui.playMode + 1) % 4);
+        if(iconButton("##loop",kLoop[ui.playMode],24*theme().uiScale,false,kPlayback[ui.playMode]))ImGui::OpenPopup("timeline_play_mode");
+        if(ImGui::BeginPopup("timeline_play_mode")){for(int mode=0;mode<4;++mode)if(ImGui::Selectable(kPlayback[mode],ui.playMode==mode))setPlayMode(mode);ImGui::EndPopup();}
         next(6);
     }
     auto setInOut = [&](bool in) { toggleInOut(app, in); };  // (as the I / O keys)
     auto clearInOut = [&] { app.setMarkedRange(std::nullopt); };
     if (show.io) {
-        if (textButton("I##in", bw, marked.has_value(), "Set in point (I)\nRight-click to clear in and out")) setInOut(true);
+        if (textButton("I##in",16*theme().uiScale, marked.has_value(), "Set in point (I)\nRight-click to clear in and out")) setInOut(true);
         if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) clearInOut();
         next();
     }
@@ -697,7 +739,10 @@ void drawTimeline(App& app, UiState& ui) {
     ImGui::SetNextItemWidth(frameW);
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(kAccent));
     int nf = f;
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,IM_COL32(58,58,58,255));
     if (frameEntry("##frame", f, tc, c.fps, nf)) setFrame(nf);
+    ImGui::PopStyleColor();ImGui::PopStyleVar();
     ImGui::PopStyleColor();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Current frame (Alt+G). Use += or -= to jump by an offset.");
     next();
@@ -719,19 +764,19 @@ void drawTimeline(App& app, UiState& ui) {
     }
     if (show.io) {
         next();
-        if (textButton("O##out", bw, marked.has_value(), "Set out point (O)\nRight-click to clear in and out")) setInOut(false);
+        if (textButton("O##out",16*theme().uiScale, marked.has_value(), "Set out point (O)\nRight-click to clear in and out")) setInOut(false);
         if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) clearInOut();
     }
     if (show.inc) {
         next(8);
-        if (iconButton("##incb", Icon::IncBack, bw, false, "back by the increment (Shift+Left)")) setFrame((int64_t)f - ui.frameIncrement);
+        if (iconButton("##incb", Icon::IncBack,20*theme().uiScale, false, "back by the increment (Shift+Left)")) setFrame((int64_t)f - ui.frameIncrement);
         next();
         ImGui::SetNextItemWidth(incW);
         int inc = ui.frameIncrement;
         if (ImGui::InputInt("##inc", &inc, 0, 0)) ui.frameIncrement = std::clamp(inc, 1, 100000);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("frame increment for the << >> buttons");
         next();
-        if (iconButton("##incf", Icon::IncFwd, bw, false, "forward by the increment (Shift+Right)")) setFrame((int64_t)f + ui.frameIncrement);
+        if (iconButton("##incf", Icon::IncFwd,20*theme().uiScale, false, "forward by the increment (Shift+Right)")) setFrame((int64_t)f + ui.frameIncrement);
     }
 
     // The overflow keeps secondary actions available at every panel width.
@@ -743,19 +788,30 @@ void drawTimeline(App& app, UiState& ui) {
         if (captureActionButton("##Capture",1,captureW, "Save the visible Viewer image area as a PNG"))
             openViewerCapture(app, ui);
         next();
+        if(iconButton("##rangeLock",Icon::Lock,20*theme().uiScale,c.project.lockRange,"Lock project frame range"))app.edit([](Comp& cc){cc.project.lockRange=!cc.project.lockRange;});
+        next();
+        if(iconButton("##cacheRange",Icon::Cache,20*theme().uiScale,app.precaching(),"Cache the playback range"))app.setPrecache(!app.precaching());
+        next();
     }
     if (show.duration && leftFits) {
         ImGui::SetNextItemWidth(countW);
         char cnt[32];
         std::snprintf(cnt, sizeof cnt, "%lld", (long long)visB - (long long)visA + 1);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg,IM_COL32(58,58,58,255));
         ImGui::BeginDisabled();
-        ImGui::InputText("##count", cnt, sizeof cnt, ImGuiInputTextFlags_ReadOnly);
+        int durationValue=(int)((long long)visB-visA+1),ignored=durationValue;
+        frameEntry("##count",durationValue,false,c.fps,ignored);
         ImGui::EndDisabled();
+        ImGui::PopStyleColor();ImGui::PopStyleVar();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Sequence duration: %s frames\nPlayback: %lld frames", cnt, (long long)outF - inF + 1);
         next();
     }
-    if (textButton("...##timeline_options", bw, false, "Timeline options")) ImGui::OpenPopup("timeline_options");
+    ImGui::SetCursorScreenPos(ImVec2(origin.x+W-16*theme().uiScale,origin.y+19*theme().uiScale));
+    const auto optionPos=ImGui::GetCursorScreenPos();
+    if(ImGui::InvisibleButton("##timeline_options",ImVec2(16*theme().uiScale,ImGui::GetFrameHeight())))ImGui::OpenPopup("timeline_options");
+    for(int i=0;i<2;++i){const float y=optionPos.y+7+i*4;dl->AddLine(ImVec2(optionPos.x+4,y),ImVec2(optionPos.x+8,y+4),IM_COL32(145,145,145,255));dl->AddLine(ImVec2(optionPos.x+8,y+4),ImVec2(optionPos.x+12,y),IM_COL32(145,145,145,255));}
     if (ImGui::BeginPopup("timeline_options")) {
         if (ImGui::MenuItem("Flipbook")) openFlipbook(app, ui);
         if (ImGui::MenuItem("Capture Viewer")) openViewerCapture(app, ui);
@@ -826,6 +882,7 @@ void drawTimeline(App& app, UiState& ui) {
         ImGui::EndPopup();
     }
     ImGui::End();
+    ImGui::PopStyleColor(3);ImGui::PopStyleVar(3);ImGui::PopFont();
 }
 
 }  // namespace strata::ui

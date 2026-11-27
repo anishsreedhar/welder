@@ -672,7 +672,7 @@ int main(int argc, char** argv) {
             lastMax = ui.maximized;
             // a maximized viewer keeps the timeline under it
             const bool viewerMax = ui.maximized == "Viewer";
-            const float tlH = viewerMax ? std::min(timelineHeight() + ImGui::GetFrameHeight(), vp->WorkSize.y * 0.5f) : 0.0f;  // (+ its title bar)
+            const float tlH = viewerMax ? std::min(timelineHeight(), vp->WorkSize.y * 0.5f) : 0.0f;  // compact timeline strip
             for (auto& p : kPanels) {
                 if(std::string(p.name)=="Messages" && !messagePanelVisible())continue;
                 const bool timelineUnder = viewerMax && std::string(p.name) == "Timeline";

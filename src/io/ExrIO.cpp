@@ -28,6 +28,9 @@
 #include <ImfInputPart.h>
 #include <ImfMultiPartInputFile.h>
 #include <ImfOutputFile.h>
+#include <ImfMultiPartOutputFile.h>
+#include <ImfOutputPart.h>
+#include <ImfChromaticities.h>
 #include <ImfPartType.h>
 #include <ImfTileDescriptionAttribute.h>
 #include <ImfThreading.h>
@@ -37,6 +40,7 @@
 #include <cstring>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <mutex>
 #include <thread>
 
@@ -489,6 +493,10 @@ void writeExr(const std::string& path, const Image& src, const Format& fmt, cons
         if (o.fps > 0) Imf::addFramesPerSecond(h, Imf::guessExactFps(o.fps));
         writeAttributes(h, o.attributes);
         if (cit->second == Imf::DWAA_COMPRESSION || cit->second == Imf::DWAB_COMPRESSION) h.dwaCompressionLevel() = o.dwaLevel;
+        if(o.aces){
+            h.insert("acesImageContainerFlag",Imf::IntAttribute(1));
+            Imf::addChromaticities(h,Imf::Chromaticities(Imath::V2f(.7347f,.2653f),Imath::V2f(0,1),Imath::V2f(.0001f,-.077f),Imath::V2f(.32168f,.33767f)));
+        }
         const bool half = o.type == ExrPixelType::Half;
         Imf::PixelType pt = half ? Imf::HALF : Imf::FLOAT;
         Imf::FrameBuffer fb;
@@ -499,18 +507,33 @@ void writeExr(const std::string& path, const Image& src, const Format& fmt, cons
             hbuf.resize(buf.data.size());
             for (size_t i = 0; i < buf.data.size(); ++i) hbuf[i] = Imath::half(buf.data[i]);
         }
-        for (int c = 0; c < n; ++c) {
-            h.channels().insert(buf.channels[c], Imf::Channel(pt));
-            if (half)
-                fb.insert(buf.channels[c], Imf::Slice::Make(Imf::HALF, hbuf.data() + c, dw, sizeof(Imath::half) * n,
-                                                            sizeof(Imath::half) * n * W));
-            else
-                fb.insert(buf.channels[c], Imf::Slice::Make(Imf::FLOAT, buf.data.data() + c, dw, sizeof(float) * n,
-                                                            sizeof(float) * n * W));
+        auto channelName=[&](int c,bool multipart){
+            std::string name=buf.channels[c];const auto dot=name.rfind('.');
+            if(multipart && !o.fullLayerNames && dot!=std::string::npos)name=name.substr(dot+1);
+            if(o.standardNames && dot!=std::string::npos){const std::string layer=buf.channels[c].substr(0,dot),component=buf.channels[c].substr(dot+1);name=layer+".main."+component;}
+            if(o.truncateNames && name.size()>31)name.resize(31);return name;
+        };
+        auto addChannels=[&](Imf::Header& header,Imf::FrameBuffer& frame,const std::vector<int>& channels,bool multipart){
+            std::set<std::string> names;
+            for(int c:channels){const auto name=channelName(c,multipart);if(!names.insert(name).second)throw RenderError("EXR channel name collision: "+name);
+                header.channels().insert(name,Imf::Channel(pt));
+                if(half)frame.insert(name,Imf::Slice::Make(Imf::HALF,hbuf.data()+c,dw,sizeof(Imath::half)*n,sizeof(Imath::half)*n*W));
+                else frame.insert(name,Imf::Slice::Make(Imf::FLOAT,buf.data.data()+c,dw,sizeof(float)*n,sizeof(float)*n*W));
+            }
+        };
+        if(o.interleave=="all" || o.aces){
+            std::vector<int> channels;for(int c=0;c<n;++c)channels.push_back(c);addChannels(h,fb,channels,false);
+            Imf::OutputFile out(path.c_str(),h,Imf::globalThreadCount());out.setFrameBuffer(fb);out.writePixels(dw.max.y-dw.min.y+1);
+        }else{
+            std::map<std::string,std::vector<int>> groups;
+            for(int c=0;c<n;++c){const auto dot=buf.channels[c].rfind('.');groups[o.interleave=="views"?"main":dot==std::string::npos?"rgba":buf.channels[c].substr(0,dot)].push_back(c);}
+            std::vector<std::string> order;for(auto& [name,channels]:groups)order.push_back(name);
+            if(auto it=std::find(order.begin(),order.end(),o.firstPart);it!=order.end())std::rotate(order.begin(),it,it+1);
+            std::vector<Imf::Header> headers;std::vector<Imf::FrameBuffer> frames(order.size());
+            for(size_t i=0;i<order.size();++i){auto header=h;header.setName(order[i]);header.setType(Imf::SCANLINEIMAGE);addChannels(header,frames[i],groups[order[i]],true);headers.push_back(header);}
+            Imf::MultiPartOutputFile out(path.c_str(),headers.data(),(int)headers.size());
+            for(size_t i=0;i<headers.size();++i){Imf::OutputPart part(out,(int)i);part.setFrameBuffer(frames[i]);part.writePixels(dw.max.y-dw.min.y+1);}
         }
-        Imf::OutputFile out(path.c_str(), h, Imf::globalThreadCount());
-        out.setFrameBuffer(fb);
-        out.writePixels(dw.max.y - dw.min.y + 1);
     } catch (const std::exception& e) {
         throw RenderError("cannot write EXR " + path + ": " + e.what());
     }

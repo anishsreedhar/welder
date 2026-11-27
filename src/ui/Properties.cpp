@@ -1,9 +1,12 @@
+#include "io/MovieIO.h"
+#include "core/ScriptApi.h"
 // Properties bin: a stack of node panels (most recent on top), as is standard.
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 
 #include "Panels.h"
 #include "core/NetPath.h"
@@ -42,6 +45,8 @@ json slateTexts(Node* n);  // nodes/SlateNode.cpp
 }
 
 namespace strata::ui {
+
+ImFont* timelineReferenceFont();
 
 ImVec2 gTestKnobPos(-1, -1);  // STRATA_TEST_ALTKEY: the knob's value box on screen
 
@@ -214,11 +219,14 @@ std::vector<double> defaults(const KnobDef& k, int n, const Format& f) {
 // Queue a change to one param of the node.
 void change(Ctx& c, const std::string& key, std::function<void(json&)> fn) {
     std::string name = c.node->name;
-    c.app.edit([name, key, fn](Comp& comp) {
+    const bool writeCallback=c.node->type=="Write" && (key=="before_render" || key=="before_frame" || key=="after_frame" || key=="after_render" || key=="render_progress");
+    const std::string callbackPython=writeCallback?c.app.pythonInterpreter:"";
+    c.app.edit([name, key, fn,writeCallback,callbackPython](Comp& comp) {
         Node* n = comp.find(name);
         if (!n) return;
         json& v = slotFor(n, key);
         fn(v);
+        if(writeCallback && !callbackPython.empty())n->params.data["callback_python"]=callbackPython;
         if (key == "file") updateReadRange(n);  // a new sequence brings its first/last frame
         n->paramsChanged();
     });
@@ -467,7 +475,7 @@ void keyButton(Ctx& c, const KnobDef& k, int n, const std::vector<double>& cur, 
     ImVec2 p = ImGui::GetCursorScreenPos();
     float h = ImGui::GetFrameHeight();
     ImGui::PushID("key");
-    const bool reference=c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked";
+    const bool reference=c.node->type=="Write" || c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked";
     const float keyWidth=reference?h:h*.8f;
     bool clicked = ImGui::InvisibleButton("##k", ImVec2(keyWidth, h));
     gKeyHovered = ImGui::IsItemHovered();
@@ -625,7 +633,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
     // expression-driven: purple (red when it fails); animated: blue
     if (hasX) ImGui::PushStyleColor(ImGuiCol_FrameBg, exprErr.empty() ? ImVec4(0.33f, 0.2f, 0.45f, 1.0f) : ImVec4(0.5f, 0.16f, 0.16f, 1.0f));
     else if (anim) ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.16f, 0.27f, 0.42f, 1.0f));
-    const bool referenceControls=c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked";
+    const bool referenceControls=c.node->type=="Write" || c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked";
     float avail = ImGui::GetContentRegionAvail().x - (k.noAnim ? 0 : ImGui::GetFrameHeight() * (referenceControls?1.f:.8f) + ImGui::GetStyle().ItemSpacing.x);
     if (k.half) {  // half the row, when both halves have room for a field and a slider; else the whole row
         const float half = (ImGui::GetContentRegionAvail().x - kit::labelWidth() * 0.55f) * 0.5f - 8;
@@ -646,7 +654,7 @@ void numericKnob(Ctx& c, const KnobDef& k) {
     const double dragSpeed = k.type == Knob::Int ? 0.2 : std::max(0.001, (k.hi - k.lo) / 400.0);
     // a value field (drag it, or click to type), then (unless noSlider) a slider with ticks filling the row
     auto scalarRow = [&](int comp, bool isInt, float sliderRoom) {
-        const float fw = k.width > 0 ? k.width : (c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked") ? 72.f : std::round(ImGui::GetFontSize() * 5.6f);
+        const float fw = k.width > 0 ? k.width : (c.node->type=="Write" || c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge" || c.node->type=="Transform" || c.node->type=="TransformMasked") ? 72.f : std::round(ImGui::GetFontSize() * 5.6f);
         double fv = cur[std::max(0, comp)];
         if (kit::valueField("##v", &fv, k.noSlider ? fw : fw, nullptr, isInt, dragSpeed)) commit(comp, fv);
         const char* tk = std::getenv("STRATA_TEST_ALTKEY");
@@ -1722,42 +1730,128 @@ static void mergeChannelsKnob(Ctx& c, const KnobDef& k, float avail) {
     }
 }
 
+static bool writeChannelMenuItem(const std::string& text,bool selected,float width=150) {
+    ImGui::PushID(text.c_str());
+    const bool clicked=ImGui::Selectable("##channel",selected,0,ImVec2(std::max(width,ImGui::CalcTextSize(text.c_str()).x+28),16));
+    const auto a=ImGui::GetItemRectMin(),b=ImGui::GetItemRectMax();const float cy=(a.y+b.y)*.5f,x=a.x+2,y=cy-5.5f;
+    auto* d=ImGui::GetWindowDrawList();
+    d->AddRectFilled(ImVec2(x,y),ImVec2(x+11,y+11),IM_COL32(58,58,58,255));d->AddRect(ImVec2(x,y),ImVec2(x+11,y+11),IM_COL32(24,24,24,255));
+    if(selected){d->AddLine(ImVec2(x+3,y+3),ImVec2(x+8,y+8),IM_COL32(220,220,220,255),1.5f);d->AddLine(ImVec2(x+8,y+3),ImVec2(x+3,y+8),IM_COL32(220,220,220,255),1.5f);}
+    d->AddText(ImVec2(a.x+22,cy-ImGui::GetFontSize()*.5f),selected || ImGui::IsItemHovered()?IM_COL32(15,15,15,255):ImGui::GetColorU32(ImGuiCol_Text),text.c_str());
+    ImGui::PopID();return clicked;
+}
+
 static void gradeChannelsKnob(Ctx& c,const KnobDef& k,float avail) {
     ChannelSet available=rgbaChannels();if(Node* in=c.node->input(0))available=unionChannels(available,c.app.nodeInfo(in->name).channels);
-    ChannelSet selected=parseChannels(c.node->params,"channels","rgb",available);
+    const bool write=c.node->type=="Write";
+    // Offer the familiar channel registry without making "all" invent channels
+    // on the source. Choosing a registry layer stores its explicit channel list.
+    std::vector<std::pair<std::string,ChannelSet>> registry={
+        {"depth",{"depth.Z"}},{"motion",{"motion.u","motion.v"}},{"forward",{"forward.u","forward.v"}},
+        {"backward",{"backward.u","backward.v"}},{"disparity",{"disparity.x","disparity.y"}},
+        {"disparityL",{"disparityL.x","disparityL.y"}},{"disparityR",{"disparityR.x","disparityR.y"}},
+        {"mask",{"mask.a"}},{"rotopaint_mask",{"rotopaint_mask.a"}},{"mask_planartrack",{"mask_planartrack.a"}},
+        {"mask_splinewarp",{"mask_splinewarp.a"}},{"sample",{"sample.coverage"}},
+        {"cutout",{"cutout.alpha","cutout.depth"}},{"deep",{"deep.front","deep.back"}}};
+    auto registerChannel=[&](const std::string& channel){const auto dot=channel.rfind('.');if(dot==std::string::npos)return;const auto name=channel.substr(0,dot);
+        auto it=std::find_if(registry.begin(),registry.end(),[&](const auto& p){return p.first==name;});
+        if(it==registry.end())registry.emplace_back(name,ChannelSet{channel});else if(channelIndex(it->second,channel)<0)it->second.push_back(channel);
+    };
+    if(write){
+        for(const auto& channel:available)registerChannel(channel);
+        if(c.node->ui.contains("write_channel_registry") && c.node->ui["write_channel_registry"].is_array())
+            for(const auto& channel:c.node->ui["write_channel_registry"])if(channel.is_string())registerChannel(channel.get<std::string>());
+    }
+    struct NewChannelState {bool request=false,extra=false;char name[128]="",components[192]="";std::string error;};
+    static std::map<std::string,NewChannelState> newChannels;auto& newChannel=newChannels[c.node->name];
+    auto requestNew=[&](bool extra){newChannel.extra=extra;newChannel.request=true;newChannel.error.clear();std::snprintf(newChannel.name,sizeof newChannel.name,"%s",extra?"custom.alpha":"custom");std::snprintf(newChannel.components,sizeof newChannel.components,"red green blue alpha");};
+    if(write){ImGui::PushStyleColor(ImGuiCol_Header,IM_COL32(243,150,25,255));ImGui::PushStyleColor(ImGuiCol_HeaderHovered,IM_COL32(243,150,25,255));ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(4,5));}
+    const std::string defaultChannels=c.node->type=="Write"?"all":"rgb";
+    ChannelSet selected=parseChannels(c.node->params,"channels",defaultChannels,available);
     const json* raw=findParam(c.node,"channels");
-    std::string layer=raw&&raw->is_string()?raw->get<std::string>():"rgb";
+    std::string layer=raw&&raw->is_string()?raw->get<std::string>():defaultChannels;
     if(raw && raw->is_array() && !selected.empty()) {
         const auto dot=selected.front().rfind('.');
         if(dot!=std::string::npos){const std::string prefix=selected.front().substr(0,dot+1);bool same=true;for(auto& ch:selected)same=same&&ch.rfind(prefix,0)==0;if(same)layer=prefix.substr(0,prefix.size()-1);}
+        else if(write){const bool rgb=channelIndex(selected,"R")>=0 && channelIndex(selected,"G")>=0 && channelIndex(selected,"B")>=0;layer=rgb?(channelIndex(selected,"A")>=0?"rgba":"rgb"):selected==ChannelSet{"A"}?"alpha":"custom";}
     }
+    if(write && selected.empty())layer="none";
     const bool standard=layer=="rgb"||layer=="rgba"||layer=="alpha"||layer=="all"||layer=="none";
     const std::string prefix=standard?"":layer+".";
     auto component=[&](char ch){return prefix+std::string(1,ch);};
     auto store=[&](json value){c.app.checkpoint();change(c,"channels",[value](json& j){j=value;});};
+    auto setExtraChoice=[&](const std::string& value){const std::string name=c.node->name;c.app.edit([name,value](Comp& comp){if(Node* n=comp.find(name))n->ui["write_extra_channel"]=value;});};
+    auto chooseLayer=[&](json value){store(value);if(write)setExtraChoice("none");};
     const bool wide=avail>=450;
     if(kit::beginCombo("##layer",layer.c_str(),std::min(wide?124.f:110.f,avail*.30f))){
+      if(write){
+        for(const char* name:{"all","none","rgb","rgba","alpha"})if(writeChannelMenuItem(name,layer==name))chooseLayer(name);
+        if(ImGui::BeginMenu("other layers")){
+            for(const auto& [name,channels]:registry)if(writeChannelMenuItem(name,layer==name)){
+                ChannelSet actual;for(const auto& channel:available)if(channel.rfind(name+".",0)==0)actual.push_back(channel);chooseLayer(actual.empty()?channels:actual);
+            }
+            ImGui::EndMenu();
+        }
+        if(ImGui::Selectable("new"))requestNew(false);
+      }else{
         std::vector<std::string> layers={"none","rgb","rgba","alpha","all"};
         for(auto& ch:available){auto dot=ch.find('.');if(dot!=std::string::npos){std::string l=ch.substr(0,dot);if(std::find(layers.begin(),layers.end(),l)==layers.end())layers.push_back(l);}}
         for(auto& l:layers)if(ImGui::Selectable(l.c_str(),l==layer))store(l);
+      }
         ImGui::EndCombo();
     }
     for(int i=0;i<3;++i){const std::string ch=component("RGB"[i]);const bool on=std::find(selected.begin(),selected.end(),ch)!=selected.end();ImGui::SameLine(0,wide?(i==0?9.f:14.f):4.f);
-        if(channelBox(i==0?"red":i==1?"green":"blue",on,i==0?IM_COL32(200,64,64,255):i==1?IM_COL32(70,170,80,255):IM_COL32(80,90,210,255))){auto next=selected;if(on)next.erase(std::remove(next.begin(),next.end(),ch),next.end());else next.push_back(ch);store(next);}}
+        if(channelBox(i==0?"red":i==1?"green":"blue",on,i==0?IM_COL32(200,64,64,255):i==1?IM_COL32(70,170,80,255):IM_COL32(80,90,210,255),c.node->type!="Write" || avail>=360)){auto next=selected;if(on)next.erase(std::remove(next.begin(),next.end(),ch),next.end());else next.push_back(ch);store(next);}}
     ChannelSet extras;for(auto& ch:selected)if(ch!=component('R')&&ch!=component('G')&&ch!=component('B'))extras.push_back(ch);
-    bool enabled=!extras.empty();ImGui::SameLine(0,5);
-    auto replaceExtra=[&](const std::string& ch){auto next=selected;for(auto& e:extras)next.erase(std::remove(next.begin(),next.end(),e),next.end());if(ch!="none")next.push_back(ch);store(next);};
+    const std::string extra=write && c.node->ui.contains("write_extra_channel")?c.node->ui.value("write_extra_channel",std::string("none")):extras.empty()?"none":extras.front();
+    bool enabled=extra!="none";ImGui::SameLine(0,5);
+    auto replaceExtra=[&](const std::string& ch){auto next=selected;
+        if(write && c.node->ui.contains("write_extra_channel")){if(extra!="none" && extra!=component('R') && extra!=component('G') && extra!=component('B'))next.erase(std::remove(next.begin(),next.end(),extra),next.end());}
+        else for(auto& e:extras)next.erase(std::remove(next.begin(),next.end(),e),next.end());
+        if(ch!="none" && channelIndex(next,ch)<0)next.push_back(ch);store(next);if(write)setExtraChoice(ch);
+    };
     if(kit::checkbox("##extra",&enabled))replaceExtra(enabled?component('A'):"none");ImGui::SameLine(0,3);
-    const std::string extra=extras.empty()?"none":extras.front();
     auto display=[](const std::string& ch){return ch=="A"?std::string("rgba.alpha"):ch=="R"?std::string("rgba.red"):ch=="G"?std::string("rgba.green"):ch=="B"?std::string("rgba.blue"):ch;};
     if(kit::beginCombo("##extraChannel",display(extra).c_str(),std::max(60.f,ImGui::GetContentRegionAvail().x-22))){
-        if(ImGui::Selectable("none",extras.empty()))replaceExtra("none");for(auto& ch:available)if(ImGui::Selectable(display(ch).c_str(),ch==extra))replaceExtra(ch);ImGui::EndCombo();}
+        if(write){
+            if(writeChannelMenuItem("none",extra=="none"))replaceExtra("none");
+            for(const char* channel:{"R","G","B","A"})if(writeChannelMenuItem(display(channel),extra==channel))replaceExtra(channel);
+            if(ImGui::BeginMenu("other channels")){
+                for(const auto& [name,channels]:registry)for(const auto& channel:channels)if(writeChannelMenuItem(channel,extra==channel))replaceExtra(channel);
+                ImGui::EndMenu();
+            }
+            if(ImGui::Selectable("new"))requestNew(true);
+        }else{if(ImGui::Selectable("none",extras.empty()))replaceExtra("none");for(auto& ch:available)if(ImGui::Selectable(display(ch).c_str(),ch==extra))replaceExtra(ch);}
+        ImGui::EndCombo();}
     ImGui::SameLine(0,3);if(ImGui::SmallButton("="))ImGui::OpenPopup("##channelsMenu");
-    if(ImGui::BeginPopup("##channelsMenu")){if(ImGui::Selectable("Reset channels"))store("rgb");ImGui::EndPopup();}
+    if(ImGui::BeginPopup("##channelsMenu")){if(ImGui::Selectable("Reset channels"))chooseLayer("rgb");ImGui::EndPopup();}
+    if(write){ImGui::PopStyleVar();ImGui::PopStyleColor(2);
+        if(newChannel.request){ImGui::OpenPopup("New Write channels");newChannel.request=false;}
+        if(ImGui::BeginPopupModal("New Write channels",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){
+            ImGui::TextUnformatted(newChannel.extra?"New channel":"New layer");ImGui::SetNextItemWidth(260);ImGui::InputText(newChannel.extra?"channel":"layer",newChannel.name,sizeof newChannel.name);
+            if(!newChannel.extra){ImGui::SetNextItemWidth(260);ImGui::InputText("channels",newChannel.components,sizeof newChannel.components);}
+            if(!newChannel.error.empty())ImGui::TextWrapped("%s",newChannel.error.c_str());
+            if(ImGui::Button("Create")){
+                const std::string name=newChannel.name;ChannelSet created;
+                auto valid=[](const std::string& s){return !s.empty() && std::all_of(s.begin(),s.end(),[](unsigned char ch){return std::isalnum(ch)||ch=='_'||ch=='-';});};
+                if(newChannel.extra){const auto dot=name.rfind('.');if(dot!=std::string::npos && valid(name.substr(0,dot)) && valid(name.substr(dot+1)))created.push_back(name);}
+                else if(valid(name) && name!="rgba" && name!="rgb" && name!="all" && name!="none" && name!="alpha"){
+                    std::string components=newChannel.components;std::replace(components.begin(),components.end(),',',' ');std::istringstream tokens(components);std::string ch;
+                    while(tokens>>ch){if(!valid(ch)){created.clear();break;}if(ch=="red")ch="R";else if(ch=="green")ch="G";else if(ch=="blue")ch="B";else if(ch=="alpha")ch="A";const auto full=name+"."+ch;if(channelIndex(created,full)<0)created.push_back(full);}
+                }
+                if(created.empty())newChannel.error=newChannel.extra?"Enter a channel as layer.channel (for example matte.a).":"Enter a layer name and one or more channel names.";
+                else{
+                    c.app.checkpoint();const std::string nodeName=c.node->name;c.app.edit([nodeName,created](Comp& comp){if(Node* n=comp.find(nodeName)){json registered=n->ui.value("write_channel_registry",json::array());for(const auto& ch:created)if(std::find(registered.begin(),registered.end(),json(ch))==registered.end())registered.push_back(ch);n->ui["write_channel_registry"]=std::move(registered);}});
+                    if(newChannel.extra)replaceExtra(created.front());else chooseLayer(created);ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::SameLine();if(ImGui::Button("Cancel"))ImGui::CloseCurrentPopup();ImGui::EndPopup();
+        }
+    }
 }
 
 void channelsKnob(Ctx& c, const KnobDef& k, float avail) {
-    if(c.node->type=="Grade" || c.node->type=="ColorCorrect"){gradeChannelsKnob(c,k,avail);return;}
+    if(c.node->type=="Write" || c.node->type=="Grade" || c.node->type=="ColorCorrect"){gradeChannelsKnob(c,k,avail);return;}
     if(c.node->type=="Merge"){mergeChannelsKnob(c,k,avail);return;}
     const bool abRow = c.node->type == "Merge" && (k.name == "Achannels" || k.name == "Bchannels");
     // the channels on offer: from the input the knob reads
@@ -1983,7 +2077,7 @@ void knobBody(Ctx& c, const KnobDef& k) {
                 ImGui::TextUnformatted("");
                 ImGui::SameLine(kit::labelWidth());
             }
-            if (ImGui::Button(k.label.c_str())) buttonAction(c, k.name);
+            if (ImGui::Button(k.label.c_str(),ImVec2(c.node->type=="Write" && k.width>0?k.width:0,0))) buttonAction(c, k.name);
             if (!k.tip.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", k.tip.c_str());
             ImGui::PopID();
             return;
@@ -2186,7 +2280,15 @@ void knobBody(Ctx& c, const KnobDef& k) {
             }
         }
         ImGui::SameLine();
-        const bool pick = ImGui::Button("...");
+        const auto folderPos=ImGui::GetCursorScreenPos();
+        const bool pick=c.node->type=="Write"?ImGui::InvisibleButton("##browse",ImVec2(20,ImGui::GetFrameHeight())):ImGui::Button("...");
+        if(c.node->type=="Write"){
+            auto* d=ImGui::GetWindowDrawList();const ImU32 gray=IM_COL32(180,180,180,255),dark=IM_COL32(20,20,20,255);
+            d->AddRectFilled(ImVec2(folderPos.x+2,folderPos.y+3),ImVec2(folderPos.x+17,folderPos.y+17),dark);
+            d->AddLine(ImVec2(folderPos.x+3,folderPos.y+5),ImVec2(folderPos.x+11,folderPos.y+5),gray,1.5f);
+            d->AddLine(ImVec2(folderPos.x+11,folderPos.y+5),ImVec2(folderPos.x+15,folderPos.y+15),gray,1.5f);
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("Choose an output file");
+        }
         if (pick && (c.node->type == "Precomp" || k.name == "bake_path")) {  // folders (Precomp, TrackMask / CorridorKey bakes)
             std::string name = c.node->name, key = k.name;
             App* app = &c.app;
@@ -2207,16 +2309,17 @@ void knobBody(Ctx& c, const KnobDef& k) {
         } else if (pick) {
             std::string name = c.node->name, key = k.name;
             App* app = &c.app;
-            bool saving = c.node->type == "Write";
+            bool saving = c.node->type == "Write" && k.name!="audio_file";
             std::string cur = c.node->comp ? c.node->comp->resolvePath(p.str(k.name)) : p.str(k.name);
             std::string dir = cur.empty() ? "" : std::filesystem::path(cur).parent_path().string();
-            openFileDialog(c.ui, saving ? "Write to" : "Read file", saving,
+            openFileDialog(c.ui,k.name=="audio_file"?"Audio File":saving?"Write to":"Read file",saving,
                            c.node->type == "BlenderRender" ? (key == "file" ? std::vector<std::string>{".blend"}
 #ifdef _WIN32
                                                                              : std::vector<std::string>{".exe"})
 #else
                                                                              : std::vector<std::string>{})
 #endif
+                           : k.name=="audio_file" ? std::vector<std::string>{".wav",".aif",".aiff",".mp3",".aac",".m4a",".flac",".mov",".mp4"}
                            : c.node->type == "ReadGeo"     ? std::vector<std::string>{".obj"}
                            : c.node->type == "ReadSplat" ? std::vector<std::string>{".ply"}
                            : c.node->type == "OCIOFileTransform"
@@ -3664,6 +3767,9 @@ void buttonAction(Ctx& c, const std::string& action) {
         openRenderDialog(c.app, c.ui, false, {c.node->name});
         return;
     }
+    if(action=="write_reload"){
+        const std::string name=c.node->name;c.app.edit([name](Comp& comp){if(Node* n=comp.find(name))n->paramsChanged();});c.app.clearCaches();c.app.requestView();return;
+    }
     if (action == "read_reload") {  // read the files again
         std::string name = c.node->name;
         c.app.edit([name](Comp& comp) {
@@ -3677,6 +3783,151 @@ void buttonAction(Ctx& c, const std::string& action) {
 // holds the knobs up to the next divider; "@card" opens one with no title; an
 // untitled divider is a line.
 void drawKnobs(Ctx& c, const NodeDef& def, const std::string& tab) {
+    if(c.node->type=="Write"){
+        auto extension=[&]{std::string ext=std::filesystem::path(c.node->params.str("file")).extension().string();if(!ext.empty())ext.erase(ext.begin());if(ext.empty())ext=c.node->params.str("file_type");for(char& ch:ext)ch=(char)std::tolower((unsigned char)ch);return ext=="jpg"?std::string("jpeg"):ext=="tif"?std::string("tiff"):ext=="tga"?std::string("targa"):ext;};
+        const std::string ext=extension();
+        const bool isMovieOutput=ext=="mov" || ext=="mp4" || ext=="mxf" || ext=="mkv" || ext=="avi";
+        auto set=[&](const std::string& key,json value){c.app.checkpoint();change(c,key,[value](json& v){v=value;});};
+        auto section=[&](const char* text){
+            ImGui::Spacing();ImGui::PushFont(theme().medium,13);
+            const auto size=ImGui::CalcTextSize(text);ImGui::SetCursorPosX(std::strcmp(text,"Context")==0?10.f:std::max(10.f,kit::labelWidth()-6-size.x));
+            const auto p=ImGui::GetCursorScreenPos();ImGui::TextUnformatted(text);ImGui::PopFont();
+            ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x+size.x+6,p.y+7),ImVec2(ImGui::GetCurrentWindow()->WorkRect.Max.x,p.y+7),IM_COL32(28,28,28,255));
+        };
+        auto combo=[&](const char* id,const std::string& preview,float width,const std::vector<std::pair<std::string,std::string>>& options,auto choose,auto enabled){
+            if(kit::beginCombo(id,preview.c_str(),width,ImGuiComboFlags_HeightLarge)){
+                // Reserve real columns instead of padding the text with spaces.
+                // Both marks and names share the selectable row's vertical centre.
+                constexpr float boxSize=11, textInset=22, rowHeight=16;
+                float rowWidth=0;
+                for(const auto& option:options)rowWidth=std::max(rowWidth,ImGui::CalcTextSize(option.second.c_str()).x+textInset+6);
+                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(4,5));
+                for(const auto& [value,label]:options){
+                    ImGui::PushID(value.c_str());
+                    const bool allowed=enabled(value);if(!allowed)ImGui::BeginDisabled();
+                    const bool selected=label==preview;auto* d=ImGui::GetWindowDrawList();
+                    ImGui::PushStyleColor(ImGuiCol_Header,IM_COL32(243,150,25,255));ImGui::PushStyleColor(ImGuiCol_HeaderHovered,IM_COL32(243,150,25,255));
+                    if(ImGui::Selectable("##option",selected,0,ImVec2(rowWidth,rowHeight)))choose(value);
+                    ImGui::PopStyleColor(2);
+                    const auto p=ImGui::GetItemRectMin(),end=ImGui::GetItemRectMax();
+                    const float centre=(p.y+end.y)*.5f,y=centre-boxSize*.5f,x=p.x+2;
+                    d->AddRectFilled(ImVec2(x,y),ImVec2(x+boxSize,y+boxSize),ImGui::GetColorU32(ImVec4(.227f,.227f,.227f,1)));
+                    d->AddRect(ImVec2(x,y),ImVec2(x+boxSize,y+boxSize),ImGui::GetColorU32(ImVec4(.094f,.094f,.094f,1)));
+                    if(selected){const auto mark=ImGui::GetColorU32(ImVec4(.86f,.86f,.86f,1));d->AddLine(ImVec2(x+3,y+3),ImVec2(x+8,y+8),mark,1.5f);d->AddLine(ImVec2(x+8,y+3),ImVec2(x+3,y+8),mark,1.5f);}
+                    const auto textColor=selected || (allowed && ImGui::IsItemHovered())?ImGui::GetColorU32(ImVec4(.059f,.059f,.059f,1)):ImGui::GetColorU32(ImGuiCol_Text);
+                    d->AddText(ImVec2(p.x+textInset,centre-ImGui::GetFontSize()*.5f),textColor,label.c_str());
+                    if(!allowed){ImGui::EndDisabled();if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("This encoder or format is not available in this build");}
+                    ImGui::PopID();
+                }
+                ImGui::PopStyleVar();ImGui::EndCombo();
+            }
+        };
+        auto optionLabel=[&](const std::string& name,const std::string& value){
+            if(name=="file_type" && (value=="mp4" || value=="avi" || value=="mkv"))return std::string("mov");
+            if(name=="datatype")return value=="float"?std::string("32 bit float"):std::string("16 bit half");
+            if(name=="bit_depth")return (value=="default"?(ext=="png"?"8":ext=="dpx"?"10":"16"):value)+(value=="32 float"?"":" bit");
+            if(name=="compression"){static const std::map<std::string,std::string> labels={{"none","none"},{"zips","Zip (1 scanline)"},{"zip","Zip (16 scanlines)"},{"piz","PIZ Wavelet (32 scanlines)"},{"rle","RLE"},{"b44","B44"},{"b44a","B44A"},{"dwaa","DWAA"},{"dwab","DWAB"},{"pxr24","PXR24"}};if(labels.count(value))return labels.at(value);}
+            if(name=="metadata"){static const std::map<std::string,std::string> labels={{"none","no metadata"},{"default","default metadata"},{"default and exr","default metadata and exr/*"},{"all except input","all metadata except input/*"},{"all","all metadata"},{"timecode only","timecode only"}};if(labels.count(value))return labels.at(value);}
+            if(name=="interleave")return value=="all"?std::string("channels, layers and views"):value=="views"?std::string("channels and layers"):std::string("channels");
+            if(name=="audio_units")return value=="frames"?std::string("Frames"):std::string("Seconds");
+            if(name=="h264_profile")return value=="main"?std::string("Main 4:2:0 8-bit"):value=="baseline"?std::string("Baseline 4:2:0 8-bit"):std::string("High 4:2:0 8-bit");
+            if(name=="h265_profile")return value=="main 10"?std::string("Main 4:2:0 10-bit"):std::string("Main 4:2:0 8-bit");
+            if(name=="data_range")return value=="full"?std::string("Full Range"):std::string("Video Range");
+            if(value=="auto")return name=="dpx_transfer"?std::string("(auto detect)"):std::string("Auto");
+            return value;
+        };
+        auto draw=[&](const char* name,const char* text=nullptr,float width=0,bool same=false){
+            auto it=std::find_if(def.knobs.begin(),def.knobs.end(),[&](const KnobDef& k){return k.name==name;});if(it==def.knobs.end())return;
+            auto k=*it;k.sameLine=same;k.half=false;if(text){k.label=text;k.hideLabel=!*text;}if(width>0)k.width=width;
+            if(k.type==Knob::Bool)k.hideLabel=false;
+            if(k.type==Knob::Int){k.noSlider=true;k.noAnim=true;}
+            if(k.name=="audio_offset"){k.noSlider=true;k.noAnim=true;k.width=72;}
+            if(k.name=="first_part"){
+                k.type=Knob::Choice;k.options={"rgba"};if(Node* input=c.node->input(0))for(const auto& ch:c.app.nodeInfo(input->name).channels){const auto dot=ch.rfind('.');if(dot!=std::string::npos){const auto layer=ch.substr(0,dot);if(std::find(k.options.begin(),k.options.end(),layer)==k.options.end())k.options.push_back(layer);}}
+            }
+            if(k.name=="fps" && !findParam(c.node,k.name))k.def=c.node->comp->fps;
+            if(k.name=="file_type"){k.def=ext;k.options={"","cin","dpx","exr","hdr","jpeg","mov","mxf","null","pic","png","sgi","targa","tiff","xpm","yuv","bmp","mkv","avi"};}
+            if(k.name=="use_limit"){
+                ImGui::PushID("writeLimit");label(k);bool enabled=c.node->params.flag("use_limit",false);
+                if(kit::checkbox("limit to range",&enabled)){set("use_limit",enabled);if(enabled){if(!findParam(c.node,"first"))change(c,"first",[](json& v){v=1;});if(!findParam(c.node,"last"))change(c,"last",[](json& v){v=100;});}}
+                ImGui::PopID();return;
+            }
+            if(k.name=="views"){
+                kit::rowLabel("views");const auto p=ImGui::GetCursorScreenPos();auto* d=ImGui::GetWindowDrawList();const float w=std::max(80.f,ImGui::GetContentRegionAvail().x-22);
+                if(kit::beginCombo("##writeViews","",w)){if(ImGui::Selectable("main",true))set("views","main");ImGui::EndCombo();}
+                const auto size=ImGui::CalcTextSize("main");d->AddText(ImVec2(p.x+(w-size.x)*.5f,p.y+ImGui::GetStyle().FramePadding.y),theme().text,"main");ImGui::SameLine(0,3);if(ImGui::SmallButton("=##writeViews"))ImGui::OpenPopup("write_views_menu");if(ImGui::BeginPopup("write_views_menu")){if(ImGui::Selectable("Reset to main view"))set("views","main");ImGui::EndPopup();}return;
+            }
+            if(k.type==Knob::Choice){
+                ImGui::PushID(name);label(k);const auto raw=getString(c.node,k.name,k.def.is_string()?k.def.get<std::string>():"");
+                std::vector<std::pair<std::string,std::string>> options;for(const auto& v:k.options)options.emplace_back(v,optionLabel(name,v));
+                combo("##choice",optionLabel(name,raw),k.width>0?k.width:140,options,[&](const std::string& value){set(name,value);},[&](const std::string& value){return k.name!="file_type" || value.empty() || value=="null" || value=="exr" || value=="dpx" || value=="hdr" || value=="jpeg" || value=="mov" || value=="mp4" || value=="mxf" || value=="png" || value=="targa" || value=="tiff" || value=="bmp" || value=="mkv" || value=="avi";});
+                ImGui::PopID();return;
+            }
+            knob(c,k);
+        };
+        if(tab=="Python"){
+            for(const char* field:{"before_render","before_frame","after_frame","after_render","render_progress"})draw(field,nullptr,std::max(100.f,ImGui::GetCurrentWindow()->WorkRect.Max.x-ImGui::GetWindowPos().x-kit::labelWidth()));return;
+        }
+        if(tab=="OCIO"){
+            section("Context");
+            for(int i=1;i<=4;++i){
+                const float left=ImGui::GetWindowPos().x+58,each=std::max(70.f,(ImGui::GetCurrentWindow()->WorkRect.Max.x-left-60)/2);const float y=ImGui::GetCursorScreenPos().y;
+                auto field=[&](const std::string& name,float x,float w){auto it=std::find_if(def.knobs.begin(),def.knobs.end(),[&](const KnobDef& k){return k.name==name;});if(it==def.knobs.end())return;ImGui::SetCursorScreenPos(ImVec2(x,y));ImGui::PushID(name.c_str());stringEdit(c,*it,c.node->params.str(name),w);ImGui::PopID();};
+                ImGui::SetCursorScreenPos(ImVec2(left-34,y));ImGui::AlignTextToFramePadding();ImGui::Text("key%d",i);field("context_key"+std::to_string(i),left,each);
+                ImGui::SetCursorScreenPos(ImVec2(left+each+16,y));ImGui::AlignTextToFramePadding();ImGui::Text("value%d",i);field("context_value"+std::to_string(i),left+each+60,each);
+            }
+            ImGui::Spacing();ImGui::Separator();return;
+        }
+        draw("channels");draw("file");draw("proxy");draw("frame_mode","frame",90);draw("frame","",std::max(70.f,ImGui::GetContentRegionAvail().x-kit::labelWidth()-94),true);draw("views");draw("file_type","file type",58);
+        if(!isMovieOutput && !ext.empty()){ImGui::SameLine();if(ImGui::SmallButton("?##writeFormatHelp"))ImGui::OpenPopup("writeFormatHelp");if(ImGui::BeginPopup("writeFormatHelp")){ImGui::TextWrapped("Format options apply to the selected file extension. Unsupported formats are disabled in the menu.");ImGui::EndPopup();}}
+        if(ext=="exr"){
+            section("EXR Options");draw("aces_compliant");draw("autocrop",nullptr,0,true);
+            ImGui::BeginDisabled(c.node->params.flag("aces_compliant",false));draw("datatype",nullptr,90);draw("compression",nullptr,180);if(c.node->params.str("compression")=="dwaa" || c.node->params.str("compression")=="dwab")draw("dwa_level","compression level");ImGui::EndDisabled();
+            draw("hero_view",nullptr,58);draw("metadata",nullptr,185);draw("metadata_noprefix",nullptr,0,true);draw("interleave",nullptr,185);
+            ImGui::BeginDisabled(c.node->params.str("interleave","all")=="all");draw("first_part",nullptr,std::max(100.f,ImGui::GetContentRegionAvail().x-kit::labelWidth()));ImGui::EndDisabled();draw("standard_layer_names");
+            ImGui::BeginDisabled(c.node->params.str("interleave","all")!="layers");draw("write_full_layer_names");ImGui::EndDisabled();draw("truncate_channel_names");
+        }else if(ext=="png"){
+            section("PNG Options");auto it=std::find_if(def.knobs.begin(),def.knobs.end(),[](const KnobDef& k){return k.name=="bit_depth";});auto k=*it;k.label="data type";k.width=65;k.options={"8","16"};if(!findParam(c.node,"bit_depth"))k.def="8";
+            kit::rowLabel("data type");std::vector<std::pair<std::string,std::string>> opts={{"8","8 bit"},{"16","16 bit"}};const std::string v=c.node->params.str("bit_depth","default")=="16"?"16":"8";combo("##pngDepth",v+" bit",65,opts,[&](const std::string& value){set("bit_depth",value);},[](const std::string&){return true;});
+        }else if(ext=="jpeg"){
+            section("JPEG Options");draw("jpeg_quality",nullptr,72);draw("jpeg_subsampling",nullptr,65);
+        }else if(ext=="dpx"){
+            section("DPX Options");draw("bit_depth","datatype",65);draw("dpx_fill",nullptr,0,true);draw("dpx_big_endian",nullptr,0,true);draw("dpx_transfer",nullptr,165);
+        }else if(isMovieOutput){
+            section(ext=="mxf"?"MXF Options":"MOV Options");
+            std::string codec=c.node->params.str("codec","prores 422 hq");
+            auto family=[&]{if(codec.rfind("prores",0)==0)return std::string("Apple ProRes");if(codec.rfind("dnxhr",0)==0)return std::string("Avid DNxHR");if(codec.rfind("dnxhd",0)==0)return std::string("Avid DNxHD");if(codec=="h.264")return std::string("H.264");if(codec=="h.265")return std::string("H.265");if(codec=="animation")return std::string("Animation");if(codec=="uncompressed")return std::string("Uncompressed");if(codec=="png")return std::string("PNG");if(codec=="mpeg4")return std::string("MPEG-4");return c.node->params.str("codec_family","Photo - JPEG");};
+            const std::vector<std::pair<std::string,std::string>> families={{"animation","Animation"},{"prores 422 hq","Apple ProRes"},{"dnxhd 185","Avid DNxHD"},{"dnxhr hq","Avid DNxHR"},{"h.264","H.264"},{"mjpeg","Motion JPEG A"},{"mjpeg_b","Motion JPEG B"},{"mpeg4","MPEG-4"},{"photojpeg","Photo - JPEG"},{"png","PNG"},{"uncompressed","Uncompressed"},{"h.265","H.265"}};
+            kit::rowLabel("Codec");combo("##movieCodec",family(),112,families,[&](const std::string& value){const auto it=std::find_if(families.begin(),families.end(),[&](const auto& p){return p.first==value;});set("codec",value=="photojpeg"?"mjpeg":value);set("codec_family",it->second);},[](const std::string& value){return movie::codecAvailable(value=="photojpeg"?"mjpeg":value);});
+            draw("fps",nullptr,72);
+            std::vector<std::pair<std::string,std::string>> profiles;
+            if(codec.rfind("prores",0)==0)profiles={{"prores 422 proxy","ProRes 4:2:2 Proxy 10-bit"},{"prores 422 lt","ProRes 4:2:2 LT 10-bit"},{"prores 422","ProRes 4:2:2 10-bit"},{"prores 422 hq","ProRes 4:2:2 HQ 10-bit"},{"prores 4444","ProRes 4:4:4:4 12-bit"},{"prores 4444 xq","ProRes 4:4:4:4 XQ 12-bit"}};
+            else if(codec.rfind("dnxhr",0)==0)profiles={{"dnxhr lb","DNxHR LB"},{"dnxhr sq","DNxHR SQ"},{"dnxhr hq","DNxHR HQ"},{"dnxhr hqx","DNxHR HQX 10-bit"},{"dnxhr 444","DNxHR 4:4:4 10-bit"}};
+            else if(codec.rfind("dnxhd",0)==0)profiles={{"dnxhd 36","DNxHD 36 8-bit"},{"dnxhd 120","DNxHD 120 8-bit"},{"dnxhd 145","DNxHD 145 8-bit"},{"dnxhd 185","DNxHD 185 8-bit"},{"dnxhd 185x","DNxHD 185 10-bit"}};
+            if(!profiles.empty()){auto it=std::find_if(profiles.begin(),profiles.end(),[&](const auto& p){return p.first==codec;});kit::rowLabel("Codec Profile");combo("##movieProfile",it==profiles.end()?codec:it->second,180,profiles,[&](const std::string& value){set("codec",value);},[](const std::string&){return true;});}
+            if(codec=="h.264" || codec=="h.265"){
+                draw(codec=="h.264"?"h264_profile":"h265_profile","Codec Profile",130);
+                kit::rowLabel("Quality");const int q=(int)c.node->params.num("quality",c.frame,90);const std::string selected=q>=100?"Best":q>=90?"High":q>=65?"Medium":"Low";combo("##movieQuality",selected,80,{{"35","Low"},{"65","Medium"},{"90","High"},{"100","Best"}},[&](const std::string& v){set("quality",std::stoi(v));},[](const std::string&){return true;});
+            }
+            draw("ycbcr_matrix",nullptr,75);draw("audio_file");draw("audio_offset",nullptr,72);draw("audio_units",nullptr,75,true);
+            if(ImGui::TreeNodeEx("Advanced",ImGuiTreeNodeFlags_NoTreePushOnOpen)){
+                ImGui::BeginDisabled(codec.rfind("dnx",0)!=0);draw("data_range",nullptr,100);ImGui::EndDisabled();draw("fast_start");draw("write_timecode",nullptr,0,true);
+                if(codec=="h.264" || codec=="h.265"){draw("encoder",nullptr,140);draw("rate_control",nullptr,90);if(c.node->params.str("rate_control","quality")=="bitrate")draw("bitrate");draw("encoder_speed",nullptr,90);draw("keyframes",nullptr,72);}
+            }
+            ImGui::Spacing();ImGui::Separator();
+        }else if(ext=="tiff"){section("TIFF Options");draw("bit_depth","datatype",90);draw("tiff_compression",nullptr,100);}
+        section("Output Transform");ImGui::BeginDisabled(c.node->params.flag("aces_compliant",false));draw("premultiplied");draw("raw",nullptr,0,true);ImGui::EndDisabled();
+        {
+            kit::rowLabel("output transform");const std::string cfg=color::configOf(c.node->comp),value=c.node->params.str("colorspace","default");
+            const std::string defSpace=ext=="exr" || ext=="hdr"?"linear":isMovieOutput?"Gamma2.2":ext=="dpx"?"Cineon":"sRGB";
+            std::vector<std::pair<std::string,std::string>> spaces={{"default","default ("+defSpace+")"},{"linear","linear"},{"sRGB","sRGB"},{"rec709","rec709"},{"Cineon","Cineon"},{"Gamma1.8","Gamma1.8"},{"Gamma2.2","Gamma2.2"},{"Gamma2.4","Gamma2.4"},{"Gamma2.6","Gamma2.6"},{"Panalog","Panalog"},{"REDLog","REDLog"},{"ViperLog","ViperLog"},{"AlexaV3LogC","AlexaV3LogC"},{"PLogLin","PLogLin"},{"SLog","SLog"},{"SLog1","SLog1"},{"SLog2","SLog2"},{"SLog3","SLog3"},{"CLog","CLog"},{"Log3G10","Log3G10"},{"Log3G12","Log3G12"},{"HybridLogGamma","HybridLogGamma"},{"Protune","Protune"},{"BT1886","BT1886"},{"st2084","st2084"},{"Blackmagic Film Generation 5","Blackmagic Film Generation 5"},{"ARRILogC4","ARRILogC4"}};
+            for(const auto& space:color::spaces(cfg))if(std::none_of(spaces.begin(),spaces.end(),[&](const auto& p){return p.first==space.name;}))spaces.emplace_back(space.name,space.name);
+            combo("##writeTransform",value=="default"?spaces[0].second:value,198,spaces,[&](const std::string& v){set("colorspace",v);},[&](const std::string& v){return v=="default" || !color::canonical(cfg,v).empty();});
+        }
+        ImGui::Dummy(ImVec2(1,6));ImGui::Spacing();ImGui::Separator();ImGui::Spacing();ImGui::Dummy(ImVec2(1,5));
+        draw("create_directories");draw("render_order",nullptr,72);draw("write_render",nullptr,80,true);draw("first","frame range",72);draw("last","",72,true);draw("use_limit",nullptr,0,true);draw("read_file");
+        ImGui::BeginDisabled(!c.node->params.flag("read_file",false));draw("missing_frames",nullptr,105);draw("write_reload",nullptr,80,true);draw("read_all_lines",nullptr,0,true);ImGui::EndDisabled();return;
+    }
     if(c.node->type=="Transform" || c.node->type=="TransformMasked") {
         for(const char* name:{"translate","rotate","scale","skewX","skewY","skew_order","center","invert","filter","clamp","black_outside","motionblur","shutter","shutteroffset","shuttercustomoffset","mask_channel","invert_mask"}) {
             auto it=std::find_if(def.knobs.begin(),def.knobs.end(),[&](const KnobDef& k){return k.name==name;});
@@ -3781,7 +4032,7 @@ static void mergeNodeTab(Ctx& c) {
     std::string& buffer=labels[n->name];
     if(ImGui::GetActiveID()!=ImGui::GetID("##label"))buffer=n->ui.value("label",std::string());
     char label[4096];std::snprintf(label,sizeof label,"%s",buffer.c_str());
-    ImGui::InputTextMultiline("##label",label,sizeof label,ImVec2(ImGui::GetContentRegionAvail().x,155));
+    ImGui::InputTextMultiline("##label",label,sizeof label,ImVec2(ImGui::GetContentRegionAvail().x,c.node->type=="Write"?400.f:155.f));
     buffer=label;
     if(ImGui::IsItemDeactivatedAfterEdit())setUi("label",buffer);
     kit::rowLabel("Font");
@@ -3839,7 +4090,7 @@ static void mergeNodeTab(Ctx& c) {
 
 // The Node tab every node has (the classic): label, colours, hide input, disable, lifetime.
 void nodeTab(Ctx& c) {
-    if(c.node->type=="Merge" || c.node->type=="Grade"){mergeNodeTab(c);return;}
+    if(c.node->type=="Write" || c.node->type=="Merge" || c.node->type=="Grade"){mergeNodeTab(c);return;}
     Node* n = c.node;
     // ui-only fields (no re-render): label, font size, tile colour, hide input
     auto setUi = [&](const std::string& key, json v, bool undoStep = true) {
@@ -3926,19 +4177,20 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
     struct CompactMerge {
         bool enabled, reference=false, previousReference=false;
         float label=0;ImU32 muted=0;
-        CompactMerge(bool on,bool ref,bool merge):enabled(on),reference(ref){if(on){
+        CompactMerge(bool on,bool ref,bool merge,bool write):enabled(on),reference(ref){if(on){
             label=kit::setLabelWidth(merge?88:108);
             previousReference=kit::setReferenceFields(ref);
             muted=theme().muted;if(ref)theme().muted=IM_COL32(220,220,220,255);
-            ImGui::PushFont(theme().regular,ref?15:14);
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ref?ImVec2(3,2):ImVec2(3,1));
+            ImGui::PushFont(write?timelineReferenceFont():theme().regular,write?12.f:ref?15.f:14.f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,write?ImVec2(3,3.5f):ref?ImVec2(3,2):ImVec2(3,1));
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ref?ImVec2(2,3):ImVec2(4,3));
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,0);
             ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,ref?1.f:0.f);
             ImGui::PushStyleColor(ImGuiCol_FrameBg,IM_COL32(58,58,58,255));
         }}
         ~CompactMerge(){if(enabled){theme().muted=muted;kit::setReferenceFields(previousReference);kit::setLabelWidth(label);ImGui::PopStyleColor();ImGui::PopStyleVar(4);ImGui::PopFont();}}
-    } compactMerge(n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked"),n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked"),n->type=="Merge");
+    } compactMerge(n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || (n->type=="TransformMasked" || n->type=="Write")),n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || (n->type=="TransformMasked" || n->type=="Write")),n->type=="Merge",n->type=="Write");
+    if(n->type=="Write")kit::setLabelWidth(124);
     // the header: a card with the category colour as a strip down its left side, the name in
     // the medium weight, the type muted after it
     const ImU32 cc = categoryColor(categoryOf(n->type));
@@ -3975,7 +4227,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
     }
     if (keepOpen && ImGui::IsItemHovered() && !ImGui::IsPopupOpen("panel_menu"))
         ImGui::SetTooltip("Right-click: float this panel in a window of its own, or reset all its knobs to default");
-    if((n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && n->type!="TransformMasked"))) {
+    if((n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && (n->type!="TransformMasked" && n->type!="Write")))) {
         const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(mn, ImVec2(mn.x + 3, mx.y), cc, 2.0f, ImDrawFlags_RoundCornersLeft);
@@ -3994,17 +4246,17 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
 
     // Name (rename on Enter). Merge keeps its name field in the panel header.
     const ImVec2 bodyCursor=ImGui::GetCursorScreenPos();
-    if((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked")))ImGui::SetCursorScreenPos(ImVec2(headerMin.x+22,headerMin.y+1));
+    if((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || (n->type=="TransformMasked" || n->type=="Write"))))ImGui::SetCursorScreenPos(ImVec2(headerMin.x+22,headerMin.y+1));
     {
         static std::string nameBuf;
-        if((n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && n->type!="TransformMasked"))){
+        if((n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && (n->type!="TransformMasked" && n->type!="Write")))){
             kit::rowLabel("name");
         }
         if (ImGui::GetActiveID() != ImGui::GetID("##name")) nameBuf = n->name;
         char tmp[128];
         std::strncpy(tmp, nameBuf.c_str(), sizeof(tmp) - 1);
         tmp[sizeof(tmp) - 1] = 0;
-        ImGui::SetNextItemWidth((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked"))?headerMax.x-headerMin.x-50:std::min(220.0f, ImGui::GetContentRegionAvail().x));
+        ImGui::SetNextItemWidth((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || (n->type=="TransformMasked" || n->type=="Write")))?headerMax.x-headerMin.x-50:std::min(220.0f, ImGui::GetContentRegionAvail().x));
         bool enter = ImGui::InputText("##name", tmp, sizeof(tmp), ImGuiInputTextFlags_EnterReturnsTrue);
         if (ImGui::GetActiveID() == ImGui::GetID("##name")) nameBuf = tmp;
         if ((enter || ImGui::IsItemDeactivatedAfterEdit()) && std::string(tmp) != n->name) {
@@ -4018,7 +4270,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
         }
     }
 
-    if((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked")))ImGui::SetCursorScreenPos(bodyCursor);
+    if((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || (n->type=="TransformMasked" || n->type=="Write"))))ImGui::SetCursorScreenPos(bodyCursor);
     const NodeDef* def = nodeDef(n->type);
     gDef = def;
     // Tabs, as is standard: the node's own (named after it), any others its knobs
@@ -4027,6 +4279,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
     if (def)
         for (auto& k : def->knobs)
             if (!k.tab.empty() && std::find(extraTabs.begin(), extraTabs.end(), k.tab) == extraTabs.end()) extraTabs.push_back(k.tab);
+    if(n->type=="Write"){extraTabs.push_back("OCIO");extraTabs.push_back("Python");}
     // every knob on a named tab (the Slate, like its .nk gizmo): the first of them is the main tab
     std::string mainTabName = n->type, mainTabKey;
     if (def && !extraTabs.empty() &&
@@ -4294,7 +4547,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
                 ImGui::EndTabItem();
             }
         const bool nodeOpen = ImGui::BeginTabItem("Node", nullptr, tabFlags("Node"));
-        if (def && !def->help.empty() && (n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && n->type!="TransformMasked"))) {  // the node's help on the tab row, cut to fit (all of it on hover)
+        if (def && !def->help.empty() && (n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && (n->type!="TransformMasked" && n->type!="Write")))) {  // the node's help on the tab row, cut to fit (all of it on hover)
             ImVec2 r0 = ImGui::GetItemRectMin(), r1 = ImGui::GetItemRectMax();
             ImGuiWindow* w = ImGui::GetCurrentWindow();
             const float x0 = r1.x + 12, x1 = w->WorkRect.Max.x - 4;
@@ -4347,7 +4600,7 @@ void nodePanel(App& app, UiState& ui, Node* n, bool* keepOpen) {
     size.natural=natural;
     ImGui::EndChild();
     const ImVec2 bottom=ImGui::GetItemRectMax(),left=ImGui::GetItemRectMin();
-    ImGui::GetWindowDrawList()->AddRect(left,ImVec2(bottom.x,bottom.y+10),IM_COL32(105,125,160,255));
+    ImGui::GetWindowDrawList()->AddRect(left,ImVec2(bottom.x,bottom.y+10),n->type=="Write"?IM_COL32(179,179,0,255):IM_COL32(105,125,160,255));
     const auto resume=ImGui::GetCursorScreenPos();
     ImGui::SetCursorScreenPos(ImVec2(bottom.x-14,bottom.y));
     ImGui::InvisibleButton("##resizeProperties",ImVec2(14,10));

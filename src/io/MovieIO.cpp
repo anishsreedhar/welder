@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <list>
 #include <mutex>
 #include <thread>
@@ -41,6 +42,8 @@ bool isMoviePath(const std::string& path) {
 #ifndef STRATA_HAVE_FFMPEG
 
 bool available() { return false; }
+bool codecAvailable(const std::string&){return false;}
+void writeJpeg(const std::string& p,const raster::Raster&,int,const std::string&){throw RenderError("JPEG sampling requires FFmpeg: "+p);}
 static RenderError noFFmpeg(const std::string& p) {
     return RenderError("movie files need FFmpeg, which this build of Welder doesn't include: " + p);
 }
@@ -195,6 +198,8 @@ struct Reader {
         info.height = dec->height;
         info.fps = av_q2d(rate);
         info.codec = codec->name;
+        const auto transfer=st->codecpar->color_trc;
+        info.transfer=transfer==AVCOL_TRC_GAMMA22?"Gamma2.2":transfer==AVCOL_TRC_GAMMA28?"Gamma2.8":transfer==AVCOL_TRC_LINEAR?"linear":transfer==AVCOL_TRC_IEC61966_2_1?"sRGB":"";
         nextIndex = 0;
         if (dec->pix_fmt == AV_PIX_FMT_NONE) {
             // not probed: the first frame says (and is kept, so frame 1 is ready)
@@ -307,7 +312,8 @@ struct Reader {
         AVPixelFormat outFmt = alpha ? AV_PIX_FMT_RGBA64 : AV_PIX_FMT_RGB48;
         const int flags = SWS_BICUBIC | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP;
         const bool yuv = d && !(d->flags & AV_PIX_FMT_FLAG_RGB);
-        const int* coef = yuv ? coefficientsFor(frame->colorspace, H, dec->codec_id == AV_CODEC_ID_MJPEG) : nullptr;
+        const auto matrix=frame->colorspace!=AVCOL_SPC_UNSPECIFIED?frame->colorspace:fmt->streams[si]->codecpar->color_space;
+        const int* coef = yuv ? coefficientsFor(matrix, H, dec->codec_id == AV_CODEC_ID_MJPEG) : nullptr;
         bool grey = d && d->nb_components <= 2;  // grey images: full range unless tagged otherwise
         bool full = isFullRange(frame) || (grey && frame->color_range != AVCOL_RANGE_MPEG);
         const int n = alpha ? 4 : 3;
@@ -438,6 +444,32 @@ std::vector<std::string> videoEncoders() {
 
 struct Writer::Impl {
     std::string path, encName;
+    AVFormatContext* audioInput=nullptr;
+    AVStream* audioOutput=nullptr;
+    AVPacket* audioPacket=nullptr;
+    int audioIndex=-1;
+    bool audioPending=false,audioDone=false;
+    double audioOffset=0;
+    int matrix=SWS_CS_ITU709;
+    AVColorTransferCharacteristic transfer=AVCOL_TRC_BT709;
+    void audioUntil(double seconds){
+        if(!audioInput || audioDone)return;
+        auto* source=audioInput->streams[audioIndex];
+        while(true){
+            if(!audioPending){int e=av_read_frame(audioInput,audioPacket);if(e<0){audioDone=true;return;}if(audioPacket->stream_index!=audioIndex){av_packet_unref(audioPacket);continue;}audioPending=true;}
+            const int64_t timestamp=audioPacket->pts!=AV_NOPTS_VALUE?audioPacket->pts:audioPacket->dts;
+            const double time=timestamp==AV_NOPTS_VALUE?0:timestamp*av_q2d(source->time_base)+audioOffset;
+            if(time>seconds)return;
+            if(time>=0){
+                av_packet_rescale_ts(audioPacket,source->time_base,audioOutput->time_base);
+                const int64_t offset=av_rescale_q((int64_t)std::llround(audioOffset*AV_TIME_BASE),AV_TIME_BASE_Q,audioOutput->time_base);
+                if(audioPacket->pts!=AV_NOPTS_VALUE)audioPacket->pts+=offset;if(audioPacket->dts!=AV_NOPTS_VALUE)audioPacket->dts+=offset;
+                audioPacket->stream_index=audioOutput->index;audioPacket->pos=-1;
+                const int e=av_interleaved_write_frame(oc,audioPacket);if(e<0)throw RenderError("writing audio: "+averr(e));
+            }
+            av_packet_unref(audioPacket);audioPending=false;
+        }
+    }
     AVFormatContext* oc = nullptr;
     AVCodecContext* enc = nullptr;
     AVStream* st = nullptr;
@@ -452,6 +484,7 @@ struct Writer::Impl {
     int qscale = 0;
 
     ~Impl() {
+        av_packet_free(&audioPacket);if(audioInput)avformat_close_input(&audioInput);
         sws_freeContext(sws);
         av_packet_free(&pkt);
         av_frame_free(&frame);
@@ -489,8 +522,8 @@ struct Writer::Impl {
         c->thread_count = 0;
         if (!rgbOut) {
             c->color_primaries = AVCOL_PRI_BT709;
-            c->color_trc = AVCOL_TRC_BT709;
-            c->colorspace = fullRange ? AVCOL_SPC_BT470BG : AVCOL_SPC_BT709;  // MJPEG: JFIF's BT.601 matrix
+            c->color_trc = transfer;
+            c->colorspace = matrix==SWS_CS_ITU601?AVCOL_SPC_BT470BG:matrix==SWS_CS_BT2020?AVCOL_SPC_BT2020_NCL:AVCOL_SPC_BT709;  // MJPEG: JFIF's BT.601 matrix
             c->color_range = fullRange ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
         }
         if (oc->oformat->flags & AVFMT_GLOBALHEADER) c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
@@ -647,6 +680,9 @@ Writer::Writer(const std::string& path, int W, int H, bool alpha, const WriterOp
     Impl& d = *d_;
     d.path = path;
     std::string c = o.codec;
+    d.fullRange=o.dataRange=="full";
+    d.transfer=o.colorTransfer=="Gamma2.2"?AVCOL_TRC_GAMMA22:o.colorTransfer=="linear"?AVCOL_TRC_LINEAR:o.colorTransfer=="sRGB"?AVCOL_TRC_IEC61966_2_1:AVCOL_TRC_BT709;
+    d.matrix=o.matrix=="rec601"?SWS_CS_ITU601:o.matrix=="rec2020"?SWS_CS_BT2020:SWS_CS_ITU709;
     std::string encName;
     AVPixelFormat pf = AV_PIX_FMT_YUV422P10;
     AVDictionary* opts = nullptr;
@@ -671,10 +707,16 @@ Writer::Writer(const std::string& path, int W, int H, bool alpha, const WriterOp
                          : c == "dnxhr lb" ? "dnxhr_lb" : "dnxhr_sq";
         av_dict_set(&opts, "profile", prof.c_str(), 0);
         pf = prof == "dnxhr_444" ? AV_PIX_FMT_YUV444P10 : prof == "dnxhr_hqx" ? AV_PIX_FMT_YUV422P10 : AV_PIX_FMT_YUV422P;
+    } else if(c=="animation"){
+        encName="qtrle";pf=alpha?AV_PIX_FMT_ARGB:AV_PIX_FMT_RGB24;d.alpha=alpha;d.rgbOut=true;
+    } else if(c=="uncompressed"){
+        encName="rawvideo";pf=alpha?AV_PIX_FMT_ARGB:AV_PIX_FMT_RGB24;d.alpha=alpha;d.rgbOut=true;
+    } else if(c.rfind("dnxhd",0)==0){
+        encName="dnxhd";pf=c.find("x")!=std::string::npos?AV_PIX_FMT_YUV422P10:AV_PIX_FMT_YUV422P;
     } else if (c == "mjpeg") {
         encName = "mjpeg";
         pf = AV_PIX_FMT_YUVJ422P;
-        d.fullRange = true;
+        d.fullRange = true;if(o.matrix=="auto")d.matrix=SWS_CS_ITU601;
     } else if (c == "mpeg4") {
         encName = "mpeg4";
         pf = AV_PIX_FMT_YUV420P;
@@ -698,7 +740,7 @@ Writer::Writer(const std::string& path, int W, int H, bool alpha, const WriterOp
         av_dict_free(&opts);
         throw RenderError("this build has no " + encName + " encoder");
     }
-    int e = avformat_alloc_output_context2(&d.oc, nullptr, nullptr, path.c_str());
+    int e = avformat_alloc_output_context2(&d.oc,nullptr,o.container.empty()?nullptr:o.container.c_str(),path.c_str());
     if (e < 0 || !d.oc) {
         av_dict_free(&opts);
         throw RenderError("no movie format for " + path + " (use .mov .mp4 .mkv .avi .mxf)");
@@ -725,6 +767,8 @@ Writer::Writer(const std::string& path, int W, int H, bool alpha, const WriterOp
         d.enc = d.newContext(codec, W, H, rate, pf);
         d.encName = encName;
         if (profile >= 0) d.enc->profile = profile;
+        if(c.rfind("dnxhd",0)==0){const auto p=c.find(' ');d.enc->bit_rate=(int64_t)(p==std::string::npos?185:std::atoi(c.c_str()+p+1))*1000000;}
+
         if (c == "mjpeg" || c == "mpeg4") {
             int q = std::clamp(o.quality, 1, 100);
             d.qscale = std::clamp(2 + (100 - q) * 29 / 99, 1, 31);
@@ -745,10 +789,21 @@ Writer::Writer(const std::string& path, int W, int H, bool alpha, const WriterOp
     if (c == "h.265" && isoBmff) d.st->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');  // QuickTime / Apple players want hvc1
     d.st->time_base = d.enc->time_base;
     d.st->avg_frame_rate = rate;
+    if(o.codecTag.size()==4)d.st->codecpar->codec_tag=MKTAG(o.codecTag[0],o.codecTag[1],o.codecTag[2],o.codecTag[3]);
+    if(!o.timecode.empty()){av_dict_set(&d.st->metadata,"timecode",o.timecode.c_str(),0);av_dict_set(&d.oc->metadata,"timecode",o.timecode.c_str(),0);}
+    if(!o.audioFile.empty()){
+        e=avformat_open_input(&d.audioInput,o.audioFile.c_str(),nullptr,nullptr);if(e<0)throw RenderError("cannot open audio "+o.audioFile+": "+averr(e));
+        if(avformat_find_stream_info(d.audioInput,nullptr)<0)throw RenderError("cannot inspect audio "+o.audioFile);
+        d.audioIndex=av_find_best_stream(d.audioInput,AVMEDIA_TYPE_AUDIO,-1,-1,nullptr,0);if(d.audioIndex<0)throw RenderError("no audio stream in "+o.audioFile);
+        const auto* source=d.audioInput->streams[d.audioIndex];
+        if(avformat_query_codec(d.oc->oformat,source->codecpar->codec_id,FF_COMPLIANCE_NORMAL)==0)throw RenderError("this audio codec cannot be copied into the selected container; use compatible audio or a MOV container");
+        d.audioOutput=avformat_new_stream(d.oc,nullptr);avcodec_parameters_copy(d.audioOutput->codecpar,source->codecpar);d.audioOutput->codecpar->codec_tag=0;d.audioOutput->time_base=source->time_base;
+        d.audioOffset=o.audioOffset;d.audioPacket=av_packet_alloc();
+    }
     if (!(d.oc->oformat->flags & AVFMT_NOFILE) && (e = avio_open(&d.oc->pb, path.c_str(), AVIO_FLAG_WRITE)) < 0)
         throw RenderError("cannot write " + path + ": " + averr(e));
     AVDictionary* mux = nullptr;
-    if (h26x && isoBmff) av_dict_set(&mux, "movflags", "+faststart", 0);  // plays while it downloads / from a web page
+    if(isoBmff)av_dict_set(&mux,"movflags",o.fastStart?"+faststart+write_colr":"+write_colr",0);  // plays while it downloads / from a web page
     e = avformat_write_header(d.oc, &mux);
     av_dict_free(&mux);
     if (e < 0) throw RenderError("cannot write " + path + ": " + averr(e));
@@ -756,6 +811,10 @@ Writer::Writer(const std::string& path, int W, int H, bool alpha, const WriterOp
     d.frame->format = pf;
     d.frame->width = W;
     d.frame->height = H;
+    d.frame->colorspace=d.enc->colorspace;
+    d.frame->color_range=d.enc->color_range;
+    d.frame->color_primaries=d.enc->color_primaries;
+    d.frame->color_trc=d.enc->color_trc;
     if ((e = av_frame_get_buffer(d.frame, 0)) < 0) throw RenderError("out of memory: " + averr(e));
     d.pkt = av_packet_alloc();
     d.open = true;
@@ -792,7 +851,7 @@ void Writer::write(const raster::Raster& r) {
                                  nullptr, nullptr, nullptr);
     if (!d.sws) throw RenderError("cannot convert pixels for " + d.path);
     if (!d.rgbOut) {
-        const int* cs = sws_getCoefficients(d.fullRange ? SWS_CS_ITU601 : SWS_CS_ITU709);
+        const int* cs = sws_getCoefficients(d.matrix);
         sws_setColorspaceDetails(d.sws, cs, 1, cs, d.fullRange ? 1 : 0, 0, 1 << 16, 1 << 16);
     }
     int e = av_frame_make_writable(d.frame);
@@ -814,6 +873,7 @@ void Writer::write(const raster::Raster& r) {
     }
     if (e < 0) throw RenderError("encoding " + d.path + ": " + averr(e));
     d.drain(false);
+    d.audioUntil(d.next*av_q2d(d.enc->time_base));
 }
 
 void Writer::close() {
@@ -821,6 +881,7 @@ void Writer::close() {
     if (!d.open) return;
     d.open = false;
     d.drain(true);
+    d.audioUntil(d.next*av_q2d(d.enc->time_base));
     int e = av_write_trailer(d.oc);
     if (d.oc->pb && !(d.oc->oformat->flags & AVFMT_NOFILE)) avio_closep(&d.oc->pb);
     forget(d.path);
@@ -830,6 +891,26 @@ void Writer::close() {
 int Writer::framesWritten() const { return (int)d_->next; }
 
 std::string Writer::encoderUsed() const { return d_->encName; }
+
+bool codecAvailable(const std::string& c){
+    if(c=="h.264" || c=="h.265")return !h26xCandidates(c=="h.265","auto").empty();
+    const std::string encoder=c.rfind("prores",0)==0?"prores_ks":c.rfind("dnx",0)==0?"dnxhd":c=="animation"?"qtrle":c=="uncompressed"?"rawvideo":c;
+    return avcodec_find_encoder_by_name(encoder.c_str())!=nullptr;
+}
+void writeJpeg(const std::string& path,const raster::Raster& r,int quality,const std::string& sampling){
+    struct Resources{AVCodecContext* c=nullptr;AVFrame* f=nullptr;AVPacket* p=nullptr;SwsContext* s=nullptr;~Resources(){sws_freeContext(s);av_packet_free(&p);av_frame_free(&f);avcodec_free_context(&c);}}d;
+    const auto* codec=avcodec_find_encoder(AV_CODEC_ID_MJPEG);if(!codec)throw RenderError("this build has no JPEG encoder");
+    d.c=avcodec_alloc_context3(codec);d.c->width=r.w;d.c->height=r.h;d.c->time_base={1,1};d.c->pix_fmt=sampling=="4:4:4"?AV_PIX_FMT_YUVJ444P:sampling=="4:2:2"?AV_PIX_FMT_YUVJ422P:AV_PIX_FMT_YUVJ420P;
+    d.c->color_range=AVCOL_RANGE_JPEG;d.c->flags|=AV_CODEC_FLAG_QSCALE;const int q=std::clamp(2+(100-std::clamp(quality,1,100))*29/99,1,31);d.c->global_quality=FF_QP2LAMBDA*q;
+    int e=avcodec_open2(d.c,codec,nullptr);if(e<0)throw RenderError("JPEG encoder: "+averr(e));
+    d.f=av_frame_alloc();d.f->width=r.w;d.f->height=r.h;d.f->format=d.c->pix_fmt;d.f->quality=d.c->global_quality;
+    if(av_frame_get_buffer(d.f,0)<0)throw RenderError("JPEG frame allocation failed");
+    std::vector<unsigned char> rgb((size_t)r.w*r.h*3);for(int y=0;y<r.h;++y)for(int x=0;x<r.w;++x)for(int c=0;c<3;++c)rgb[((size_t)y*r.w+x)*3+c]=(unsigned char)std::lround(std::clamp(r.at(x,y)[r.n>=3?c:0],0.f,1.f)*255);
+    d.s=sws_getContext(r.w,r.h,AV_PIX_FMT_RGB24,r.w,r.h,d.c->pix_fmt,SWS_BICUBIC,nullptr,nullptr,nullptr);if(!d.s)throw RenderError("JPEG color conversion failed");
+    const uint8_t* src[4]={rgb.data(),nullptr,nullptr,nullptr};int strides[4]={r.w*3,0,0,0};sws_scale(d.s,src,strides,0,r.h,d.f->data,d.f->linesize);
+    if((e=avcodec_send_frame(d.c,d.f))<0)throw RenderError("JPEG encoding: "+averr(e));d.p=av_packet_alloc();if((e=avcodec_receive_packet(d.c,d.p))<0)throw RenderError("JPEG packet: "+averr(e));
+    std::ofstream file(path,std::ios::binary);file.write((const char*)d.p->data,d.p->size);if(!file)throw RenderError("cannot write JPEG "+path);
+}
 
 #endif
 

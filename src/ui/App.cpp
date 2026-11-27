@@ -3096,6 +3096,7 @@ void App::batchLoop(RenderRequest r) {
             if (n->isExecutable() && (r.writes.empty() ? n->rendersWithWrites() : std::find(r.writes.begin(), r.writes.end(), n->name) != r.writes.end()))
                 writes.push_back(n.get());
     }
+    std::stable_sort(writes.begin(),writes.end(),[](const Node* a,const Node* b){return a->params.num("render_order",0,1)<b->params.num("render_order",0,1);});
     {
         std::lock_guard<std::mutex> l(batchM_);
         batchStatus_.total = (int)(r.frames.size() * writes.size());

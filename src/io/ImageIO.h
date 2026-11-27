@@ -31,6 +31,11 @@ struct WriteOptions {
     bool exrBboxDataWindow = false;
     bool raw = false;  // skip linear -> sRGB for 8-bit formats
     ColorFn encode;    // set: used instead of the sRGB encode (on straight values)
+    std::string jpegSubsampling="4:1:1";
+    bool dpxBigEndian=true,dpxFill=true;
+    int dpxTransfer=0;
+    std::string exrInterleave="all",exrFirstPart="rgba";
+    bool exrFullLayerNames=false,exrStandardNames=false,exrTruncateNames=false,aces=false;
     int jpegQuality = 95;
     int bitDepth = 0;                    // 0: the format's default (DPX 10, TIFF 16, PNG 8); TIFF 32 = float
     std::string tiffCompression = "zip"; // none, lzw, zip, packbits
