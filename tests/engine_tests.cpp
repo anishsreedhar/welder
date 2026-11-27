@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iterator>
 #include <string>
 #include <vector>
@@ -2847,6 +2848,96 @@ int main(int argc, char** argv) {
         }));
         CHECK_NEAR(px(render(*c, "U"), 0, 0, "R"), 0.4, 1e-6);
         CHECK_NEAR(px(render(*c, "P"), 0, 0, "B"), 0.6, 1e-6);
+    });
+
+    test("Write output mapping, readback, proxy and directory controls", [&] {
+        const auto dir=tmp/("write-controls-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        auto c=comp(json::array({
+            {{"name","C"},{"type","Constant"},{"params",{{"color",{.2,.4,.6,1}},{"format",{8,8}}}}},
+            {{"name","W"},{"type","Write"},{"inputs",{"C"}},{"params",{{"file",(dir/"out.####.exr").string()},{"proxy",(dir/"proxy.####.exr").string()},{"frame_mode","expression"},{"frame","frame+10"},{"datatype","float"},{"raw",true},{"create_directories",false}}}}
+        }));
+        Node* w=c->find("W");Engine e;bool rejected=false;
+        try{w->execute(e,1);}catch(const RenderError&){rejected=true;}
+        CHECK(rejected);CHECK(!std::filesystem::exists(dir));
+        w->params.data["create_directories"]=true;w->paramsChanged();w->execute(e,1);
+        CHECK(std::filesystem::exists(dir/"out.0011.exr"));
+        CHECK(!std::filesystem::exists(dir/"out.0001.exr"));
+        w->params.data["read_file"]=true;w->params.data["read_all_lines"]=true;w->paramsChanged();
+        auto image=render(*c,"W",1);CHECK_NEAR(px(image,2,2,"R"),.2,1e-6);CHECK_NEAR(px(image,2,2,"A"),1,1e-6);
+        CHECK(w->maxInputs()==1);CHECK(w->identityInput(1)==-1);
+        w->params.data["first"]=1;w->params.data["last"]=1;w->paramsChanged();
+        CHECK_NEAR(px(render(*c,"W",1),2,2,"R"),.2,1e-6);
+        w->params.data["missing_frames"]="black";w->paramsChanged();
+        auto missing=render(*c,"W",2);CHECK_NEAR(px(missing,2,2,"R"),0,1e-6);
+        w->params.data["read_file"]=false;w->paramsChanged();CHECK(w->identityInput(1)==0);
+        Engine proxy;proxy.setScale(.5);w->execute(proxy,1);
+        CHECK(std::filesystem::exists(dir/"proxy.0011.exr"));
+        CHECK(readExr((dir/"proxy.0011.exr").string()).format.width==4);
+        w->params.data["use_limit"]=true;w->params.data["first"]=2;w->params.data["last"]=2;w->paramsChanged();
+        w->execute(e,3);CHECK(!std::filesystem::exists(dir/"out.0013.exr"));
+        w->execute(e,2);CHECK(std::filesystem::exists(dir/"out.0012.exr"));
+        w->params.data["read_file"]=true;w->paramsChanged();
+        CHECK_NEAR(px(render(*c,"W",2),2,2,"R"),.2,1e-6);
+        w->params.data["read_file"]=false;w->params.data["use_limit"]=false;w->params.data["frame_mode"]="offset";w->params.data["frame"]="2";w->paramsChanged();
+        w->execute(e,5);CHECK(std::filesystem::exists(dir/"out.0007.exr"));
+        w->params.data["frame_mode"]="start at";w->params.data["frame"]="1";w->params.data["first"]=5;w->paramsChanged();
+        w->execute(e,5);CHECK(std::filesystem::exists(dir/"out.0001.exr"));
+    });
+
+    test("Write format options: DPX packing/endian, JPEG sampling and PNG depth", [&] {
+        const auto dir=tmp/("write-formats-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));std::filesystem::create_directories(dir);
+        raster::Raster r;r.w=8;r.h=6;r.n=3;r.px.resize(8*6*3);for(size_t i=0;i<r.px.size();++i)r.px[i]=(i%3+1)*.2f;
+        for(int bits:{10,12})for(bool big:{false,true})for(bool fill:{false,true}){
+            const auto path=(dir/(std::to_string(bits)+std::to_string(big)+std::to_string(fill)+".dpx")).string();raster::writeDpx(path,r,bits,24,big,fill,6);
+            const auto bytes=raster::readFile(path);CHECK(std::string((const char*)bytes.data(),4)==(big?"SDPX":"XPDS"));CHECK(bytes[801]==6);
+            const auto decoded=raster::readDpx(path);CHECK_NEAR(decoded.px[0],.2,1./((1<<bits)-1));CHECK_NEAR(decoded.px[2],.6,1./((1<<bits)-1));
+        }
+        Image image(Box(0,0,8,6),rgbaChannels());const float pixel[]={.2f,.4f,.6f,1.f};image.fill(pixel);
+        Format fmt;fmt.width=8;fmt.height=6;WriteOptions options;options.raw=true;options.bitDepth=16;
+        const auto png=(dir/"depth.png").string();writeImage(png,image,fmt,options);CHECK(raster::readFile(png)[24]==16);ReadOptions pngRead;pngRead.raw=true;CHECK_NEAR(readImage(png,pngRead).image->at(2,2,0),.2,1e-4);
+        if(movie::available())for(const auto& [sampling,marker]:std::vector<std::pair<std::string,int>>{{"4:1:1",0x22},{"4:2:2",0x21},{"4:4:4",0x11}}){
+            options.jpegSubsampling=sampling;options.jpegQuality=75;const auto jpg=(dir/(std::to_string(marker)+".jpg")).string();writeImage(jpg,image,fmt,options);
+            const auto bytes=raster::readFile(jpg);bool found=false;for(size_t i=0;i+15<bytes.size();++i)if(bytes[i]==0xff && bytes[i+1]==0xc0){
+                // JPEG stores relative sampling factors; equal factors such as
+                // 1x2 on all components still mean 4:4:4.
+                const int luma=bytes[i+11],chroma=bytes[i+14];
+                CHECK((luma>>4)==(marker>>4)*(chroma>>4));
+                CHECK((luma&15)==(marker&15)*(chroma&15));found=true;break;
+            }CHECK(found);
+        }
+    });
+    test("Write EXR multipart layout and ACES output", [&] {
+        const auto dir=tmp/("write-exr-options-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));std::filesystem::create_directories(dir);
+        Image image(Box(0,0,4,4),{"R","G","B","A","beauty.R","beauty.G","an_exceptionally_long_channel_name_for_truncation"});std::fill(image.data.begin(),image.data.end(),.25f);
+        Format fmt;fmt.width=4;fmt.height=4;ExrWriteOptions options;options.type=ExrPixelType::Float;options.interleave="layers";
+        const auto multipart=(dir/"multipart.exr").string();writeExr(multipart,image,fmt,options);auto file=readExr(multipart);CHECK(file.parts.size()==2);CHECK(file.parts[0]=="rgba");CHECK(file.image->ch("beauty.R")>=0);CHECK_NEAR(file.image->at(1,1,file.image->ch("beauty.R")),.25,1e-7);
+        options.interleave="all";options.truncateNames=true;const auto truncated=(dir/"truncated.exr").string();writeExr(truncated,image,fmt,options);file=readExr(truncated);for(const auto& name:file.image->channels)CHECK(name.size()<=31);
+        const auto path=(dir/"aces.exr").string();auto c=comp(json::array({{{"name","C"},{"type","Constant"},{"params",{{"color",{.2,.4,.6,1}},{"format",{4,4}}}}},{{"name","W"},{"type","Write"},{"inputs",{"C"}},{"params",{{"file",path},{"aces_compliant",true}}}}}));
+        Engine e;c->find("W")->execute(e,1);file=readExr(path);CHECK(file.compression=="none");CHECK(file.attributes.value("acesImageContainerFlag",0)==1);
+        c->find("W")->params.data["read_file"]=true;c->find("W")->paramsChanged();const auto restored=render(*c,"W",1);CHECK_NEAR(px(restored,1,1,"R"),.2,.002);CHECK_NEAR(px(restored,1,1,"B"),.6,.002);
+    });
+    test("Write transfer functions and render callbacks", [&] {
+        for(const std::string space:{"Gamma1.8","Gamma2.2","Gamma2.4","Gamma2.6","Cineon","rec709","ACES2065-1"}){
+            std::string error;auto forward=color::convert(color::kDefaultConfig,color::kLinearRec709,space,&error),back=color::convert(color::kDefaultConfig,space,color::kLinearRec709,&error);CHECK(forward && back);if(!forward || !back)continue;
+            float values[3]={.02f,.18f,.9f};forward->apply(values,1,3);back->apply(values,1,3);CHECK_NEAR(values[0],.02,1e-5);CHECK_NEAR(values[2],.9,1e-5);
+        }
+        // Even a callback scheduled after output must be refused before any frame is written.
+        {
+            auto c = comp(json::array({{{"name","W"},{"type","Write"},{"params",{{"after_render","pass"},{"allow_write_python",true}}}}}));
+            Engine engine;
+            bool denied = false;
+            try { c->find("W")->beginExecute(engine, 1, 1); }
+            catch (const RenderError& e) { denied = std::string(e.what()).find("--allow-write-python") != std::string::npos; }
+            CHECK(denied);
+        }
+        if(std::getenv("STRATA_TEST_PYTHON")){
+            const auto dir=tmp/("write-callbacks-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));std::filesystem::create_directories(dir);
+            const auto log=(dir/"callbacks.txt").string();const auto code="with open("+json(log).dump()+", 'a') as f: f.write(event+' '+str(frame)+chr(10))";
+            auto c=comp(json::array({{{"name","C"},{"type","Constant"},{"params",{{"format",{4,4}}}}},{{"name","W"},{"type","Write"},{"inputs",{"C"}},{"params",{{"file",(dir/"out.####.exr").string()},{"before_render",code},{"before_frame",code},{"after_frame",code},{"after_render",code},{"render_progress",code}}}}}));
+            EngineOptions options; options.allowWritePython = true;
+            Node* w=c->find("W");Engine e(options);w->beginExecute(e,1,2);w->execute(e,1);w->execute(e,2);w->finishExecute(true);
+            std::ifstream f(log);const std::string content((std::istreambuf_iterator<char>(f)),{});CHECK(content.find("before_render")!=std::string::npos);CHECK(content.find("after_render")!=std::string::npos);CHECK(content.find("render_progress")!=std::string::npos);CHECK(std::count(content.begin(),content.end(),'\n')==8);
+        }
     });
 
     test("EXR round trip keeps orientation, channels and bbox", [&] {
@@ -8833,10 +8924,14 @@ Connections:  {
     test("SharedCache: a waiter whose build was cancelled elsewhere builds it itself (playback stuck on a frame)", [] {
         retime::SharedCache<int> cache(2);
         std::atomic<bool> aThrew{false};
+        std::promise<void> builderStarted, cancelBuilder;
+        auto started=builderStarted.get_future();
+        auto cancel=cancelBuilder.get_future().share();
         std::thread a([&] {
             try {
-                cache.get(7, [] {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                cache.get(7, [&] {
+                    builderStarted.set_value();
+                    cancel.wait();
                     throw RenderCancelled();  // the read-ahead engine building it was cancelled
                     return std::shared_ptr<const int>();
                 });
@@ -8844,11 +8939,13 @@ Connections:  {
                 aThrew = true;
             }
         });
-        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        started.wait();
+        auto waiter=std::async(std::launch::async,[&]{return cache.get(7, [] { return std::make_shared<const int>(42); });});
+        cancelBuilder.set_value();
         std::shared_ptr<const int> got;
         bool bThrew = false;
         try {
-            got = cache.get(7, [] { return std::make_shared<const int>(42); });
+            got = waiter.get();
         } catch (const RenderCancelled&) {
             bThrew = true;
         }
@@ -8859,15 +8956,23 @@ Connections:  {
         // a running build is never evicted by later finished ones
         retime::SharedCache<int> small(1);
         std::atomic<int> builds{0};
+        std::promise<void> slowStarted, releaseSlow;
+        auto slowReady=slowStarted.get_future();
+        auto release=releaseSlow.get_future().share();
         std::thread slow([&] {
             small.get(1, [&] {
                 ++builds;
-                std::this_thread::sleep_for(std::chrono::milliseconds(120));
+                slowStarted.set_value();
+                release.wait();
                 return std::make_shared<const int>(1);
             });
         });
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        // Keep key 1 genuinely in flight while key 2 is built and trimmed.
+        // Sleep-based ordering allowed a busy CI runner to finish key 1 first,
+        // making its later eviction legitimate and the assertion flaky.
+        slowReady.wait();
         small.get(2, [] { return std::make_shared<const int>(2); });
+        releaseSlow.set_value();
         small.get(1, [&] {
             ++builds;
             return std::make_shared<const int>(1);

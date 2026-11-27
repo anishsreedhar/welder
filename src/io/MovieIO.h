@@ -32,6 +32,7 @@ struct Info {
     bool alpha = false;
     int bits = 8;
     std::string codec;
+    std::string transfer;
     std::string profile;  // e.g. ProRes "HQ", "4444"; DNxHR "DNXHR HQX"
 };
 Info probe(const std::string& path);  // throws RenderError
@@ -52,8 +53,15 @@ struct WriterOptions {
     double bitrate = 20;             // Mbit/s, for rate "bitrate"
     std::string profile;             // h.264: high | main | baseline; h.265: main | main 10 ("": high / main)
     std::string speed = "balanced";  // quality | balanced | fast
+    std::string container;
+    std::string matrix="auto",dataRange="video",audioFile,timecode,codecTag,colorTransfer="sRGB";
+    double audioOffset=0;
+    bool fastStart=true;
     int keyframes = 0;               // frames from one keyframe to the next; 0: about 2 seconds
 };
+
+bool codecAvailable(const std::string& codec);
+void writeJpeg(const std::string& path,const raster::Raster& image,int quality,const std::string& sampling);
 
 // The hardware H.264 / H.265 encoders this build has, in the order "auto" tries
 // them on this platform ("nvenc", "amf", "media foundation", "vulkan"). Whether one

@@ -38,7 +38,7 @@ namespace {
 void usage() {
     std::cerr << "welder " STRATA_VERSION " — open-source node-based compositor (headless)\n\n"
                  "usage:\n"
-                 "  welder render <comp.weld> [-f 1-100|1-100x2|1,5,9] [-w Write1,..] [-t threads] [--cache-mb N] [--scale 0.5] [-c] [-v] [--no-gpu]\n"
+                 "  welder render <comp.weld> [-f 1-100|1-100x2|1,5,9] [-w Write1,..] [-t threads] [--cache-mb N] [--scale 0.5] [-c] [-v] [--no-gpu] [--allow-write-python]\n"
                  "  welder node   <comp.weld> <NodeName> -o out.(exr|dpx|tif|png|jpg) [-f frame]\n"
                  "  welder info   <comp.weld>\n"
                  "  welder nk     <comp.weld> [-o shot.nk]   (export to a .nk script)\n"
@@ -80,6 +80,7 @@ struct Args {
     int threads = 0;
     long cacheMb = 0;  // 0: from the machine's RAM (platform::renderCacheMB)
     bool verbose = false;
+    bool allowWritePython = false;
     bool continueOnError = false;  // render: log a failed frame and go on
     double scale = 1.0;            // render: proxy scale
 };
@@ -100,6 +101,7 @@ Args parseArgs(int argc, char** argv, int start) {
         else if (s == "-v" || s == "--verbose") a.verbose = true;
         else if (s == "-c" || s == "--continue") a.continueOnError = true;
         else if (s == "--scale") a.scale = std::stod(next());
+        else if (s == "--allow-write-python") a.allowWritePython = true;
         else if (s == "--no-gpu") gpu::setEnabled(false);
         else a.pos.push_back(s);
     }
@@ -146,7 +148,9 @@ int cmdRender(const Args& a) {
     }
     if (writes.empty()) { std::cerr << "nothing to render: no Write nodes\n"; return 2; }
 
-    Engine engine(engineOpts(a));
+    auto options = engineOpts(a);
+    options.allowWritePython = a.allowWritePython;
+    Engine engine(options);
     if (a.scale > 0 && a.scale < 1) engine.setScale(a.scale);
     auto t0 = std::chrono::steady_clock::now();
     for (Node* w : writes) w->beginExecute(engine, frames.front(), frames.back());

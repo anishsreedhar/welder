@@ -1,3 +1,4 @@
+#include "MovieIO.h"
 #include "../core/Crash.h"
 #include "ImageIO.h"
 #include "PsdIO.h"
@@ -179,6 +180,8 @@ void writeImage(const std::string& path, const Image& src, const Format& fmt, co
     if (e == ".exr") {
         ExrWriteOptions eo;
         eo.type = o.exrType;
+        eo.interleave=o.exrInterleave;eo.firstPart=o.exrFirstPart;eo.fullLayerNames=o.exrFullLayerNames;
+        eo.standardNames=o.exrStandardNames;eo.truncateNames=o.exrTruncateNames;eo.aces=o.aces;
         eo.compression = o.compression;
         eo.dwaLevel = o.dwaLevel;
         eo.dataWindowFromBbox = o.exrBboxDataWindow;
@@ -198,13 +201,14 @@ void writeImage(const std::string& path, const Image& src, const Format& fmt, co
     raster::Raster r = toRaster(src, fmt, o, e != ".jpg" && e != ".jpeg" && e != ".hdr", !writesFloat(path, o));
     int bits = o.bitDepth ? o.bitDepth : defaultBitDepth(path);
 
-    if (e == ".dpx") { raster::writeDpx(path, r, bits, o.fps); return; }
+    if (e == ".dpx") { raster::writeDpx(path,r,bits,o.fps,o.dpxBigEndian,o.dpxFill,o.dpxTransfer); return; }
     if (e == ".tif" || e == ".tiff") { raster::writeTiff(path, r, bits, o.tiffCompression); return; }
     if (e == ".hdr") {
         if (!stbi_write_hdr(path.c_str(), r.w, r.h, r.n, r.px.data())) throw RenderError("failed to write " + path);
         return;
     }
     if (e == ".png" && bits == 16) { writePng16(path, r); return; }
+    if((e==".jpg" || e==".jpeg") && movie::available()){movie::writeJpeg(path,r,o.jpegQuality,o.jpegSubsampling);return;}
     const int W = r.w, H = r.h, nc = r.n;
     std::vector<unsigned char> buf(r.px.size());
     for (size_t i = 0; i < buf.size(); ++i) buf[i] = (unsigned char)std::lround(std::clamp(r.px[i], 0.0f, 1.0f) * 255.0f);

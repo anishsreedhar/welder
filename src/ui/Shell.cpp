@@ -1372,6 +1372,7 @@ void openRenderDialog(App& app, UiState& ui, bool selectedOnly, std::vector<std:
     app.resetBatchStatus();
     ui.showRenderDialog = true;
     ui.renderStarted = false;
+    ui.renderAllowWritePython = false;
     ui.renderSelectedOnly = selectedOnly;
     ui.renderWrites = std::move(writes);
     // the classic dialog starts on the input range when the Writes have one
@@ -1424,6 +1425,9 @@ static void drawRenderDialog(App& app, UiState& ui) {
         kit::skipLabel();
         kit::checkbox("Use proxy", &ui.renderProxy, "render at the project's proxy scale");
         kit::skipLabel();
+        kit::checkbox("Allow Write Python for this render", &ui.renderAllowWritePython,
+                      "Only enable for trusted comps. Callbacks can read and change files as your user.");
+        kit::skipLabel();
         kit::checkbox("Render using frame server", &ui.renderFrameServer,
                       "several background processes render at once, the frames split between them\n"
                       "(a movie Write gets a process of its own)");
@@ -1455,6 +1459,8 @@ static void drawRenderDialog(App& app, UiState& ui) {
             rq.writes = names;
             rq.proxy = ui.renderProxy;
             rq.frameServer = ui.renderFrameServer;
+            rq.allowWritePython = ui.renderAllowWritePython;
+            ui.renderAllowWritePython = false;
             rq.continueOnError = ui.renderContinue;
             app.renderWrites(rq);
             ui.renderStarted = true;

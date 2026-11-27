@@ -3096,6 +3096,7 @@ void App::batchLoop(RenderRequest r) {
             if (n->isExecutable() && (r.writes.empty() ? n->rendersWithWrites() : std::find(r.writes.begin(), r.writes.end(), n->name) != r.writes.end()))
                 writes.push_back(n.get());
     }
+    std::stable_sort(writes.begin(),writes.end(),[](const Node* a,const Node* b){return a->params.num("render_order",0,1)<b->params.num("render_order",0,1);});
     {
         std::lock_guard<std::mutex> l(batchM_);
         batchStatus_.total = (int)(r.frames.size() * writes.size());
@@ -3112,6 +3113,7 @@ void App::batchLoop(RenderRequest r) {
     EngineOptions o;
     o.cacheBytes = (size_t)platform::renderCacheMB() << 20;  // too small: big comps render their upstream again and again
     o.profile = true;  // for the report at the end
+    o.allowWritePython = r.allowWritePython;
     o.finalRender = true;  // Precomps read their network copies
     Engine eng(o);
     int memoryRetries = 0;
@@ -3301,6 +3303,7 @@ void App::frameServerLoop(const RenderRequest& r, const std::vector<Node*>& writ
                                           "-t", std::to_string(threadsEach), "--cache-mb",
                                           std::to_string(platform::renderCacheMB(nWorkers))};
         if (r.continueOnError) args.push_back("-c");
+        if (r.allowWritePython) args.push_back("--allow-write-python");
         if (r.proxy && comp->project.proxyScale > 0 && comp->project.proxyScale < 1) {
             args.push_back("--scale");
             args.push_back(std::to_string(comp->project.proxyScale));

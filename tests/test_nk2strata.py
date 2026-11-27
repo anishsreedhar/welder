@@ -1787,6 +1787,51 @@ class ColorImport(unittest.TestCase):
         self.assertEqual(n["R"]["params"]["colorspace"], "working")
 
 
+class WriteFormatOptionsImport(unittest.TestCase):
+    def test_format_context_and_callbacks_survive_import(self):
+        _, _, nodes = convert('''
+Write {
+ inputs 0
+ file output.exr
+ name Write1
+ autocrop true
+ write_ACES_compliant_EXR true
+ standard_layer_name_format true
+ write_full_layer_names true
+ truncateChannelNames true
+ noprefix false
+ interleave channels
+ first_part beauty
+ key1 SHOT
+ value1 shot010
+ beforeRender "print('begin')"
+ afterFrameRender "print('frame')"
+}
+''')
+        p = nodes['Write1']['params']
+        for key in ('autocrop', 'aces_compliant', 'standard_layer_names',
+                    'write_full_layer_names', 'truncate_channel_names'):
+            self.assertTrue(p[key], key)
+        self.assertFalse(p['metadata_noprefix'])
+        self.assertEqual(p['interleave'], 'layers')
+        self.assertEqual(p['first_part'], 'beauty')
+        self.assertEqual(p['context_key1'], 'SHOT')
+        self.assertEqual(p['context_value1'], 'shot010')
+        self.assertEqual(p['before_render'], "print('begin')")
+        self.assertEqual(p['after_frame'], "print('frame')")
+
+    def test_jpeg_and_dpx_controls(self):
+        _, _, nodes = convert('''
+Write { inputs 0 file output.jpeg name J _jpeg_quality 0.63 _jpeg_sub_sampling 4:4:4 }
+Write { inputs 0 file output.dpx name D datatype "12 bit" bigEndian false fill false }
+''')
+        self.assertAlmostEqual(nodes['J']['params']['jpeg_quality'], .63)
+        self.assertEqual(nodes['J']['params']['jpeg_subsampling'], '4:4:4')
+        self.assertFalse(nodes['D']['params']['dpx_big_endian'])
+        self.assertFalse(nodes['D']['params']['dpx_fill'])
+        self.assertEqual(nodes['D']['params']['bit_depth'], '12')
+
+
 class DeepWriteImport(unittest.TestCase):
     def test_deepwrite_becomes_write_with_deep(self):
         _, _, n = convert("""

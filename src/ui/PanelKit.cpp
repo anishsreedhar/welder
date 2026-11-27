@@ -264,7 +264,7 @@ bool tickSlider(const char* id, double* v, double lo, double hi, float width, bo
             for(double v=.1;v<=10.001;v+=v<1?.02:.2)ticks.emplace_back(toT(v,lo,hi,log),false);
             for(double v:{.1,.2,.3,.4,.6,.8,1.,2.,3.,4.,6.,8.,10.})labels.emplace_back(v,toT(v,lo,hi,log));
         } else {
-            const int divisions=lo==-180?8:10;
+            const int divisions=lo==-180?8:lo==0 && hi==120?12:10;
             for(int i=0;i<=divisions;++i){double v=lo+(hi-lo)*i/divisions;labels.emplace_back(v,toT(v,lo,hi,log));}
         }
         referenceRail(p,width,h,toT(*v,lo,hi,log),ticks,labels);

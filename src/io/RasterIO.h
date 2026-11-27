@@ -25,7 +25,7 @@ struct Raster {
 
 Raster readDpx(const std::string& path);
 // bits: 8, 10, 12 or 16. n: 1, 3 or 4.
-void writeDpx(const std::string& path, const Raster& r, int bits, double fps = 0);
+void writeDpx(const std::string& path, const Raster& r, int bits, double fps = 0, bool bigEndian=true, bool fill=true, int transfer=0);
 
 Raster readTiff(const std::string& path);
 // bits: 8, 16 (integer) or 32 (float); compression: "none", "lzw", "zip" (Deflate) or "packbits".

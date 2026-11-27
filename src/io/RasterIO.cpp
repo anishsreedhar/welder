@@ -210,7 +210,7 @@ Raster readDpx(const std::string& path) {
     return r;
 }
 
-void writeDpx(const std::string& path, const Raster& src, int bits, double fps) {
+void writeDpx(const std::string& path, const Raster& src, int bits, double fps, bool bigEndian, bool fill, int transfer) {
     if (bits != 8 && bits != 10 && bits != 12 && bits != 16) throw RenderError("DPX bit depth must be 8, 10, 12 or 16");
     const int W = src.w, H = src.h;
     const int n = src.n >= 4 ? 4 : src.n == 2 ? 3 : src.n;  // grey+alpha -> RGB; grey stays luma
@@ -220,12 +220,12 @@ void writeDpx(const std::string& path, const Raster& src, int bits, double fps) 
         return p[std::min(c, src.n == 2 ? 0 : src.n - 1)];
     };
     Out o;
-    o.be = true;
+    o.be = bigEndian;
     const uint32_t dataOff = 8192;
     o.d.assign(dataOff, 0);
     std::fill(o.d.begin() + 1408, o.d.begin() + 2048, 0xff);  // orientation / film / TV: undefined
     std::fill(o.d.begin() + 780 + 72, o.d.begin() + 1408, 0xff);  // unused image elements
-    std::memcpy(&o.d[0], "SDPX", 4);
+    std::memcpy(&o.d[0], bigEndian?"SDPX":"XPDS", 4);
     o.put32(4, dataOff);
     o.str(8, "V2.0", 8);
     o.put32(20, 1);     // ditto key: new frame
@@ -246,10 +246,10 @@ void writeDpx(const std::string& path, const Raster& src, int bits, double fps) 
     o.put32(E + 12, (1u << bits) - 1);
     o.put32(E + 16, 0xffffffffu);
     o.d[E + 20] = n == 4 ? 51 : n == 3 ? 50 : 6;
-    o.d[E + 21] = 0;  // transfer: user defined (the Write node's colour space)
+    o.d[E + 21] = (unsigned char)transfer;  // transfer: user defined (the Write node's colour space)
     o.d[E + 22] = 0;
     o.d[E + 23] = (unsigned char)bits;
-    o.put16(E + 24, bits == 10 || bits == 12 ? 1 : 0);  // method A for 10 / 12-bit
+    o.put16(E + 24, (bits == 10 || bits == 12) && fill ? 1 : 0);  // method A for 10 / 12-bit
     o.put16(E + 26, 0);
     o.put32(E + 28, dataOff);
     o.put32(E + 32, 0);
@@ -267,6 +267,10 @@ void writeDpx(const std::string& path, const Raster& src, int bits, double fps) 
         if (bits == 8) {
             for (auto v : line) o.u8((uint8_t)v);
             while (o.d.size() % 4) o.u8(0);
+        } else if((bits==10 || bits==12) && !fill){
+            uint64_t acc=0;int have=0;
+            for(auto v:line){acc=(acc<<bits)|v;have+=bits;if(have>=32){have-=32;o.u32((uint32_t)(acc>>have));acc&=have?((uint64_t(1)<<have)-1):0;}}
+            if(have)o.u32((uint32_t)(acc<<(32-have)));
         } else if (bits == 10) {
             for (size_t i = 0; i < comps; i += 3) {
                 uint32_t w = 0;

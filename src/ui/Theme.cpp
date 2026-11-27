@@ -64,6 +64,10 @@ void prepareNodeLabelFonts() {
     }
 }
 const std::vector<std::string>& nodeLabelFamilies(){return gLabelFamilies;}
+ImFont* timelineReferenceFont(){
+    const auto it=gLabelFonts.find("Verdana");
+    return it==gLabelFonts.end()?theme().regular:it->second[0];
+}
 ImFont* nodeLabelFont(const Node* n) {
     const std::string family=n->ui.value("note_font",std::string("Verdana"));
     const int style = (n->ui.value("note_bold",false)?1:0)+(n->ui.value("note_italic",false)?2:0);
