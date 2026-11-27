@@ -37,6 +37,13 @@ hardware encoders (NVIDIA NVENC, AMD AMF, Windows Media Foundation, Vulkan Video
 are loaded at run time; no x264 / x265. Its source is at https://ffmpeg.org/ (release 7.1.1). Welder's
 own source and build scripts are public, so you can rebuild Welder against a modified FFmpeg.
 
+The local Windows package may instead use the dynamically linked FFmpeg 8.1 LGPL build from
+[BtbN FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds). Its build configuration and source
+recipes are available there; the matching FFmpeg source is at
+[FFmpeg a8029b6528](https://github.com/FFmpeg/FFmpeg/tree/a8029b6528). These replaceable DLLs are distributed
+under LGPL-3.0-or-later; see `licenses/FFmpeg-LGPL-3.0.txt` and `licenses/GPL-3.0.txt`.
+Point `STRATA_FFMPEG_DIR` at a compatible development package to rebuild with replacement DLLs.
+
 ## Shipped alongside
 
 | Software | Licence | Text |

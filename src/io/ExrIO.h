@@ -53,6 +53,8 @@ struct ExrWriteOptions {
     bool dataWindowFromBbox = false;  // write only the image's bbox (may extend past the format)
     std::string timecode;             // "HH:MM:SS:FF": the TimeCode attribute (empty: none)
     double fps = 0;                   // > 0: the FramesPerSecond attribute
+    std::string interleave="all",firstPart="rgba";
+    bool fullLayerNames=false,standardNames=false,truncateNames=false,aces=false;
     json attributes;                  // more header attributes {name: value}, typed as ExrFile::attributes
                                       // (layout names and ones that don't fit are skipped)
 };

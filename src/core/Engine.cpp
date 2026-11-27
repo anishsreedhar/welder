@@ -193,6 +193,7 @@ struct EngineScope {
 Engine::Engine(EngineOptions o) : cache_(o.cacheBytes), tile_(o.tileSize) {
     profile_ = o.profile;
     finalRender_ = o.finalRender;
+    allowWritePython_ = o.allowWritePython;
     asmBudget_ = std::max(size_t(256) << 20, o.cacheBytes / 6);
     threads_ = o.threads > 0 ? o.threads : (int)std::max(1u, std::thread::hardware_concurrency());
 }

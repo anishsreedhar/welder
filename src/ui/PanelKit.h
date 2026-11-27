@@ -22,7 +22,7 @@ void skipLabel();
 
 // A number: centred; drag to change, click to type. `prefix` ("X") sits inside on the left.
 bool valueField(const char* id, double* v, float width, const char* prefix = nullptr, bool isInt = false,
-                double speed = 0.01, double lo = 0, double hi = 0);
+                double speed = 0.01, double lo = 0, double hi = 0, double wheelStep = 0.1);
 // Alt+click on the item just drawn: cancels its drag / typing and remembers the
 // click; takeAltClick() reports (and clears) it. Value fields and sliders call
 // it themselves; the properties panel sets a keyframe when it sees one.

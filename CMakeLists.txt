@@ -295,7 +295,7 @@ set(STRATA_FFMPEG_DIR "" CACHE PATH "FFmpeg install prefix (static, from tools/b
 if(STRATA_FFMPEG_DIR)
   set(_ff_libs)
   foreach(l avformat avcodec swscale avutil)
-    find_library(_ff_${l} NAMES ${l} PATHS ${STRATA_FFMPEG_DIR}/lib NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+    find_library(_ff_${l} NAMES ${l} ${l}.lib PATHS ${STRATA_FFMPEG_DIR}/lib NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
     if(NOT _ff_${l})
       message(FATAL_ERROR "FFmpeg in ${STRATA_FFMPEG_DIR} has no lib${l}")
     endif()
@@ -311,7 +311,9 @@ if(STRATA_FFMPEG_DIR)
   if(NOT _ff_z)
     find_library(_ff_z NAMES z)
   endif()
-  list(APPEND _ff_libs ${_ff_z})
+  if(_ff_z)
+    list(APPEND _ff_libs ${_ff_z})
+  endif()
   if(WIN32)
     # bcrypt: avutil's random numbers; mfuuid ole32 strmiids user32: the Media Foundation H.264 / H.265
     # encoders (mfplat itself, NVENC, AMF and Vulkan are loaded at run time)
@@ -322,6 +324,14 @@ if(STRATA_FFMPEG_DIR)
   target_include_directories(strata_core SYSTEM PRIVATE ${STRATA_FFMPEG_DIR}/include)
   target_link_libraries(strata_core PUBLIC ${_ff_libs})
   target_compile_definitions(strata_core PUBLIC STRATA_HAVE_FFMPEG=1)
+  if(WIN32)
+    # Shared FFmpeg distributions carry their dependencies beside these DLLs.
+    # Keep CLI, tests and editor runnable from the same build directory.
+    file(GLOB _ff_runtime_dlls "${STRATA_FFMPEG_DIR}/bin/*.dll")
+    foreach(_ff_dll IN LISTS _ff_runtime_dlls)
+      configure_file("${_ff_dll}" "${CMAKE_BINARY_DIR}/" COPYONLY)
+    endforeach()
+  endif()
   message(STATUS "FFmpeg: using ${STRATA_FFMPEG_DIR}")
 else()
   message(STATUS "FFmpeg: not configured (STRATA_FFMPEG_DIR): no movie files")
@@ -359,6 +369,15 @@ target_link_libraries(welder PRIVATE strata_core)
 
 # ---------------------------------------------------------------- tests
 enable_testing()
+add_executable(welder_font_tests tests/font_tests.cpp src/ui/SystemFonts.cpp)
+target_include_directories(welder_font_tests PRIVATE src)
+if(WIN32)
+  target_link_libraries(welder_font_tests PRIVATE dwrite)
+endif()
+add_test(NAME fonts COMMAND welder_font_tests)
+add_executable(welder_blur_tests tests/blur_tests.cpp)
+target_link_libraries(welder_blur_tests PRIVATE strata_core)
+add_test(NAME blur COMMAND welder_blur_tests)
 add_executable(welder_tests tests/engine_tests.cpp)
 target_include_directories(welder_tests PRIVATE tests)
 target_link_libraries(welder_tests PRIVATE strata_core)
@@ -477,6 +496,7 @@ if(STRATA_BUILD_UI)
   src/ui/TransformTool.cpp
   src/ui/KnobHandles.cpp
   src/ui/Theme.cpp
+  src/ui/SystemFonts.cpp
   src/ui/FlowPaintTool.cpp
   src/ui/MarkupTool.cpp
   src/ui/TrackMaskTool.cpp
@@ -489,6 +509,9 @@ if(STRATA_BUILD_UI)
   ${WELDER_EMBEDDED}
   ${WELDER_RC})
   target_link_libraries(welder_ui PRIVATE strata_core strata_imgui)
+  if(WIN32)
+    target_link_libraries(welder_ui PRIVATE dwrite)
+  endif()
   target_compile_definitions(welder_ui PRIVATE STRATA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
   if(NOT MSVC)
     target_compile_options(welder_ui PRIVATE -Wall -Wextra -Wno-unused-parameter)

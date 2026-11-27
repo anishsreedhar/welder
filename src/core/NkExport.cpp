@@ -439,6 +439,13 @@ struct Writer {
             }
             if (movie && has("codec")) warn("movie codec '" + p["codec"].get<std::string>() + "': set it on the Write after opening the script");
             copy("colorspace");
+            for(const char* key:{"proxy","frame_mode","frame","views","premultiplied","create_directories","render_order","read_all_lines","first_part","write_full_layer_names"})copy(key);
+            copy("read_file","reading");copy("missing_frames","on_error");copy("aces_compliant","write_ACES_compliant_EXR");copy("autocrop");
+            copy("metadata_noprefix","noprefix");copy("standard_layer_names","standard_layer_name_format");copy("truncate_channel_names","truncateChannelNames");
+            copy("jpeg_quality","_jpeg_quality");copy("jpeg_subsampling","_jpeg_sub_sampling");copy("dpx_big_endian","bigEndian");copy("dpx_fill","fill");
+            copy("before_render","beforeRender");copy("before_frame","beforeFrameRender");copy("after_frame","afterFrameRender");copy("after_render","afterRender");copy("render_progress","renderProgress");
+            for(int i=1;i<=4;++i){copy(("context_key"+std::to_string(i)).c_str(),("key"+std::to_string(i)).c_str());copy(("context_value"+std::to_string(i)).c_str(),("value"+std::to_string(i)).c_str());}
+            if(has("interleave"))raw("interleave",word(p["interleave"]=="layers"?"channels":p["interleave"]=="views"?"channels and layers":"channels, layers and views"));
             if (p.value("raw", false)) raw("raw", "true");
             if (p.value("use_limit", false)) {
                 raw("use_limit", "true");
@@ -820,6 +827,8 @@ struct Writer {
             if (type == "Sharpen") copy("amount");
             if (type == "Blur") {
                 copy("filter");
+                copy("quality");
+                if (p.value("inject", false)) raw("inject", "true");
                 if (has("crop")) raw("crop", p.value("crop", true) ? "true" : "false");
             }
             if (type != "Dilate") mixMask();

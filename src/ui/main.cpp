@@ -340,7 +340,9 @@ int main(int argc, char** argv) {
 #if defined(__APPLE__)
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 #endif
-    if (useSplash) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);  // shown once loading is done
+    // Screenshot checks render offscreen. Keeping their native window hidden also
+    // prevents desktop mouse movement from overriding the injected test input.
+    if (useSplash || !opt.screenshot.empty()) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     GLFWwindow* win = glfwCreateWindow(opt.width, opt.height, "Welder", nullptr, nullptr);
     if (!win) {
         splash::close(nullptr, 0);
@@ -554,6 +556,7 @@ int main(int argc, char** argv) {
         };
         auto frameStart = std::chrono::steady_clock::now();
 
+        prepareNodeLabelFonts();
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         // Screenshot regression input is applied after GLFW's physical mouse polling.
@@ -672,7 +675,7 @@ int main(int argc, char** argv) {
             lastMax = ui.maximized;
             // a maximized viewer keeps the timeline under it
             const bool viewerMax = ui.maximized == "Viewer";
-            const float tlH = viewerMax ? std::min(timelineHeight() + ImGui::GetFrameHeight(), vp->WorkSize.y * 0.5f) : 0.0f;  // (+ its title bar)
+            const float tlH = viewerMax ? std::min(timelineHeight(), vp->WorkSize.y * 0.5f) : 0.0f;  // compact timeline strip
             for (auto& p : kPanels) {
                 if(std::string(p.name)=="Messages" && !messagePanelVisible())continue;
                 const bool timelineUnder = viewerMax && std::string(p.name) == "Timeline";

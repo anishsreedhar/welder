@@ -1,4 +1,5 @@
 #include "Expr.h"
+#include "ExprValue.h"
 
 #include <algorithm>
 #include <cctype>
@@ -641,8 +642,7 @@ double eval(const AstP& ap, const Ctx& c) {
         case Ast::Frame: return c.frame;
         case Ast::Curve: {
             double f = a.kids.empty() ? c.frame : eval(a.kids[0], c);
-            if (!c.curve || !params::isAnimated(*c.curve)) return 0;  // no animation of its own
-            return params::evalCurve(*c.curve, f);
+            return c.curve ? baseValue(*c.curve, f, 0) : 0;
         }
         case Ast::Ref: {
             double f = a.kids.empty() ? c.frame : eval(a.kids[0], c);
@@ -755,8 +755,8 @@ bool valueTimeDependent(const json& v, const Node* owner, int depth) {
 }
 
 double hook(const json& v, double frame, const void* owner, double def) {
-    const json* curve = v.contains("keys") ? &v : nullptr;
-    double fallback = curve ? params::evalCurve(v, frame) : def;
+    const json* curve = &v;
+    double fallback = baseValue(v, frame, def);
     std::string err;
     double r = strata::expr::eval(v["expr"].get<std::string>(), frame, (const Node*)owner, curve, fallback, &err);
     return err.empty() && std::isfinite(r) ? r : fallback;

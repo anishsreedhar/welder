@@ -38,7 +38,7 @@ else
   echo "(OpenColorIO for Windows not found in $OCIO_WIN: tools/build_ocio.sh <src> $OCIO_WIN --windows)"
 fi
 FFMPEG_WIN=${FFMPEG_WIN:-$ROOT/../deps/ffmpeg-win}
-if [ -f "$FFMPEG_WIN/lib/libavcodec.a" ]; then
+if [ -f "$FFMPEG_WIN/lib/libavcodec.a" ] || [ -f "$FFMPEG_WIN/lib/libavcodec.dll.a" ] || [ -f "$FFMPEG_WIN/lib/avcodec.lib" ]; then
   NCNN_ARGS+=(-DSTRATA_FFMPEG_DIR="$(cd "$FFMPEG_WIN" && pwd)")
 else
   echo "(FFmpeg for Windows not found in $FFMPEG_WIN: tools/build_ffmpeg.sh <src> $FFMPEG_WIN --windows <ocio-win>; no movies)"
@@ -71,6 +71,9 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/tools" "$STAGE/docs"
 cp "$BUILD"/welder.exe "$BUILD"/welder_tests.exe "$BUILD"/welder_exr_tests.exe "$BUILD"/welder_ofx_tests.exe "$STAGE/bin/"
 cp "$BUILD"/welder_ui.exe "$STAGE/bin/"
+for dll in "$BUILD"/*.dll; do
+  [ ! -f "$dll" ] || cp "$dll" "$STAGE/bin/"
+done
 if [ -d "$NCNN_WIN/lib" ] && [ -f "$NCNN_WIN/lib/cmake/ncnn/ncnnConfig.cmake" ]; then
   mkdir -p "$STAGE/bin/models" && cp -r "$ROOT/models/rife" "$STAGE/bin/models/rife"
 fi

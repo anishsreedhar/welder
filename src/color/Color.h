@@ -14,6 +14,7 @@
 #pragma once
 
 #include <memory>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -63,6 +64,7 @@ public:
 using TransformPtr = std::shared_ptr<const Transform>;
 
 TransformPtr convert(const std::string& config, const std::string& src, const std::string& dst, std::string* err);
+TransformPtr convertWithContext(const std::string& config,const std::string& src,const std::string& dst,const std::map<std::string,std::string>& context,std::string* err);
 TransformPtr display(const std::string& config, const std::string& src, const std::string& display,
                      const std::string& view, bool inverse, std::string* err);
 TransformPtr look(const std::string& config, const std::string& src, const std::string& dst,

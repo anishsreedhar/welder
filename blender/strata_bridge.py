@@ -88,6 +88,12 @@ def set_output(scene, job):
     r.use_compositing = False  # the raw passes, not the .blend's compositor output
     r.use_sequencer = False
     s = r.image_settings
+    # Blender 5 separates the output medium from the still-image codec.
+    # Keep the legacy setting for Blender versions without media_type.
+    if hasattr(s, "media_type"):
+        s.media_type = "MULTI_LAYER_IMAGE"
+        if hasattr(s, "use_exr_interleave"):
+            s.use_exr_interleave = True
     s.file_format = "OPEN_EXR_MULTILAYER"
     s.color_depth = "32"
     s.exr_codec = "ZIP"
