@@ -35,6 +35,23 @@ float bcW(float x, float B, float C) {
     return r;
 }
 
+// Some drivers' native sin approximation loses enough precision around a
+// windowed-sinc zero to change a downscaled pixel. Reduce the angle and use
+// a polynomial on [-pi/2, pi/2] so the weights stay consistent with CPU sinf.
+float filterSin(float angle) {
+    precise float r = angle - round(angle / (2.0 * PI)) * (2.0 * PI);
+    if (r > PI * 0.5) r = PI - r;
+    if (r < -PI * 0.5) r = -PI - r;
+    precise float z = r * r;
+    precise float v = -1.0 / 6227020800.0;
+    v = v * z + 1.0 / 39916800.0;
+    v = v * z - 1.0 / 362880.0;
+    v = v * z + 1.0 / 5040.0;
+    v = v * z - 1.0 / 120.0;
+    v = v * z + 1.0 / 6.0;
+    return r * (1.0 - z * v);
+}
+
 float filterW(float x) {
     if (p.kind == 0) return abs(x) <= 0.5 ? 1.0 : 0.0;
     if (p.kind == 1) return max(0.0, 1.0 - abs(x));
@@ -43,7 +60,7 @@ float filterW(float x) {
     if (x >= float(p.lobes)) return 0.0;
     if (x < 1e-6) return 1.0;
     float px = PI * x;
-    return float(p.lobes) * sin(px) * sin(px / float(p.lobes)) / (px * px);
+    return float(p.lobes) * filterSin(px) * filterSin(px / float(p.lobes)) / (px * px);
 }
 
 float radiusOf() { return p.kind == 0 ? 0.5 : p.kind == 1 ? 1.0 : p.kind == 2 ? 2.0 : float(p.lobes); }
