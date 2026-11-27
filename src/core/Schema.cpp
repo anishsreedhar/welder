@@ -2699,8 +2699,11 @@ std::vector<NodeDef> build() {
     d.push_back({"Input", "Other", {I("number", "input number", 0, 0, 9)}, "Inside a group: the group's input."});
     d.push_back({"Output", "Other", {}, "Inside a group: what the group outputs."});
     d.push_back({"Backdrop", "Other",
-                 {S("label", "label", ""), Col4("color", "colour", json::array({0.33, 0.33, 0.42, 1})),
-                  F("note_font_size", "label size", 20, 8, 80), F("z_order", "z order", 0, -10, 10)},
+                 {Txt("label", "label", "Text shown inside the backdrop"),
+                  Col4("color", "colour", json::array({0.42, 0.43, 0.46, 1})),
+                  F("note_font_size", "label size", 14, 6, 80),
+                  C("appearance", "appearance", "fill", {"fill", "outline"}),
+                  F("border_width", "width", 2, 0, 10), I("z_order", "z order", 0, -10000, 10000)},
                  "A frame behind nodes: drag its title to move it with the nodes on it, its corner to resize it."});
     d.push_back({"Precomp", "Other",
                  {S("label", "label", "Precomp"), InfoRow("precomp", "status"),

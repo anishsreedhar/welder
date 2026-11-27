@@ -365,7 +365,7 @@ void drawTimeline(App& app, UiState& ui) {
     ImGui::PushStyleColor(ImGuiCol_Text,IM_COL32(190,190,190,255));
     ImGui::PushStyleColor(ImGuiCol_Border,IM_COL32(31,31,31,255));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
-    ImGui::Begin(ui.win("Timeline").c_str(), nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ui.beginPanel("Timeline", ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
     ui.noteHover("Timeline");
     Comp& c = *app.comp;

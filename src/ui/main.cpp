@@ -20,9 +20,12 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <set>
 #include <sstream>
 #include <atomic>
 #include <thread>
+#include <utility>
 
 #include "GL.h"
 #include "Panels.h"
@@ -57,7 +60,10 @@ namespace fs = std::filesystem;
 using namespace strata;
 using namespace strata::ui;
 
-namespace strata::ui {bool messagePanelVisible();}
+namespace strata::ui {
+bool messagePanelVisible();
+void showMessagePanel();
+}
 
 namespace {
 
@@ -138,6 +144,194 @@ void buildLayout(ImGuiID dock, ImVec2 size) {
 
 const char* const kPanelNames[] = {"Nodes", "Viewer", "Timeline", "Node Graph", "Properties", "Messages", "Curve Editor", "Dope Sheet", "Background Renders", "Scene Graph"};
 
+class PaneMenu {
+public:
+    explicit PaneMenu(UiState& ui) : ui(ui) {
+        current = this;
+        GImGui->DockNodeWindowMenuHandler = draw;
+        GImGui->DockNodeWindowMenuIcon = drawButtonIcon;
+        GImGui->DockNodeAllowHiddenMultiTabBar = true;
+    }
+
+    void reset() {
+        ui.closedPanels.clear();
+        ui.closedViewerTabs.clear();
+        pending = {};
+        emptyPanes.clear();
+    }
+
+    void apply() {
+        const auto action = std::exchange(pending, {});
+        if (action.kind == Kind::None) return;
+        ImGuiDockNode* node = ImGui::DockBuilderGetNode(action.pane);
+        if (!node || !node->IsLeafNode()) return;
+
+        switch (action.kind) {
+        case Kind::SplitVertical:
+        case Kind::SplitHorizontal: {
+            const ImGuiDir dir = action.kind == Kind::SplitVertical ? ImGuiDir_Right : ImGuiDir_Down;
+            const ImGuiID empty = ImGui::DockBuilderSplitNode(node->ID, dir, 0.5f, nullptr, nullptr);
+            if (empty) {
+                const std::string name = "###empty_pane_" + std::to_string(++nextEmptyPane);
+                emptyPanes.emplace(name, empty);
+            }
+            break;
+        }
+        case Kind::FloatPane:
+        case Kind::FloatTab: {
+            const ImVec2 pos(node->Pos.x + 24, node->Pos.y + 24);
+            const ImVec2 size(std::clamp(node->Size.x, 260.0f, 800.0f),
+                              std::clamp(node->Size.y, 160.0f, 600.0f));
+            const ImGuiID floating = ImGui::DockBuilderAddNode();
+            ImGui::DockBuilderSetNodePos(floating, pos);
+            ImGui::DockBuilderSetNodeSize(floating, size);
+            for (const std::string& name : action.tabs)
+                ImGui::DockBuilderDockWindow(name.c_str(), floating);
+            ui.focusPanel = action.tab;
+            break;
+        }
+        case Kind::Close:
+            for (const std::string& name : action.tabs)
+                if (!emptyPanes.erase(name)) ui.closedPanels.insert(name);
+            break;
+        case Kind::Solo:
+            ui.maximized = action.tab;
+            ui.soloTab = true;
+            break;
+        case Kind::Open:
+            if (action.tab == "Messages") showMessagePanel();
+            ui.closedPanels.erase(action.tab);
+            if (action.replaceEmpty) ImGui::DockBuilderDockWindow(action.tab.c_str(), node->ID);
+            ui.focusPanel = action.tab;
+            break;
+        case Kind::None:
+            break;
+        }
+    }
+
+    void drawEmptyPanes() {
+        if (!ui.maximized.empty()) return;
+        for (auto it = emptyPanes.begin(); it != emptyPanes.end();) {
+            const auto& [name, initialDock] = *it;
+            ImGuiWindow* window = ImGui::FindWindowByName(name.c_str());
+            if (window && window->DockNode && window->DockNode->Windows.Size > 1) {
+                it = emptyPanes.erase(it);
+                continue;
+            }
+            setPanelClass(false);
+            if (!window) ImGui::SetNextWindowDockID(initialDock, ImGuiCond_Always);
+            ImGui::Begin(name.c_str(), nullptr, ImGuiWindowFlags_NoSavedSettings);
+            ImGui::End();
+            ++it;
+        }
+    }
+
+    static void setPanelClass(bool showTab = true) {
+        ImGuiWindowClass windowClass;
+        windowClass.DockingAlwaysTabBar = true;
+        windowClass.DockNodeFlagsOverrideSet = ImGuiDockNodeFlags_NoCloseButton;
+        if (!showTab) windowClass.TabItemFlagsOverrideSet = ImGuiTabItemFlags_Invisible;
+        ImGui::SetNextWindowClass(&windowClass);
+    }
+
+private:
+    enum class Kind { None, SplitVertical, SplitHorizontal, FloatPane, Close, FloatTab, Solo, Open };
+    struct Action {
+        Kind kind = Kind::None;
+        ImGuiID pane = 0;
+        std::string tab{};
+        std::vector<std::string> tabs{};
+        bool replaceEmpty = false;
+    };
+
+    static const char* panelName(const ImGuiWindow& window) {
+        for (const char* name : kPanelNames)
+            if (window.ID == ImHashStr(name)) return name;
+        return nullptr;
+    }
+
+    static void drawButtonIcon(ImDrawList* list, ImVec2 pos, float size, ImU32 color) {
+        const ImVec2 min(pos.x + size * 0.12f, pos.y + size * 0.18f);
+        const ImVec2 max(pos.x + size * 0.88f, pos.y + size * 0.82f);
+        list->AddRect(min, max, color, 2.0f);
+        const float center = (min.y + max.y) * 0.5f;
+        for (float x : {0.31f, 0.50f, 0.69f})
+            list->AddCircleFilled(ImVec2(pos.x + size * x, center), 0.75f, color, 8);
+    }
+
+    static bool splitItem(const char* label, bool vertical) {
+        const bool pressed = ImGui::MenuItemEx(label, "   ", nullptr, false, true);
+        const ImVec2 row = ImGui::GetItemRectMin();
+        const float size = ImGui::GetFontSize() * 0.68f;
+        const float center = (row.y + ImGui::GetItemRectMax().y) * 0.5f;
+        const float left = ImGui::GetCursorScreenPos().x;
+        const ImVec2 min(left, center - size * 0.5f);
+        const ImVec2 max(left + size, center + size * 0.5f);
+        const ImU32 color = ImGui::GetColorU32(ImGuiCol_Text);
+        ImDrawList* list = ImGui::GetWindowDrawList();
+        list->AddRect(min, max, color, 1.0f);
+        if (vertical)
+            list->AddLine(ImVec2(left + size * 0.5f, min.y), ImVec2(left + size * 0.5f, max.y), color);
+        else
+            list->AddLine(ImVec2(min.x, center), ImVec2(max.x, center), color);
+        return pressed;
+    }
+
+    static void draw(ImGuiContext* ctx, ImGuiDockNode* node, ImGuiTabBar* tabs) {
+        PaneMenu& menu = *current;
+        ImGuiTabItem* selected = ImGui::TabBarFindTabByID(tabs, tabs->SelectedTabId);
+        ImGuiWindow* window = selected && selected->Window ? selected->Window : node->VisibleWindow;
+        if (!window && !node->Windows.empty()) window = node->Windows[0];
+        if (!window) return;
+
+        const char* panel = panelName(*window);
+        const std::string tab = panel ? panel : window->Name;
+        const bool empty = menu.emptyPanes.count(tab) != 0;
+        if (!panel && !empty) {
+            ImGui::DockNodeWindowMenuHandler_Default(ctx, node, tabs);
+            return;
+        }
+
+        std::vector<std::string> paneTabs;
+        bool canClosePane = true;
+        for (ImGuiWindow* member : node->Windows) {
+            const char* name = panelName(*member);
+            paneTabs.emplace_back(name ? name : member->Name);
+            canClosePane &= name || menu.emptyPanes.count(member->Name);
+        }
+        auto item = [&](const char* label, Kind kind, bool enabled, std::vector<std::string> affected = {}) {
+            if (ImGui::MenuItem(label, nullptr, false, enabled))
+                menu.pending = {kind, node->ID, tab, std::move(affected)};
+        };
+        if (splitItem("Split Vertical", true))
+            menu.pending = {Kind::SplitVertical, node->ID};
+        if (splitItem("Split Horizontal", false))
+            menu.pending = {Kind::SplitHorizontal, node->ID};
+        ImGui::Separator();
+        item("Float Pane", Kind::FloatPane, !node->IsFloatingNode(), paneTabs);
+        item("Close Pane", Kind::Close, canClosePane, paneTabs);
+        item("Float Tab", Kind::FloatTab, panel && (!node->IsFloatingNode() || paneTabs.size() > 1), {tab});
+        item("Close Tab", Kind::Close, panel, {tab});
+        item("Solo Tab", Kind::Solo, panel);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Show Tabs", nullptr, !empty && !node->IsHiddenTabBar(), !empty))
+            node->WantHiddenTabBarToggle = true;
+        ImGui::Separator();
+        if (ImGui::BeginMenu("Windows")) {
+            for (const char* name : kPanelNames)
+                if (ImGui::MenuItem(name))
+                    menu.pending = {Kind::Open, node->ID, name, {}, empty};
+            ImGui::EndMenu();
+        }
+    }
+
+    inline static PaneMenu* current = nullptr;
+    UiState& ui;
+    Action pending;
+    std::map<std::string, ImGuiID> emptyPanes;
+    unsigned int nextEmptyPane = 0;
+};
+
 // Reset Workspace: forget every dock node (floating ones too) and where each panel was, then
 // build the default layout.
 void resetLayout(ImGuiID dock, ImVec2 size) {
@@ -170,10 +364,11 @@ void guardLayout() {
         ImGuiWindow* win = ImGui::FindWindowByName(w);
         if (!win || !win->DockNode) continue;
         ImGuiDockNode* n = win->DockNode;
-        const bool alone = n->Windows.Size <= 1;
-        ImGuiDockNodeFlags want = n->LocalFlags | ImGuiDockNodeFlags_NoDockingOverMe;
-        if (alone) want |= ImGuiDockNodeFlags_NoTabBar;
-        else want = (want & ~ImGuiDockNodeFlags_NoTabBar) & ~ImGuiDockNodeFlags_NoDockingOverMe;
+        ImGuiDockNodeFlags want = n->LocalFlags & ~ImGuiDockNodeFlags_NoDockingOverMe;
+        if (n->Windows.Size <= 1 && (want & ImGuiDockNodeFlags_NoTabBar))
+            want |= ImGuiDockNodeFlags_NoDockingOverMe;
+        else
+            want &= ~ImGuiDockNodeFlags_NoTabBar;
         if (want != n->LocalFlags) {
             n->LocalFlags = want;
             n->UpdateMergedFlags();
@@ -463,6 +658,7 @@ int main(int argc, char** argv) {
 
     splash::pump();
     UiState ui;
+    PaneMenu paneMenu(ui);
     if (opt.screenshot.empty()) ui.lastCrash = crash::takePreviousReport();
     if (envFlag("STRATA_TEST_PERF")) {  // screenshots: the Performance panel open
         ui.showPerf = true;
@@ -597,6 +793,7 @@ int main(int argc, char** argv) {
             ui.loadWorkspace = 0;
             const std::string ini = workspaceLayout(slot);
             if (!ini.empty()) {
+                paneMenu.reset();
                 ui.maximized.clear();
                 resetTimelineHeight();  // (the workspace's own timeline height, once its nodes are laid out)
                 ImGui::LoadIniSettingsFromMemory(ini.data(), ini.size());
@@ -609,6 +806,7 @@ int main(int argc, char** argv) {
                 app.message("nothing saved as workspace " + std::to_string(slot) + " yet: Workspace > Save Workspace...");
             }
         }
+        paneMenu.apply();
         ImGui::NewFrame();
         if (scanning && GImGui->DebugDrawIdConflictsId != 0) {
             ImGuiID id = GImGui->DebugDrawIdConflictsId;
@@ -631,6 +829,7 @@ int main(int argc, char** argv) {
         }
         if (ui.resetWorkspace) {  // Workspace > Reset Workspace: every panel back in its default place and size
             ui.resetWorkspace = false;
+            paneMenu.reset();
             ui.maximized.clear();
             resetTimelineHeight();
             resetLayout(dock, ImVec2(vp->WorkSize.x, vp->WorkSize.y));
@@ -639,6 +838,7 @@ int main(int argc, char** argv) {
             app.message("workspace reset to the default layout");
         }
         keepDockResizable();
+        if (ui.maximized.empty()) ui.soloTab = false;
         guardLayout();
         // While a panel is maximized the dockspace is only kept alive (not drawn): the
         // docked panels keep their places and come back untouched on restore.
@@ -674,10 +874,12 @@ int main(int argc, char** argv) {
             }
             lastMax = ui.maximized;
             // a maximized viewer keeps the timeline under it
-            const bool viewerMax = ui.maximized == "Viewer";
-            const float tlH = viewerMax ? std::min(timelineHeight(), vp->WorkSize.y * 0.5f) : 0.0f;  // compact timeline strip
+            const bool viewerMax = ui.maximized == "Viewer" && !ui.soloTab && !ui.closedPanels.count("Timeline");
+            const float tlH = viewerMax ? std::min(timelineHeight(), vp->WorkSize.y * 0.5f) : 0.0f;  // (+ its title bar)
             for (auto& p : kPanels) {
                 if(std::string(p.name)=="Messages" && !messagePanelVisible())continue;
+                const bool viewer = std::strcmp(p.name, "Viewer") == 0;
+                if (!viewer && ui.closedPanels.count(p.name)) continue;
                 const bool timelineUnder = viewerMax && std::string(p.name) == "Timeline";
                 if (!ui.maximized.empty() && ui.maximized != p.name && !timelineUnder) continue;
                 if (timelineUnder) {
@@ -688,9 +890,11 @@ int main(int argc, char** argv) {
                     ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, vp->WorkSize.y - tlH), ImGuiCond_Always);
                     if (justMaximized) ImGui::SetNextWindowFocus();
                 }
+                if (ui.maximized.empty() && !viewer) PaneMenu::setPanelClass();
                 p.fn(app, ui);
                 mark(p.name);
             }
+            if (!ui.maximized.empty() && ui.closedPanels.count(ui.maximized)) ui.maximized.clear();
             if (reselect > 0) {
                 // Panels coming back each take focus as they reappear, so the last one drawn
                 // (the Dope Sheet) would win its dock area: focus the ones that were showing
@@ -701,6 +905,11 @@ int main(int argc, char** argv) {
                                            ? focusedPanel : restored;
                 if (!f.empty()) ImGui::SetWindowFocus(f.c_str());
             }
+        }
+        paneMenu.drawEmptyPanes();
+        if (!ui.focusPanel.empty()) {
+            ImGui::SetWindowFocus(ui.focusPanel.c_str());
+            ui.focusPanel.clear();
         }
         if (focusGraph && frameCount > 0) {
             ImGui::SetWindowFocus("Node Graph");  // Node Graph is the active tab and has keyboard focus

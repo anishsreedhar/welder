@@ -35,6 +35,7 @@ namespace fs = std::filesystem;
 namespace strata::ui {
 static bool gMessagesVisible=false;
 bool messagePanelVisible(){return gMessagesVisible;}
+void showMessagePanel(){gMessagesVisible=true;}
 
 
 bool typingInText() { return ImGui::GetIO().WantTextInput; }
@@ -457,17 +458,22 @@ void drawMenuBar(App& app, UiState& ui) {
             ImGui::EndMenu();
         }
         if (ImGui::MenuItem("Reset Workspace", "Shift+F12")) ui.resetWorkspace = true;
+        if (!ui.maximized.empty() && ImGui::MenuItem("Restore Panels", "Space")) ui.maximized.clear();
         ImGui::Separator();
         // bring a panel to the front (a tab hidden behind others, or a floating one)
         if (ImGui::MenuItem("Script Editor")) {
             ui.showScriptEditor = true;
             ImGui::SetWindowFocus("Script Editor");
         }
-        if(ImGui::MenuItem("Messages",nullptr,gMessagesVisible))gMessagesVisible=!gMessagesVisible;
+        if (ImGui::MenuItem("Messages", nullptr, gMessagesVisible && !ui.closedPanels.count("Messages"))) {
+            gMessagesVisible = !gMessagesVisible || ui.closedPanels.count("Messages");
+            ui.closedPanels.erase("Messages");
+        }
         for (const char* w : {"Viewer", "Node Graph", "Properties", "Curve Editor", "Dope Sheet", "Timeline", "Nodes", "Background Renders", "Scene Graph"})
             if (ImGui::MenuItem(w)) {
                 if (!ui.maximized.empty() && ui.maximized != w) ui.maximized.clear();
-                ImGui::SetWindowFocus(w);
+                ui.closedPanels.erase(w);
+                ui.focusPanel = w;
             }
         drawScriptsMenu(app,ui);
         ImGui::EndMenu();
@@ -507,12 +513,25 @@ void drawMenuBar(App& app, UiState& ui) {
         ImGui::Separator();
         if (ImGui::MenuItem("New Viewer", "Ctrl+I")) ui.newViewer = app.newViewer();
         auto viewers = app.viewerNodes();
-        if (ImGui::MenuItem("Split Viewers Side by Side", nullptr, false, viewers.size() > 1)) ui.splitViewers = 1;
-        if (ImGui::MenuItem("Split Viewers Stacked", nullptr, false, viewers.size() > 1)) ui.splitViewers = 2;
-        if (viewers.size() > 1) {
-            ImGui::SeparatorText("active viewer");
-            for (Node* v : viewers)
-                if (ImGui::MenuItem(v->name.c_str(), nullptr, v->name == app.activeViewer)) ui.activateNext = v->name;
+        auto viewerClosed = [&](size_t i) {
+            return i == 0 ? ui.closedPanels.count("Viewer") : ui.closedViewerTabs.count(viewers[i]->name);
+        };
+        size_t openViewers = 0;
+        for (size_t i = 0; i < viewers.size(); ++i) openViewers += !viewerClosed(i);
+        if (ImGui::MenuItem("Split Viewers Side by Side", nullptr, false, openViewers > 1)) ui.splitViewers = 1;
+        if (ImGui::MenuItem("Split Viewers Stacked", nullptr, false, openViewers > 1)) ui.splitViewers = 2;
+        if (!viewers.empty()) ImGui::SeparatorText("Viewers");
+        for (size_t i = 0; i < viewers.size(); ++i) {
+            Node* viewer = viewers[i];
+            const bool closed = viewerClosed(i);
+            if (ImGui::MenuItem(viewer->name.c_str(), nullptr, !closed && viewer->name == app.activeViewer)) {
+                if (closed) ui.maximized.clear();
+                if (i == 0) ui.closedPanels.erase("Viewer");
+                else ui.closedViewerTabs.erase(viewer->name);
+                ui.activateNext = viewer->name;
+                ui.focusPanel = ui.maximized == "Viewer" ? "###max" :
+                                i == 0 ? "Viewer" : "viewer_" + viewer->name;
+            }
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Go to Frame...", "Alt+G")) ui.openGotoFrame = true;
@@ -746,7 +765,7 @@ void categoryIcon(ImDrawList* dl, const std::string& cat, ImVec2 c, float s, ImU
 }
 
 void drawBackgroundRenders(App& app,UiState& ui) {
-    ImGui::Begin(ui.win("Background Renders").c_str());
+    ui.beginPanel("Background Renders");
     const auto status=app.batchStatus();
     if(status.total>0) {
         ImGui::Text("%s",status.currentNode.c_str());
@@ -758,7 +777,7 @@ void drawBackgroundRenders(App& app,UiState& ui) {
     ImGui::End();
 }
 void drawSceneGraph(App& app,UiState& ui) {
-    ImGui::Begin(ui.win("Scene Graph").c_str());
+    ui.beginPanel("Scene Graph");
     for(const auto& n:app.comp->nodes)if(categoryOf(n->type)=="3D") {
         if(ImGui::Selectable(n->name.c_str(),app.selection.count(n->name))){app.selection={n->name};app.openPanel(n->name);}
     }
@@ -775,7 +794,7 @@ void drawToolbar(App& app, UiState& ui) {
                         fs::path(blocked.front()).filename().string() + (blocked.size() > 1 ? ", ..." : ""));
     }
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(1, 8));
-    ImGui::Begin(ui.win("Nodes").c_str(), nullptr, ImGuiWindowFlags_NoScrollbar);  // floating, it keeps a title bar to move it by
+    ui.beginPanel("Nodes", ImGuiWindowFlags_NoScrollbar);
     ui.noteHover("Nodes");
     ImGui::PopStyleVar();
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
@@ -885,7 +904,7 @@ void tickPlayback(App& app, UiState& ui) {
 // ------------------------------------------------------------------ messages
 
 void drawMessages(App& app, UiState& ui) {
-    ImGui::Begin(ui.win("Messages").c_str());
+    ui.beginPanel("Messages");
     ui.noteHover("Messages");
     for (auto& m : app.log) {
         bool err = m.rfind("error", 0) == 0;

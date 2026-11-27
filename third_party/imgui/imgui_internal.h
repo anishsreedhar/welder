@@ -2840,6 +2840,8 @@ struct ImGuiContext
     ImVector<ImTextureData*> UserTextures;                      // List of textures created/managed by user or third-party extension. Automatically appended into platform_io.Textures[].
     ImGuiDockContext        DockContext;
     void                    (*DockNodeWindowMenuHandler)(ImGuiContext* ctx, ImGuiDockNode* node, ImGuiTabBar* tab_bar);
+    void                    (*DockNodeWindowMenuIcon)(ImDrawList* draw_list, ImVec2 pos, float size, ImU32 color);
+    bool                    DockNodeAllowHiddenMultiTabBar;
 
     // Settings
     ImGuiPackedDate         SessionDate;                        // Packed copy of platform_io.Platform_SessionDate, when valid.
