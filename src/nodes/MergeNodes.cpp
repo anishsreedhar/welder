@@ -252,7 +252,7 @@ public:
         const std::set<std::string> aOff = offSet("Achannels_off"), bOff = offSet("Bchannels_off");
         auto layerCh = [](const Image& im, const std::string& layer, const std::string& c, const std::set<std::string>& off, const std::string& alpha=std::string()) {
             if (off.count(c)) return -1;
-            if(c=="A" && !alpha.empty())return im.ch(alpha);
+            if (c == "A" && !alpha.empty()) return alpha == "none" ? -1 : im.ch(alpha);
             if(layer=="none")return c=="A"?im.ch("A"):-1;
             if (layer.empty() || layer == "rgba" || layer == "rgb" || layer=="all") return im.ch(c);
             int i = im.ch(layer + "." + c);
@@ -312,8 +312,8 @@ public:
             }
             // Alpha last, so colour channels see B's original alpha.
             std::stable_partition(j.pairs.begin(), j.pairs.end(), [&](auto& p) { return p.first != outA; });
-            // A without an alpha channel is solid (#30); one switched off in the A channels reads as 0
-            j.aNone = j.Aa < 0 && !aOff.count("A") ? 1.0f : 0.0f;
+            // An RGB plate is solid by default (#30). An explicitly disabled alpha reads as zero.
+            j.aNone = j.Aa < 0 && !aOff.count("A") && aAlpha != "none" ? 1.0f : 0.0f;
             jobs.push_back(std::move(j));
         }
 

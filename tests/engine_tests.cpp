@@ -1646,6 +1646,26 @@ int main(int argc, char** argv) {
         gpu::setRoute(gpu::RouteMode::Auto);
     });
 
+    test("Merge: an explicit none alpha matches the disabled alpha checkbox on either input", [] {
+        for (bool sourceOnA : {true, false}) {
+            const std::string knob = sourceOnA ? "Achannels" : "Bchannels";
+            const json inputs = sourceOnA ? json{"Clear", "Plate"} : json{"Plate", "Clear"};
+            auto c = comp(json::array({
+                {{"name", "Clear"}, {"type", "Constant"}, {"params", {{"color", {0, 0, 0, 0}}}}},
+                {{"name", "Plate"}, {"type", "Constant"}, {"params", {{"color", {0.2, 0.3, 0.4, 0.25}}}}},
+                {{"name", "None"}, {"type", "Merge"}, {"inputs", inputs},
+                 {"params", {{"operation", "plus"}, {knob + "_alpha", "none"}}}},
+                {{"name", "Off"}, {"type", "Merge"}, {"inputs", inputs},
+                 {"params", {{"operation", "plus"}, {knob + "_off", {"A"}}}}},
+            }), 8, 8);
+            for (const char* name : {"None", "Off"}) {
+                auto image = render(*c, name);
+                CHECK_NEAR(px(image, 3, 3, "R"), 0.2, 1e-6);
+                CHECK_NEAR(px(image, 3, 3, "A"), 0.0, 1e-6);
+            }
+        }
+    });
+
     test("Merge: RGB none preserves the selected matte just like disabled RGB boxes", [] {
         auto c = comp(json::array({
             {{"name","S"},{"type","Constant"},{"params",{{"color",{.1,.2,.3,.75}}}}},
