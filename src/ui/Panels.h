@@ -462,6 +462,7 @@ struct ViewerCaptureState {
 
 struct UiState {
     std::vector<FloatPanel> floatPanels;
+    std::map<std::string, json> keyerPanelDefaults;
     // ImageGen's contact sheet: Space over it toggles the 1:1 view of the selected take (not maximize)
     struct ImageGenUi {
         int sheetHoverFrame = -10;  // the last frame the mouse was over a contact sheet

@@ -1,0 +1,17 @@
+{
+  "strata": 1,
+  "format": {"width": 1920, "height": 1080},
+  "nodes": [
+    {
+      "name": "Keyer1",
+      "type": "Keyer",
+      "params": {"operation": "luminance key", "range": [0, 1, 1, 1], "invert": false}
+    },
+    {
+      "name": "Viewer1",
+      "type": "Viewer",
+      "inputs": ["Keyer1"],
+      "params": {"a_pipe": 1}
+    }
+  ]
+}

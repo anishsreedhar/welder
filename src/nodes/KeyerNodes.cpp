@@ -15,6 +15,7 @@
 
 #include "Keyer.h"
 #include "NodeUtils.h"
+#include "../core/Comp.h"
 #include "../core/Parallel.h"
 
 namespace strata {
@@ -301,17 +302,46 @@ public:
 };
 
 // ------------------------------------------------------------------ Keyer 
-// params: operation, range [A, B, C, D] (0 below A, ramps to 1 at B, 1 to C,
-// ramps to 0 at D), invert. The key value goes to alpha. The default range is 0 1 1 1, as in
-// Nuke, so a new Keyer's alpha follows the measured value (0 0 1 1 made it solid white, #31).
+// The default range is 0 1 1 1, so the matte follows the measured value.
 class KeyerNode : public Node {
+    std::string outputChannel(const ChannelSet& channels) const {
+        const std::string output = keyer::channelSetting(*this, "output", "A");
+        return channelIndex(channels, output) >= 0 ? output : resolveChannelName(output);
+    }
+
 public:
-    ChannelSet channels(Engine& e, double f) override { return withRGBA(e.channels(input(0), f)); }
+    uint64_t localHash(double frame) const override {
+        uint64_t hash = hashString("keyer-luminance-weights", Node::localHash(frame));
+        if (params.has("input_link")) {
+            hash = hashCombine(hash, hashString(keyer::channelSetting(*this, "input", "rgb")));
+            hash = hashCombine(hash, hashString(keyer::channelSetting(*this, "input_rgb", "RGB")));
+        }
+        if (params.has("output_link"))
+            hash = hashCombine(hash, hashString(keyer::channelSetting(*this, "output", "A")));
+        return hash;
+    }
+    ChannelSet channels(Engine& e, double f) override {
+        ChannelSet channels = e.channels(input(0), f);
+        const std::string output = outputChannel(channels);
+        if (output.empty() || output == "none") return channels;
+        if (output == "A") return withRGBA(std::move(channels));  // Legacy Keyers always expose RGBA.
+        return unionChannels(channels, {output});
+    }
     void render(RenderArgs& a, Image& out) override {
         const double f = a.frame;
-        out.copyFrom(*a.fetch(input(0), a.region));
-        RGBAIdx oi(out);
+        const ImagePtr inputImage = a.fetch(input(0), a.region);
+        out.copyFrom(*inputImage);
+        const std::string output = outputChannel(inputImage->channels);
+        if (output.empty() || output == "none") return;
+        const int dst = out.ch(output);
+        if (dst < 0) return;
+        auto src = keyer::layerChannels(out, keyer::channelSetting(*this, "input", "rgb"));
+        const auto enabled = keyer::channelSetting(*this, "input_rgb", "RGB");
+        for (int i = 0; i < 3; ++i)
+            if (enabled.find("RGB"[i]) == std::string::npos) src[i] = -1;
         const std::string op = params.str("operation", "luminance key");
+        const std::string combine = params.str("combine", "replace");
+        const bool intersect = combine == "intersect", unite = combine == "union";
         auto rg = params.vec<4>("range", f, {0, 1, 1, 1});
         const float A = (float)rg[0], B = (float)rg[1], C = (float)rg[2], D = (float)rg[3];
         const bool inv = params.flag("invert", false);
@@ -319,11 +349,14 @@ public:
         for (int y = R.y1; y < R.y2; ++y) {
             float* o = out.row(y);
             for (int x = 0; x < R.width(); ++x, o += out.nch()) {
-                float p[4];
-                oi.read(o, p);
-                float al = keyer::curve(keyer::measure(op, p), A, B, C, D);
+                float p[4] = {};
+                for (size_t i = 0; i < src.size(); ++i)
+                    if (src[i] >= 0) p[i] = o[src[i]];
+                float al = keyer::matte(keyer::measure(op, p), A, B, C, D);
                 if (inv) al = 1 - al;
-                if (oi.a >= 0) o[oi.a] = al;
+                if (intersect) al = std::min(al, o[dst]);
+                if (unite) al = std::max(al, o[dst]);
+                o[dst] = al;
             }
         }
     }
@@ -696,6 +729,38 @@ void registerKeyerNodes() {
 
 namespace strata::keyer {
 
+std::string channelSetting(const Node& node, const std::string& knob, const std::string& fallback) {
+    const char* link = knob == "output" ? "output_link" : "input_link";
+    const Node* current = &node;
+    const Comp* comp = node.comp;
+    for (size_t i = 0; comp && i < comp->nodes.size(); ++i) {
+        const std::string target = current->params.str(link);
+        if (target.empty()) return current->params.str(knob, fallback);
+        current = comp->find(target);
+        if (!current || current->type != "Keyer") break;
+    }
+    return node.params.str(knob, fallback);
+}
+
+std::array<int, 4> layerChannels(const Image& image, const std::string& layer) {
+    if (layer == "none") return {-1, -1, -1, -1};
+    if (layer == "alpha") {
+        const int alpha = image.ch("A");
+        return {alpha, alpha, alpha, alpha};
+    }
+    const std::string prefix = layer.empty() || layer == "rgb" || layer == "rgba" ? "" : layer + ".";
+    std::array<int, 4> channels = {image.ch(prefix + "R"), image.ch(prefix + "G"), image.ch(prefix + "B"), image.ch(prefix + "A")};
+    if (prefix.empty() || std::any_of(channels.begin(), channels.end(), [](int index) { return index >= 0; })) return channels;
+    int count = 0;
+    for (const auto& channel : image.channels) {
+        if (channel.starts_with(prefix) && channel.find('.', prefix.size()) == std::string::npos)
+            channels[count++] = image.ch(channel);
+        if (count == 4) break;
+    }
+    if (count == 1) channels.fill(channels[0]);
+    return channels;
+}
+
 float measure(const std::string& op, const float p[4]) {
     const float r = p[0], g = p[1], b = p[2];
     if (op == "red keyer") return r;
@@ -708,20 +773,26 @@ float measure(const std::string& op, const float p[4]) {
     }
     if (op == "min keyer") return std::min({r, g, b});
     if (op == "max keyer") return std::max({r, g, b});
-    if (op == "greenscreen keyer") return g - std::max(r, b);
-    if (op == "bluescreen keyer") return b - std::max(r, g);
-    return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+    if (op == "redscreen keyer" || op == "redscreen") return r - std::max(g, b);
+    if (op == "greenscreen keyer" || op == "greenscreen") return g - std::max(r, b);
+    if (op == "bluescreen keyer" || op == "bluescreen") return b - std::max(r, g);
+    // Match the luminance response measured from Nuke 17.1's Keyer.
+    return 0.2125f * r + 0.7154f * g + 0.0721f * b;
 }
 
-float curve(float v, float A, float B, float C, float D) {
-    auto sm = [](float t) {
+float curve(float v, float A, float B, float C, float D, bool smooth) {
+    auto ramp = [smooth](float t) {
         t = std::clamp(t, 0.0f, 1.0f);
-        return t * t * (3 - 2 * t);
+        return smooth ? t * t * (3 - 2 * t) : t;
     };
     if (v < A || v > D) return 0;
-    if (v < B) return sm((v - A) / (B - A));
+    if (v < B) return ramp((v - A) / (B - A));
     if (v <= C) return 1;
-    return sm((D - v) / (D - C));
+    return ramp((D - v) / (D - C));
+}
+
+float matte(float v, float A, float B, float C, float D) {
+    return curve(C == 1.0f && D == 1.0f ? std::min(v, 1.0f) : v, A, B, C, D);
 }
 
 }  // namespace strata::keyer

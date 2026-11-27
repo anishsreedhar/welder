@@ -3203,7 +3203,18 @@ class Translator:
 
         if klass == "Keyer":
             op = str(k.get("operation", "luminance key"))
+            if op in ("redscreen", "greenscreen", "bluescreen"):
+                op += " keyer"
             params["operation"] = op
+            if "input" in k:
+                params["input"] = str(k["input"])
+            if "output" in k:
+                output = str(k["output"])
+                params["output"] = "none" if output.startswith("-") else channel_name(output)
+            if "combine" in k:
+                params["combine"] = str(k["combine"])
+            if "invert" in k:
+                params["invert"] = flag("invert")
             num("range", dest="range")
             self.translated += 1
             return self.emit(nk_name, klass, "Keyer", main[:1], params, k)

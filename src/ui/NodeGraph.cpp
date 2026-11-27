@@ -19,6 +19,7 @@
 #include "Panels.h"
 #include "core/NetPath.h"
 #include "nodes/NodeUtils.h"
+#include "nodes/Keyer.h"
 #include "nodes/PrecompNode.h"
 #include "io/MovieIO.h"
 #include "io/ImageIO.h"
@@ -78,6 +79,7 @@ std::string expandLabel(const Node* n, std::string t) {
 
 std::string subtitleOnly(const Node* n);
 std::string nodeTitle(const Node* n) {
+    if (n->type == "Keyer") return n->name + " (" + n->params.str("operation", "luminance key") + ")";
     return n->type == "Merge" ? n->name + " (" + n->params.str("operation", "over") + ")" : n->name;
 }
 // The text under the name: the node's own subtitle, then its label's lines.
@@ -115,6 +117,11 @@ std::string channelText(const Node* n, const std::string& knob, std::string* def
 }
 
 std::string subtitleOnly(const Node* n) {
+    if (n->type == "Keyer") {
+        std::string output = keyer::channelSetting(*n, "output", "A");
+        if (output == "A") output = "alpha";
+        return "(" + output + ")";
+    }
     if (n->type == "Merge") return "";  // operation sits beside the name
     if (n->type == "Blur") return "(" + channelText(n, "channels") + ")";
     if (n->type == "Copy") {
@@ -244,7 +251,8 @@ ImVec2 size(const Node* n) {
     if (hasStamp(n) && n->type=="Read") return evenSize(kStampW, 90.0f + (subtitle(n).empty() ? 0.0f : 16.0f));
     if (n->type == "Viewer") return evenSize(std::max(kNodeW, ImGui::CalcTextSize(n->name.c_str()).x + 28), kNodeH);
     // Graph units are pixels at zoom 1, so measure the name at the base font size.
-    float w = std::max(kNodeW, std::ceil(ImGui::CalcTextSize(nodeTitle(n).c_str()).x / 10.0f) * 10.0f + 20.0f);
+    const std::string sizingTitle = n->type == "Keyer" ? n->name : nodeTitle(n);
+    float w = std::max(kNodeW, std::ceil(ImGui::CalcTextSize(sizingTitle.c_str()).x / 10.0f) * 10.0f + 20.0f);
     const float stamp = stampHeight(n);
     if (stamp > 0) w = std::max(w, kStampW + 8);
     std::string sub = subtitle(n);
@@ -2388,7 +2396,8 @@ void drawNodeGraph(App& app, UiState& ui) {
             const float ty0 = p0.y + stampH;  // the text area: under the stamp
             float cy = subtitle(n).empty() ? (ty0 + p1.y - ts.y) / 2 : ty0 + 3 * g.zoom;
             const ImU32 nameCol = textColor;
-            dl->AddText(font, fs, ImVec2((p0.x + p1.x - ts.x) / 2, cy), nameCol, nodeTitle(n).c_str());
+            const float nameX = (p0.x + p1.x - ts.x) / 2;
+            dl->AddText(font, fs, ImVec2(nameX, cy), nameCol, nodeTitle(n).c_str());
             std::string subAll = subtitle(n);
             float ly = cy + fs + 1;
             for (size_t a = 0; !subAll.empty() && a <= subAll.size();) {

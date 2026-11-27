@@ -875,6 +875,10 @@ struct Writer {
         } else if (type == "Keyer") {
             b.cls = "Keyer";
             mainMask(1, -1);
+            copy("input");
+            if (has("output") && p["output"].is_string()) raw("output", nkChannel(p["output"].get<std::string>()));
+            copy("combine");
+            copy("invert");
             copy("operation");
             copy("range");
         } else if (type == "CornerPin2D") {
