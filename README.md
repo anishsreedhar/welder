@@ -3,6 +3,24 @@
 An open-source, node-based compositor in the classic node-based style: 32-bit float linear,
 pull-based tiled rendering, OpenFX plugins, and a translator that imports .nk scripts.
 
+<details>
+<summary><strong>Blur node development update — same 0.2.6 / PFX Build 001</strong></summary>
+
+The Blur panel now exposes compact channel, filter, mask and animation menus,
+with linked or separate X/Y size, smoother numeric scrolling, automatic Roto
+alpha-mask activation, and a searchable picker for installed Windows fonts and styles.
+Curve expressions preserve their original values and keyframes, with live previews
+and Apply/OK controls. The existing `Welder.bat` launcher and version numbers remain in use.
+
+- [Detailed update explanation](docs/updates/blur-node-update.txt)
+- [Blur control guide](docs/BLUR-CONTROLS.txt)
+- Examples: [Blur controls](examples/blur_controls.weld) and [working curve expression](examples/blur_curve_expression.weld)
+- [Full-resolution update image](docs/updates/blur-node-update.png) · [Smaller sharing image](docs/updates/blur-node-update-small.png)
+
+![Blur node update: controls, masks, expressions, numeric editing and installed fonts](docs/updates/blur-node-update-small.png)
+
+</details>
+
 Two programs share one engine:
 
 * **`welder_ui`, the editor.** It has a classic layout: viewer with timeline,

@@ -369,6 +369,15 @@ target_link_libraries(welder PRIVATE strata_core)
 
 # ---------------------------------------------------------------- tests
 enable_testing()
+add_executable(welder_font_tests tests/font_tests.cpp src/ui/SystemFonts.cpp)
+target_include_directories(welder_font_tests PRIVATE src)
+if(WIN32)
+  target_link_libraries(welder_font_tests PRIVATE dwrite)
+endif()
+add_test(NAME fonts COMMAND welder_font_tests)
+add_executable(welder_blur_tests tests/blur_tests.cpp)
+target_link_libraries(welder_blur_tests PRIVATE strata_core)
+add_test(NAME blur COMMAND welder_blur_tests)
 add_executable(welder_tests tests/engine_tests.cpp)
 target_include_directories(welder_tests PRIVATE tests)
 target_link_libraries(welder_tests PRIVATE strata_core)
@@ -487,6 +496,7 @@ if(STRATA_BUILD_UI)
   src/ui/TransformTool.cpp
   src/ui/KnobHandles.cpp
   src/ui/Theme.cpp
+  src/ui/SystemFonts.cpp
   src/ui/FlowPaintTool.cpp
   src/ui/MarkupTool.cpp
   src/ui/TrackMaskTool.cpp
@@ -499,6 +509,9 @@ if(STRATA_BUILD_UI)
   ${WELDER_EMBEDDED}
   ${WELDER_RC})
   target_link_libraries(welder_ui PRIVATE strata_core strata_imgui)
+  if(WIN32)
+    target_link_libraries(welder_ui PRIVATE dwrite)
+  endif()
   target_compile_definitions(welder_ui PRIVATE STRATA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
   if(NOT MSVC)
     target_compile_options(welder_ui PRIVATE -Wall -Wextra -Wno-unused-parameter)

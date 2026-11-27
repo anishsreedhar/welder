@@ -1800,10 +1800,16 @@ std::vector<NodeDef> build() {
                   F("field_width", "width", 2, 0, 1000), F("softness", "softness", 0.5, 0, 100), C("output", "output", "multiply", {"multiply", "alpha"})},
                  "Keeps only what lies within a range of distances (from a depth channel)."});
     d.push_back({"Blur", "Filter",
-                 withMask({Ch("channels", "channels", "all"), Split(XY("size", "size", json::array({0, 0}), 0, 100)),
-                           Width(C("filter", "filter", "gaussian", {"box", "triangle", "quadratic", "gaussian"}), 100),
-                           F("quality", "quality", 15, 0, 100, "Blurs larger than this many pixels are computed at reduced resolution (faster). 0 = always full resolution."),
-                           B("crop", "crop to format", true)}),
+                 {Ch("channels", "channels", "all"), Split(XY("size", "size", json::array({0, 0}), 0, 100)),
+                  Width(C("filter", "filter", "gaussian", {"box", "triangle", "quadratic", "gaussian"}), 82),
+                  [] { auto k = Same(Width(F("quality", "quality", 15, 0, 100,
+                      "Blurs larger than this many pixels use reduced resolution. 0 = full resolution."), 72), true);
+                      k.noSlider = k.noAnim = true; return k; }(),
+                  Same(B("crop", "crop to format", true)),
+                  C("mask_channel", "mask", "none", {}), Same(B("inject", "inject", false,
+                      "Copy the selected mask channel into the output's mask.a channel")),
+                  Same(B("invert_mask", "invert", false)), Same(B("fringe", "fringe", false,
+                      "Apply the blur only to the soft edge of the mask")), F("mix", "mix", 1, 0, 1)},
                  ""});
     d.push_back({"Sharpen", "Filter",
                  withMask({Ch("channels", "channels", "rgb"), F("amount", "amount", 1, 0, 5), XY("size", "size", json::array({3, 3}), 0, 50)}),

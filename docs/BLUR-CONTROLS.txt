@@ -1,0 +1,113 @@
+WELDER BLUR — CONTROL GUIDE
+Welder 0.2.6 / PFX Build 001
+
+Blur softens an image or matte by combining each pixel with its neighbors.
+Increase Size to soften more detail, or use Size 0 to leave the image unchanged.
+Press B while the pointer is over the Node Graph to create a Blur node.
+
+INPUTS
+
+Image: Connect the image or matte you want to blur to the main input.
+Mask: Optionally connect a second image to limit where the blur is applied.
+
+BLUR TAB
+
+Channels — Default: all
+Choose which channels receive the blur. The menu includes all, none, rgb, rgba,
+alpha, and other layers supplied by the image. When a layer is selected, use
+the component checkboxes to include or exclude individual channels. Unselected
+channels keep their original pixels. New adds a named layer or channel to the
+selection menus; the connected image must supply its pixel data.
+
+Size — Default: 0
+Controls the blur size in pixels. Higher values soften a wider area. Drag the
+number, type a value, or use the slider. Click 2 to adjust horizontal and
+vertical sizes separately; link the values again to use one size for both.
+Mouse-wheel changes use whole pixels by default. Hold Shift for fine 0.1-pixel
+steps or Ctrl for 10-pixel steps. Typed fractional sizes remain supported.
+Small high-resolution wheel movements accumulate instead of being discarded.
+Fractional controls respond to every small wheel movement, including fine
+adjustments and large values.
+
+Filter — Default: gaussian
+Box gives a uniform blur and is usually the fastest choice. Triangle weights
+nearby pixels more strongly than distant pixels. Quadratic gives a smoother,
+rounded weighting. Gaussian produces a soft, smooth result.
+
+Quality — Default: 15
+Balances speed and smoothness for large blurs. Lower settings process a smaller
+image and enlarge the result afterward. Higher settings retain more detail
+during processing. Use 0 to calculate at full resolution.
+
+Crop to format — Default: enabled
+Keeps the output bounding box within the incoming image bounds. Turn it off
+when the blur should extend beyond those bounds.
+
+Mask — Default: none / disabled
+Enable the mask and select its channel. White applies the full effect, black
+preserves the original image, and gray applies a partial effect. Choosing none
+or clearing the checkbox disables masking.
+A newly attached mask automatically enables rgba.alpha; connecting a Roto or
+RotoPaint selects its alpha channel. You can still disable it manually afterward.
+Other channels includes the standard depth, motion, deep, mask, sample, and
+cutout choices, plus channels supplied by the connected image.
+
+Inject — Default: off
+Copies the selected mask channel into mask.a so downstream nodes can reuse it.
+The injected channel keeps the original mask values, independently of Mix,
+Invert, and Fringe.
+
+Invert — Default: off
+Reverses the mask: black areas receive the effect and white areas are protected.
+
+Fringe — Default: off
+Restricts the blur to the mask's soft transition edges instead of its solid
+interior. A completely hard mask has no soft fringe.
+
+Mix — Default: 1
+Blends the original image with the effect. 0 gives the original image, 1 gives
+the full effect, and intermediate values give a partial blend.
+
+ANIMATION MENU
+
+Click the curve button beside Size or Mix, or right-click its controls.
+Set key records the current value at the current frame. Delete key removes
+that frame's key. No animation freezes the current evaluated value. Set to
+default restores the control's original setting.
+
+Curve editor and Dope sheet open Welder's animation panels. Edit expressions
+lets you drive the control with a formula. Interpolation selects constant,
+linear, or smooth transitions. Copy and Paste transfer values or animation.
+File imports or exports Welder animation files. Edit can reverse key timing or
+move the first key to the current frame. Predefined supplies a project-range
+ramp or a 24-frame sine wave. Parameter edits support Undo and Redo.
+
+The expression editor previews the result at the current frame. Apply updates
+the control without closing the editor; OK applies and closes it. Linked Size
+components share the expression unless Link components is turned off.
+The expression curve reads the original value or animation beneath it: with
+an original Size of 6, curve*2 produces 12. Editing the underlying value to 7
+produces 14. curve(frame-1) samples the original animation one frame earlier.
+Applying, editing, keyframing, and saving keep this underlying value or curve.
+Removing the expression restores it. Numeric edits preserve the expression
+and adjust its underlying value, so its result follows the formula.
+
+NODE TAB
+
+Label adds text beneath the node name. Font, bold, italic, size, and Color
+control that label's appearance. Hide Input hides the main input pipe while
+keeping the connection. Cached prioritizes the node within the memory cache.
+Disable bypasses the blur. Dope Sheet keeps its key markers on the timeline
+when the properties panel is closed. Bookmark adds it to the graph's bookmarks.
+
+Postage Stamp shows a small image preview on the node. Static Frame uses the
+chosen frame for that preview. Enable Use Lifetime to apply the effect only
+between the two Lifetime Range frames; outside that range the input passes
+through unchanged.
+
+On Windows, the Font menu discovers installed font families on the current
+computer, including symbol fonts and font collections. Use the search box to
+find families and named styles such as Light, Semibold, and Condensed.
+Font names, rather than machine-specific file paths, are saved
+in the project. A computer without the selected family uses a fallback font;
+install the same font there when an identical label appearance is needed.

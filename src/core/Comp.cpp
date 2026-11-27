@@ -329,7 +329,16 @@ bool Comp::setInput(Node* n, int idx, Node* src, std::string* err) {
         return true;
     }
     if ((int)n->inputs.size() <= idx) n->inputs.resize(idx + 1, nullptr);
+    Node* previous = n->inputs[idx];
     n->inputs[idx] = src;
+    // A newly attached mask should immediately do something. This is a graph
+    // edit, not a render-time default, so the user can still choose none later.
+    if (n->type == "Blur" && idx == 1 && src && src != previous) {
+        if (n->params.str("mask_channel", "none") == "none" || src->type == "Roto" || src->type == "RotoPaint" || src->type == "PowerRoto") {
+            n->params.data["mask_channel"] = "A";
+            n->paramsChanged();
+        }
+    }
     while (!n->inputs.empty() && !n->inputs.back()) n->inputs.pop_back();
     return true;
 }
