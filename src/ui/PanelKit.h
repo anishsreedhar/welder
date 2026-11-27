@@ -13,6 +13,8 @@ namespace strata::ui::kit {
 
 // The knob label column (scales with the font).
 float labelWidth();
+float setLabelWidth(float width);  // scoped compact panels; returns the previous override
+bool setReferenceFields(bool enabled);
 // A row's label, then the cursor on the field column.
 void rowLabel(const char* text, const char* tip = nullptr);
 // The field column on a new row with no label.
@@ -28,6 +30,10 @@ bool altClickItem();
 bool takeAltClick();
 // A slider with tick marks. `log`: finer near the low end. One-sided ranges fill up to the value.
 bool tickSlider(const char* id, double* v, double lo, double hi, float width, bool log = false, bool isInt = false);
+// ColorCorrect: signed scale centered on its neutral value, numbered ticks,
+// and a thin vertical rectangular handle.
+bool colorCorrectSlider(const char* id, double* v, double neutral, double extent, float width);
+bool gradeSlider(const char* id, double* v, double neutral, bool gamma, float width);
 // A checkbox; its label turns the accent colour when on.
 bool checkbox(const char* label, bool* v, const char* tip = nullptr);
 // A menu with the field's colour.
@@ -35,7 +41,7 @@ bool beginCombo(const char* id, const char* preview, float width, int flags = 0)
 // ImGui::BeginCombo with the field's colour (the width as set before it).
 bool beginComboFlat(const char* id, const char* preview, int flags = 0);
 // Small icon buttons.
-enum class Icon { Chain, ChainBroken, Crosshair, Eyedropper };
+enum class Icon { Chain, ChainBroken, Crosshair, Eyedropper, ColorWheel };
 bool iconButton(const char* id, Icon icon, bool on = false, const char* tip = nullptr);
 
 // A card: a rounded, slightly darker box around a group of knobs, optionally

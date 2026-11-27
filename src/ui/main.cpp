@@ -57,6 +57,8 @@ namespace fs = std::filesystem;
 using namespace strata;
 using namespace strata::ui;
 
+namespace strata::ui {bool messagePanelVisible();}
+
 namespace {
 
 struct Options {
@@ -111,13 +113,13 @@ void buildLayout(ImGuiID dock, ImVec2 size) {
     ImGui::DockBuilderAddNode(dock, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(dock, size);
     ImGuiID left, main;
-    ImGui::DockBuilderSplitNode(dock, ImGuiDir_Left, 46.0f / size.x, &left, &main);
+    ImGui::DockBuilderSplitNode(dock, ImGuiDir_Left, 42.0f / size.x, &left, &main);
     ImGuiID right, center;
-    ImGui::DockBuilderSplitNode(main, ImGuiDir_Right, 0.30f, &right, &center);
+    ImGui::DockBuilderSplitNode(main, ImGuiDir_Right, 0.328f, &right, &center);
     ImGuiID top, bottom;
-    ImGui::DockBuilderSplitNode(center, ImGuiDir_Up, 0.60f, &top, &bottom);
+    ImGui::DockBuilderSplitNode(center, ImGuiDir_Up, 0.568f, &top, &bottom);
     ImGuiID viewer, timeline;
-    ImGui::DockBuilderSplitNode(top, ImGuiDir_Down, timelineHeight() / (size.y * 0.6f), &timeline, &viewer);
+    ImGui::DockBuilderSplitNode(top, ImGuiDir_Down, timelineHeight() / (size.y * 0.568f), &timeline, &viewer);
     ImGui::DockBuilderDockWindow("Nodes", left);
     ImGui::DockBuilderDockWindow("Viewer", viewer);
     ImGui::DockBuilderDockWindow("Timeline", timeline);
@@ -125,6 +127,8 @@ void buildLayout(ImGuiID dock, ImVec2 size) {
     ImGui::DockBuilderDockWindow("Curve Editor", bottom);
     ImGui::DockBuilderDockWindow("Dope Sheet", bottom);
     ImGui::DockBuilderDockWindow("Node Graph", bottom);
+    ImGui::DockBuilderDockWindow("Background Renders", right);
+    ImGui::DockBuilderDockWindow("Scene Graph", right);
     ImGui::DockBuilderDockWindow("Properties", right);
     for (ImGuiID id : {left, timeline}) {  // no tab bars; every edge can still be dragged
         if (ImGuiDockNode* n = ImGui::DockBuilderGetNode(id)) n->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
@@ -132,7 +136,7 @@ void buildLayout(ImGuiID dock, ImVec2 size) {
     ImGui::DockBuilderFinish(dock);
 }
 
-const char* const kPanelNames[] = {"Nodes", "Viewer", "Timeline", "Node Graph", "Properties", "Messages", "Curve Editor", "Dope Sheet"};
+const char* const kPanelNames[] = {"Nodes", "Viewer", "Timeline", "Node Graph", "Properties", "Messages", "Curve Editor", "Dope Sheet", "Background Renders", "Scene Graph"};
 
 // Reset Workspace: forget every dock node (floating ones too) and where each panel was, then
 // build the default layout.
@@ -315,6 +319,12 @@ int main(int argc, char** argv) {
         startupDone();
         return 1;
     }
+    if (const char* preview = std::getenv("WELDER_SPLASH_PREVIEW"); preview && *preview) {
+        const bool ok = splash::preview(preview);
+        glfwTerminate();
+        startupDone();
+        return ok ? 0 : 1;
+    }
     // The splash stays up while plug-ins are found and the file loads (not for scripted screenshots).
     const bool useSplash = opt.screenshot.empty() && !opt.idScan && !safeMode && !envFlag("WELDER_NO_SPLASH") &&
                            !envFlag("STRATA_NO_SPLASH");
@@ -390,6 +400,7 @@ int main(int argc, char** argv) {
         fs::rename(iniPath, iniPath + ".bak", ec);  // kept beside it, just in case
     }
     App app;
+    app.maxPanels=10;
     app.exeDir = fs::path(absolutePath(argv[0])).parent_path().string();
 #if defined(__APPLE__)
     setenv("PYTHONDONTWRITEBYTECODE", "1", 0);  // Python helpers run from inside the signed app: write nothing there
@@ -426,11 +437,20 @@ int main(int argc, char** argv) {
         const bool haveRegular = fs::exists(regular);
         ImFontConfig cfg;
         cfg.OversampleH = 2;
-        theme().regular = io.Fonts->AddFontFromFileTTF(haveRegular ? regular.c_str() : font.c_str(), 14.5f * scale, &cfg);
-        theme().medium = io.Fonts->AddFontFromFileTTF(font.c_str(), 14.5f * scale, &cfg);
+        theme().regular = io.Fonts->AddFontFromFileTTF(haveRegular ? regular.c_str() : font.c_str(), 13.f * scale, &cfg);
+        theme().medium = io.Fonts->AddFontFromFileTTF(font.c_str(), 13.f * scale, &cfg);
         theme().small = io.Fonts->AddFontFromFileTTF(font.c_str(), 11.5f * scale, &cfg);
     }
+#ifdef _WIN32
+    if(fs::exists("C:/Windows/Fonts/arial.ttf")) {
+        ImFontConfig cfg;cfg.OversampleH=2;cfg.OversampleV=2;
+        theme().regular=io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/arial.ttf",13.f*scale,&cfg);
+        theme().medium=io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/arial.ttf",13.f*scale,&cfg);
+        io.FontDefault=theme().regular;
+    }
+#endif
     theme().uiScale = scale;
+    loadNodeLabelFonts();
     applyTheme(app.themeName);
 
     ImGui_ImplGlfw_InitForOpenGL(win, true);
@@ -519,7 +539,7 @@ int main(int argc, char** argv) {
         // when something must advance every frame.
         // Keys pressed faster than frames are trickled in one per frame by ImGui; keep
         // polling while any are queued so a burst of hotkeys is never held back.
-        if (app.playing || app.editsPending() || ui::ScriptRunner::instance().running() || ui::ScriptRunner::callbacks().needsFrames() || ui::McpService::instance().busy() || ui.graph.autoPanning || !opt.screenshot.empty() || smoke::active() || GImGui->InputEventsQueue.Size > 0)
+        if (app.playing || ui.flipbook.playing || ui.flipbook.loading || ui.viewerCapture.running || app.editsPending() || ui::ScriptRunner::instance().running() || ui::ScriptRunner::callbacks().needsFrames() || ui::McpService::instance().busy() || ui.graph.autoPanning || !opt.screenshot.empty() || smoke::active() || GImGui->InputEventsQueue.Size > 0)
             glfwPollEvents();
         else glfwWaitEventsTimeout(app.rendering() ? 0.05 : 0.5);
         const auto frameWorkStart = std::chrono::steady_clock::now();  // (WELDER_DEBUG_FRAMES)
@@ -536,6 +556,30 @@ int main(int argc, char** argv) {
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
+        // Screenshot regression input is applied after GLFW's physical mouse polling.
+        // Keep it here so hidden test windows receive the same gestures as real widgets.
+        if (!opt.screenshot.empty()) {
+            static const char* mouseScript = std::getenv("STRATA_TEST_MOUSE");
+            if (mouseScript && *mouseScript) {
+                static const json events = json::parse(mouseScript, nullptr, false);
+                static ImVec2 at(-100, -100);
+                static bool down = false;
+                if (events.is_array()) {
+                    for (const auto& e : events) if (e.is_array() && e.size() >= 4 && e[0] == frameCount) {
+                        at = ImVec2(e[1].get<float>(), e[2].get<float>());
+                        down = e[3].get<bool>();
+                        if(e.size()>4)ImGui::GetIO().AddMouseWheelEvent(0,e[4].get<float>());
+                        if(e.size()>5)ImGui::GetIO().AddKeyEvent(ImGuiMod_Shift,e[5].get<bool>());
+                        if(e.size()>6)ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl,e[6].get<bool>());
+                    }
+                    auto& input = ImGui::GetIO();
+                    input.ConfigInputTrickleEventQueue = false;
+                    input.AddFocusEvent(true);
+                    input.AddMousePosEvent(at.x, at.y);
+                    input.AddMouseButtonEvent(0, down);
+                }
+            }
+        }
         if (scanning) {  // the sweep: each position is held 3 frames (ImGui reports a conflict two frames on)
             const int cols = std::max(1, opt.width / opt.idScan), pos = scanIdx / 3;
             ImGui::GetIO().AddMousePosEvent((float)((pos % cols) * opt.idScan + opt.idScan / 2),
@@ -604,7 +648,7 @@ int main(int argc, char** argv) {
             struct PanelFn { const char* name; void (*fn)(App&, UiState&); };
             static const PanelFn kPanels[] = {{"Nodes", drawToolbar},       {"Viewer", drawViewer},
                                               {"Timeline", drawTimeline},   {"Node Graph", drawNodeGraph},
-                                              {"Properties", drawProperties}, {"Messages", drawMessages},
+                                              {"Properties", drawProperties}, {"Background Renders", drawBackgroundRenders}, {"Scene Graph", drawSceneGraph}, {"Messages", drawMessages},
                                               {"Curve Editor", drawCurveEditor}, {"Dope Sheet", drawDopeSheet}};
             static std::string lastMax;
             static std::vector<std::string> shownTabs;  // the tab each dock area showed before maximizing
@@ -630,6 +674,7 @@ int main(int argc, char** argv) {
             const bool viewerMax = ui.maximized == "Viewer";
             const float tlH = viewerMax ? std::min(timelineHeight() + ImGui::GetFrameHeight(), vp->WorkSize.y * 0.5f) : 0.0f;  // (+ its title bar)
             for (auto& p : kPanels) {
+                if(std::string(p.name)=="Messages" && !messagePanelVisible())continue;
                 const bool timelineUnder = viewerMax && std::string(p.name) == "Timeline";
                 if (!ui.maximized.empty() && ui.maximized != p.name && !timelineUnder) continue;
                 if (timelineUnder) {
@@ -1157,6 +1202,21 @@ int main(int argc, char** argv) {
                     for (int pi = 0; pi < (int)rn->params.data["shapes"][si].value("points", json::array()).size(); ++pi) ui.roto.sel.insert({si, pi});
         // STRATA_TEST_MAXIMIZE=<panel>: that panel maximized (Space); STRATA_TEST_NO_OVERLAYS: Q pressed over the viewer
         if (const char* tm = std::getenv("STRATA_TEST_MAXIMIZE"); tm && *tm && !opt.screenshot.empty() && frameCount == 5) ui.maximized = tm;
+        // Screenshot regression fixtures exercise the display shader and render request controls.
+        if (const char* tv = std::getenv("STRATA_TEST_VIEWER"); tv && !opt.screenshot.empty() && frameCount == 5) {
+            const auto j = json::parse(tv, nullptr, false);
+            if (j.is_object()) {
+                auto& v = ui.viewer;
+                v.fstop = j.value("stops", 0.f); v.gamma = j.value("gamma", 1.f);
+                v.saturation = j.value("saturation", 1.f); v.displayTransfer = j.value("transfer", 0);
+                v.channel = j.value("channel", 0); v.safeZone = j.value("safe", false);
+                v.cropFormat = j.value("crop", false); v.fullBuffer = j.value("full", false);
+                v.proxy = j.value("proxy", false); v.resolutionDivisor = j.value("proxy",false) ? j.value("resolution",1) : 0;
+                v.alphaChannel = j.value("alpha", std::string("A")); v.dirtyTexture = true;
+                if (j.contains("roi")) { auto r=j["roi"]; v.roiEnabled=true; v.roi=Box(r[0],r[1],r[2],r[3]); }
+                v.reqScale=0;
+            }
+        }
         if (std::getenv("STRATA_TEST_NO_OVERLAYS") && !opt.screenshot.empty() && frameCount == 5) ui.viewer.overlays = false;
         // STRATA_TEST_COLLAPSE=<backdrop>: minimise it (as its corner button does)
         if (const char* tb = std::getenv("STRATA_TEST_COLLAPSE"); tb && *tb && !opt.screenshot.empty() && frameCount == 12)
@@ -1776,10 +1836,10 @@ int main(int argc, char** argv) {
                 static int secShown = 0, sec = 0;
                 if (const char* fr = std::getenv("STRATA_TEST_PLAY_FULLRES"); fr && onAt < 0) std::sscanf(fr, "%lf,%lf", &onAt, &offAt);
                 const double el = glfwGetTime() - t0;
-                if (onAt >= 0 && el >= onAt && el < offAt) ui.viewer.fullRes = true;
-                if (offAt >= 0 && el >= offAt) ui.viewer.fullRes = false;
+                if (onAt >= 0 && el >= onAt && el < offAt) ui.viewer.resolutionDivisor = 1;
+                if (offAt >= 0 && el >= offAt) ui.viewer.resolutionDivisor = 0;
                 if ((int)el > sec) {
-                    std::printf("PLAYSEC %d: %d fps (full res %s, scale %g), frame %g, showing %g, rendering %d, edits pending %d\n", sec, secShown, ui.viewer.fullRes ? "on" : "off", ui.viewer.reqScale, app.frame, r.frame, (int)app.rendering(), (int)app.editsPending());
+                    std::printf("PLAYSEC %d: %d fps (full res %s, scale %g), frame %g, showing %g, rendering %d, edits pending %d\n", sec, secShown, ui.viewer.resolutionDivisor == 1 ? "on" : "off", ui.viewer.reqScale, app.frame, r.frame, (int)app.rendering(), (int)app.editsPending());
                     std::fflush(stdout);
                     sec = (int)el, secShown = 0;
                 }
@@ -1795,7 +1855,7 @@ int main(int argc, char** argv) {
                         rng = rng * 1664525u + 1013904223u;
                         const int what = (int)((rng >> 16) % 4);
                         Node* vn = app.comp->find("Viewer1");
-                        if (what == 0) ui.viewer.fullRes = !ui.viewer.fullRes;
+                        if (what == 0) ui.viewer.resolutionDivisor = ui.viewer.resolutionDivisor == 1 ? 0 : 1;
                         else if (what == 1) {
                             auto [a, b] = app.playRange();
                             app.frame = std::floor(a + ((rng >> 8) % 1000) / 1000.0 * (b - a));
@@ -1806,7 +1866,7 @@ int main(int argc, char** argv) {
                             const int cur = vn->params.data.value("a_pipe", 1);
                             app.setViewerParam("Viewer1", "a_pipe", cur == 1 ? 2 : 1);
                         }
-                        std::printf("STRESS %.1fs: %s\n", el, what == 0 ? (ui.viewer.fullRes ? "full res on" : "full res off") : what == 1 ? "jump" : what == 2 ? "zoom" : "switch input");
+                        std::printf("STRESS %.1fs: %s\n", el, what == 0 ? (ui.viewer.resolutionDivisor == 1 ? "full res on" : "full res off") : what == 1 ? "jump" : what == 2 ? "zoom" : "switch input");
                         ++acts;
                     }
                     if (lastNew >= 0) stall = std::max(stall, el - lastNew);
@@ -2077,6 +2137,10 @@ int main(int argc, char** argv) {
                 }
             } else if (frameCount > 8 && (settled > 4 || forceShot) && !pipeTest && !playTest && !altTest && !vclickTest && !deepHoverTest && !vdragTest && !sc3Test && !stabTest && !flowTest && !markupTest && !vanishTest && !matchTest && !dragTest && !camTest && !swapTest && !exposeTest && !shakeTest && !alignTest && !altDragTest && !messTest && !panelDragTest && !actionsTest && !keysTest && !menuTest && !tmTest && !reTest && !pcTest && !trackTest) {
                 if (std::getenv("STRATA_TEST_OPEN")) std::fprintf(stderr, "OPENTEST viewed '%s'\n", app.viewed.c_str());
+                if (std::getenv("STRATA_TEST_VIEWER")) {
+                    const auto& v=ui.viewer;
+                    std::printf("VIEWERTEST scale=%g region=%d,%d,%d,%d\n",v.reqScale,v.reqRegion.x1,v.reqRegion.y1,v.reqRegion.x2,v.reqRegion.y2);
+                }
                 bool ok = savePng(opt.screenshot, fbw, fbh);
                 std::printf("%s %s (%dx%d)\n", ok ? "wrote" : "failed to write", opt.screenshot.c_str(), fbw, fbh);
                 break;

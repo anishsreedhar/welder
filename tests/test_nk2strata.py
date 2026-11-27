@@ -2,9 +2,11 @@
 import json
 import os
 import subprocess
+import struct
 import sys
 import tempfile
 import unittest
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -48,6 +50,69 @@ class Tokenizer(unittest.TestCase):
         self.assertEqual(v[0]["keys"][1], [2.0, 10.0])
         with self.assertRaises(nk2strata.Expression):
             nk2strata.vector(nk2strata.Word("{parent.size}", "brace"))
+
+
+class ColorCorrect(unittest.TestCase):
+    def test_reference_clipboard_controls(self):
+        _, _, nodes = convert("""
+set cut_paste_input [stack 0]
+version 15.0 v5
+push $cut_paste_input
+ColorCorrect {
+ master 0
+ saturation_panelDropped true
+ contrast_panelDropped true
+ gamma_panelDropped true
+ gain_panelDropped true
+ name ColorCorrect1
+ selected true
+ xpos 316
+ ypos -88
+}
+""")
+        cc = nodes["ColorCorrect1"]
+        self.assertEqual(cc["type"], "ColorCorrect")
+        self.assertEqual((cc["ui"]["x"], cc["ui"]["y"]), (316, -88))
+        self.assertEqual(set(cc["ui"]["cc_controls"]), {"saturation", "contrast", "gamma", "gain"})
+        self.assertTrue(cc["ui"]["cc_controls"]["gain"]["wheel"])
+        self.assertNotIn("master", cc["params"])
+
+    def test_ranges_and_mask_options(self):
+        _, report, nodes = convert("""
+ColorCorrect {
+ name CC
+ channels {rgba.red rgba.blue}
+ shadows.gain {2 1 1 1}
+ lookup {shadow {curve x0 1 x0.2 0} midtone {curve x0 0 x1 0} highlight {curve x0.4 0 x1 1}}
+ test true
+ inject true
+ mix_luminance 0.75
+ enable_mix_luminance false
+ maskChannelInput none
+ unpremult rgba.alpha
+ invert_unpremult true
+ mix 0.5
+}
+""")
+        p = nodes["CC"]["params"]
+        self.assertEqual(p["lookup"], {"shadow": [[0, 1], [.2, 0]], "highlight": [[.4, 0], [1, 1]]})
+        self.assertEqual(p["channels"], ["R", "B"])
+        self.assertEqual(p["mix_luminance"], .75)
+        self.assertFalse(p["enable_mix_luminance"])
+        self.assertEqual(p["unpremult"], "A")
+        self.assertTrue(p["invert_unpremult"])
+        self.assertEqual(p["mask_channel"], "none")
+        self.assertTrue(p["test"] and p["inject"])
+
+    def test_positional_ranges(self):
+        _, _, nodes = convert("""
+ColorCorrect {
+ name CC
+ lookup {{curve x0 1 x0.1 0} {curve x0 0 x1 0} {curve x0.6 0 x1 1}}
+}
+""")
+        self.assertEqual(nodes["CC"]["params"]["lookup"]["shadow"], [[0, 1], [.1, 0]])
+        self.assertEqual(nodes["CC"]["params"]["lookup"]["highlight"], [[.6, 0], [1, 1]])
 
 
 class Graph(unittest.TestCase):
@@ -278,6 +343,12 @@ class Knobs(unittest.TestCase):
         self.assertEqual(p["lift"], 0.1)
         self.assertEqual(p["gain"], [1.0, 2.0, 3.0, 1.0])
         self.assertEqual(p["offset"], 0.5)
+
+    def test_grade_luminance_and_injection(self):
+        _, _, nodes = convert("Constant { inputs 0 name C }\nGrade { name G mix_luminance 0.65 enable_mix_luminance false inject true }\n")
+        self.assertAlmostEqual(nodes["G"]["params"]["mix_luminance"], .65)
+        self.assertFalse(nodes["G"]["params"]["enable_mix_luminance"])
+        self.assertTrue(nodes["G"]["params"]["inject"])
 
     def test_transform_animation(self):
         _, _, n = convert("Constant { inputs 0 name C }\n"
@@ -1315,19 +1386,121 @@ class CGImport(unittest.TestCase):
 
 
 
+class MergeAlphaSelection(unittest.TestCase):
+    def test_beauty_rgb_keeps_explicit_rgba_alpha(self):
+        _, _, nodes = convert("Merge2 { inputs 0 name M Achannels {beauty.red beauty.green beauty.blue rgba.alpha} Bchannels {beauty.red beauty.green beauty.blue rgba.alpha} }\n")
+        for side in ("A", "B"):
+            self.assertEqual(nodes["M"]["params"][side + "channels"], "beauty")
+            self.assertEqual(nodes["M"]["params"][side + "channels_alpha"], "A")
+
+    def test_custom_alpha_slots_and_disabled_boxes(self):
+        _, _, nodes = convert("""Merge2 {
+ inputs 0
+ name M
+ Achannels {rgba.red -rgba.green rgba.blue matte.alpha}
+ Bchannels {rgba.red rgba.green rgba.blue -other.alpha}
+}
+""")
+        p = nodes["M"]["params"]
+        self.assertEqual(p["Achannels_alpha"], "matte.A")
+        self.assertEqual(p["Bchannels_alpha"], "other.A")
+        self.assertEqual(p["Achannels_off"], ["G"])
+        self.assertEqual(p["Bchannels_off"], ["A"])
+
+    def test_none_alpha_slot(self):
+        _, _, nodes = convert("Merge2 { inputs 0 name M Achannels {rgba.red rgba.green rgba.blue none} }\n")
+        self.assertEqual(nodes["M"]["params"]["Achannels_alpha"], "none")
+
+
 class ExportRoundTrip(unittest.TestCase):
     """Welder -> .nk (welder nk) -> Welder (this importer) keeps the comp."""
 
     def roundtrip(self, comp_path):
-        exe = os.path.join(ROOT, "build", "strata")
-        if not os.path.exists(exe):
-            self.skipTest("build/welder not built")
-        d = tempfile.mkdtemp()
-        nk = os.path.join(d, "x.nk")
-        r = subprocess.run([exe, "nk", comp_path, "-o", nk], capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        back, _ = nk2strata.convert(nk)
-        return json.load(open(comp_path)), back
+        exe = os.environ.get("WELDER_TEST_CLI")
+        if not exe:
+            exe = next((os.path.join(ROOT, *p) for p in (
+                ("build", "welder"), ("build", "welder.exe"),
+                ("build", "local", "welder.exe"), ("build", "strata"))
+                if os.path.isfile(os.path.join(ROOT, *p))), None)
+        if not exe:
+            self.skipTest("Welder CLI not built (or set WELDER_TEST_CLI)")
+        self.cli_path = exe
+        with tempfile.TemporaryDirectory() as directory:
+            nk = os.path.join(directory, "x.nk")
+            r = subprocess.run([exe, "nk", comp_path, "-o", nk], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            back, _ = nk2strata.convert(nk)
+            with open(comp_path) as source:
+                return json.load(source), back
+
+    def test_merge_selected_mattes_survive_both_directions(self):
+        # Start with native Nuke slots, including a disabled checkbox, then
+        # export/import twice so neither direction can silently reset the matte.
+        _, _, imported = convert("""Merge2 {
+ inputs 0
+ name M
+ Achannels {rgba.red -rgba.green rgba.blue matte.alpha}
+ Bchannels {rgba.red rgba.green rgba.blue other.alpha}
+}
+""")
+        expected = {"Achannels_alpha": "matte.A", "Bchannels_alpha": "other.A", "Achannels_off": ["G"]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "mattes.weld")
+            comp = {"strata": 1, "nodes": [imported["M"]]}
+            for _ in range(2):
+                with open(path, "w") as out:
+                    json.dump(comp, out)
+                _, comp = self.roundtrip(path)
+                p = next(n for n in comp["nodes"] if n["name"] == "M")["params"]
+                for key, value in expected.items():
+                    self.assertEqual(p.get(key), value, key)
+
+    def test_beauty_rgb_rgba_alpha_pixels_survive_roundtrip(self):
+        comp = {"strata": 1, "format": {"width": 1, "height": 1}, "nodes": [
+            {"name": "S", "type": "Constant", "params": {"color": [.1, .2, .3, .25]}},
+            {"name": "Matte", "type": "Constant", "params": {"color": [.3, .2, .1, .75]}},
+            {"name": "Beauty", "type": "Copy", "inputs": ["S", "Matte"],
+             "params": {"from": ["R", "G", "B", "A"], "to": ["beauty.R", "beauty.G", "beauty.B", "beauty.A"]}},
+            {"name": "Clear", "type": "Constant", "params": {"color": [0, 0, 0, 0]}},
+            {"name": "MA", "type": "Merge", "inputs": ["Clear", "Beauty"],
+             "params": {"Achannels": "beauty", "Achannels_alpha": "A"}},
+            {"name": "MB", "type": "Merge", "inputs": ["Beauty", "Clear"],
+             "params": {"Bchannels": "beauty", "Bchannels_alpha": "A"}},
+        ]}
+        with tempfile.TemporaryDirectory() as directory:
+            before = os.path.join(directory, "before.weld")
+            after = os.path.join(directory, "after.weld")
+            with open(before, "w") as out:
+                json.dump(comp, out)
+            _, back = self.roundtrip(before)
+            with open(after, "w") as out:
+                json.dump(back, out)
+            # roundtrip() has already located a runnable CLI; use the same path.
+            exe = self.cli_path
+            for node, side in (("MA", "A"), ("MB", "B")):
+                p = next(n for n in back["nodes"] if n["name"] == node)["params"]
+                self.assertEqual(p[side + "channels_alpha"], "A")
+                alphas = []
+                for path in (before, after):
+                    png = os.path.join(directory, "pixel.png")
+                    result = subprocess.run([exe, "node", path, node, "-o", png], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    with open(png, "rb") as image:
+                        data = image.read()
+                    pos, chunks = 8, []
+                    while pos < len(data):
+                        length = struct.unpack(">I", data[pos:pos+4])[0]
+                        kind, body = data[pos+4:pos+8], data[pos+8:pos+8+length]
+                        if kind == b"IHDR":
+                            self.assertEqual(struct.unpack(">IIBB", body[:10]), (1, 1, 8, 6))
+                        if kind == b"IDAT":
+                            chunks.append(body)
+                        pos += length + 12
+                    # At the first pixel, every PNG filter has zero neighbours.
+                    alpha = zlib.decompress(b"".join(chunks))[4]
+                    self.assertAlmostEqual(alpha / 255, .25, delta=1/255)
+                    alphas.append(alpha)
+                self.assertEqual(alphas[0], alphas[1])
 
     def test_groups_example(self):
         a, b = self.roundtrip(os.path.join(ROOT, "examples", "groups.weld"))

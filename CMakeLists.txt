@@ -366,6 +366,12 @@ add_test(NAME engine COMMAND welder_tests)
 add_executable(welder_exr_tests tests/exr_tests.cpp)
 target_link_libraries(welder_exr_tests PRIVATE strata_core)
 add_test(NAME exr COMMAND welder_exr_tests)
+add_executable(welder_colorcorrect_tests tests/colorcorrect_tests.cpp)
+target_link_libraries(welder_colorcorrect_tests PRIVATE strata_core)
+add_test(NAME colorcorrect COMMAND welder_colorcorrect_tests)
+add_executable(welder_colorwheel_tests tests/colorwheel_tests.cpp)
+target_include_directories(welder_colorwheel_tests PRIVATE src)
+add_test(NAME colorwheel COMMAND welder_colorwheel_tests)
 
 # OFX host tests need the sample plugins: tools/build_test_plugins.sh <openfx> build/ofx-test-plugins
 add_executable(welder_ofx_tests tests/ofx_tests.cpp)
@@ -440,8 +446,9 @@ if(STRATA_BUILD_UI)
 
   include(cmake/embed.cmake)
   embed_file(${CMAKE_SOURCE_DIR}/assets/brand/welder-splash.png welder_splash_png splash_src)
+  embed_file(${CMAKE_SOURCE_DIR}/assets/brand/welder-splash-background.jpg welder_splash_background background_src)
   embed_file(${CMAKE_SOURCE_DIR}/assets/brand/welder-icon-64.png welder_icon_png icon_src)
-  set(WELDER_EMBEDDED ${splash_src} ${icon_src})
+  set(WELDER_EMBEDDED ${splash_src} ${background_src} ${icon_src})
   add_executable(welder_ui WIN32
     src/ui/main.cpp
     src/ui/SmokeTest.cpp

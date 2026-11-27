@@ -227,39 +227,37 @@ void drawTransformViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec
     const double ar = rot * M_PI / 180;
     const ImVec2 c = xf.toScreen(cx + tx, cy + ty);
     gTestXformCentre = c;  // tests (STRATA_TEST_VIEWERCLICK): where the centre handle is
-    const float R = (float)std::clamp(70.0 * std::sqrt(std::fabs(sx * sy)), 20.0, 400.0);
+    const float R = (float)std::clamp(26.0 * std::sqrt(std::fabs(sx * sy)), 12.0, 200.0);
     // screen directions of the rotated x / y axes (screen y is down)
     const ImVec2 ux((float)std::cos(ar), -(float)std::sin(ar)), uy(-(float)std::sin(ar), -(float)std::cos(ar));
-    const ImVec2 arm(c.x + ux.x * R * 1.6f, c.y + ux.y * R * 1.6f);
+    const ImVec2 arm(c.x + ux.x * R * 3.0f, c.y + ux.y * R * 3.0f);
     const ImVec2 hx(c.x + ux.x * R, c.y + ux.y * R), hy(c.x + uy.x * R, c.y + uy.y * R);
     auto d = [&](ImVec2 a) { return std::hypot(mouse.x - a.x, mouse.y - a.y); };
     Transform2DState::Drag hot = Transform2DState::Drag::None;
     if (inside && !dragging()) {
         if (d(c) < 9) hot = io.KeyCtrl ? Transform2DState::Drag::Centre : Transform2DState::Drag::Move;
-        else if (d(hx) < 7) hot = Transform2DState::Drag::ScaleX;
-        else if (d(hy) < 7) hot = Transform2DState::Drag::ScaleY;
+        else if (d(hx) < 7 || d(ImVec2(2*c.x-hx.x,2*c.y-hx.y))<7) hot = Transform2DState::Drag::ScaleX;
+        else if (d(hy) < 7 || d(ImVec2(2*c.x-hy.x,2*c.y-hy.y))<7) hot = Transform2DState::Drag::ScaleY;
         else if (d(arm) < 9) hot = Transform2DState::Drag::Rotate;
         else if (std::fabs(d(c) - R) < 5) hot = Transform2DState::Drag::Scale;
         else {
             // anywhere along the arm also rotates
-            double t = ((mouse.x - c.x) * ux.x + (mouse.y - c.y) * ux.y) / (R * 1.6);
-            ImVec2 q(c.x + ux.x * (float)(t * R * 1.6), c.y + ux.y * (float)(t * R * 1.6));
+            double t = ((mouse.x - c.x) * ux.x + (mouse.y - c.y) * ux.y) / (R * 3.0);
+            ImVec2 q(c.x + ux.x * (float)(t * R * 3.0), c.y + ux.y * (float)(t * R * 3.0));
             if (t > 0.7 && t < 1.05 && d(q) < 5) hot = Transform2DState::Drag::Rotate;
         }
     }
-    auto colFor = [&](Transform2DState::Drag k) { return (hot == k || (dragging() && st.drag == k)) ? kHot : kJack; };
-    dl->AddCircle(c, R, colFor(Transform2DState::Drag::Scale), 64, 1.5f);
-    dl->AddLine(c, arm, colFor(Transform2DState::Drag::Rotate), 1.5f);
-    dl->AddCircleFilled(arm, 5, colFor(Transform2DState::Drag::Rotate));
-    dl->AddRectFilled(ImVec2(hx.x - 4, hx.y - 4), ImVec2(hx.x + 4, hx.y + 4), colFor(Transform2DState::Drag::ScaleX));
-    dl->AddRectFilled(ImVec2(hy.x - 4, hy.y - 4), ImVec2(hy.x + 4, hy.y + 4), colFor(Transform2DState::Drag::ScaleY));
-    ImU32 cc = (hot == Transform2DState::Drag::Move || hot == Transform2DState::Drag::Centre ||
-                (dragging() && (st.drag == Transform2DState::Drag::Move || st.drag == Transform2DState::Drag::Centre)))
-                   ? kHot
-                   : kJack;
-    dl->AddCircle(c, 7, cc, 0, 2);
-    dl->AddLine(ImVec2(c.x - 12, c.y), ImVec2(c.x + 12, c.y), cc);
-    dl->AddLine(ImVec2(c.x, c.y - 12), ImVec2(c.x, c.y + 12), cc);
+    const ImU32 normalJack=IM_COL32(185,185,185,255);
+    auto colFor = [&](Transform2DState::Drag k) { return (hot == k || (dragging() && st.drag == k)) ? kHot : normalJack; };
+    dl->AddCircle(c,R,colFor(Transform2DState::Drag::Scale),64,1.f);
+    dl->AddLine(ImVec2(c.x-ux.x*R*1.65f,c.y-ux.y*R*1.65f),arm,colFor(Transform2DState::Drag::Rotate),1.f);
+    dl->AddLine(ImVec2(c.x-uy.x*R*1.65f,c.y-uy.y*R*1.65f),ImVec2(c.x+uy.x*R*1.65f,c.y+uy.y*R*1.65f),normalJack,1.f);
+    for(float sign:{-1.f,1.f}){
+        ImVec2 x(c.x+sign*ux.x*R,c.y+sign*ux.y*R),y(c.x+sign*uy.x*R,c.y+sign*uy.y*R);
+        dl->AddRectFilled(ImVec2(x.x-2,x.y-2),ImVec2(x.x+3,x.y+3),colFor(Transform2DState::Drag::ScaleX));
+        dl->AddRectFilled(ImVec2(y.x-2,y.y-2),ImVec2(y.x+3,y.y+3),colFor(Transform2DState::Drag::ScaleY));
+    }
+    ImU32 cc=hot==Transform2DState::Drag::Move || hot==Transform2DState::Drag::Centre?kHot:normalJack;
     if (hot == Transform2DState::Drag::Centre || (dragging() && st.drag == Transform2DState::Drag::Centre))
         dl->AddText(ImVec2(c.x + 10, c.y + 8), cc, "pivot");
 

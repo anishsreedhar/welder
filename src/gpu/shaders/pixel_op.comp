@@ -46,12 +46,12 @@ float smooth3(float e0, float e1, float x) {
 
 // one ColorCorrect range (sat, contrast, gamma, gain, offset; 3 each) at prm[o..o+15)
 void ccRange(int o, inout vec3 rgb) {
-    float l = luma709(rgb.x, rgb.y, rgb.z);
+    precise float l = 0.2125 * rgb.x + 0.7154 * rgb.y + 0.0721 * rgb.z;
     for (int c = 0; c < 3; ++c) {
         float sat = prm[o + c], con = prm[o + 3 + c], gam = prm[o + 6 + c], gain = prm[o + 9 + c], off = prm[o + 12 + c];
         precise float v = l + (rgb[c] - l) * sat;
         if (con != 1.0) v = 0.18 * powc(max(v, 0.0) / 0.18, con) + min(v, 0.0);
-        if (gam != 1.0 && v > 0.0 && gam > 0.0) v = pow(v, 1.0 / gam);
+        if (gam != 1.0 && v > 0.0 && gam != 0.0) v = pow(v, 1.0 / gam);
         v = v * gain + off;
         rgb[c] = v;
     }
@@ -126,17 +126,17 @@ void main() {
         img[base + p.b] = b2;
     } else if (p.op == 10) {
         vec3 c0 = vec3(img[base + p.r], img[base + p.g], img[base + p.b]);
-        float l = luma709(c0.x, c0.y, c0.z);
+        precise float l = 0.2125 * c0.x + 0.7154 * c0.y + 0.0721 * c0.z;
         float ws = 1.0 - smooth3(0.0, 0.09, l);
         float wh = smooth3(0.5, 1.0, l);
-        float wm = max(0.0, 1.0 - ws - wh);
+        float wm = 1.0 - ws - wh;
         vec3 bs = c0;
         if ((p.flags & 1) != 0) ccRange(K, bs);
         vec3 s = bs, m = bs, h = bs;
         if ((p.flags & 2) != 0) ccRange(K + 16, s);
         if ((p.flags & 4) != 0) ccRange(K + 32, m);
         if ((p.flags & 8) != 0) ccRange(K + 48, h);
-        precise vec3 o = ws * s + wm * m + wh * h;
+        precise vec3 o = bs + ws * (s - bs) + wm * (m - bs) + wh * (h - bs);
         img[base + p.r] = o.x;
         img[base + p.g] = o.y;
         img[base + p.b] = o.z;

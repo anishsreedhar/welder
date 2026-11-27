@@ -174,6 +174,10 @@ public:
                 for (auto& ch : parseChannels(params, "also_merge", "none", ac))
                     if (std::find(c.begin(), c.end(), ch) == c.end()) c.push_back(ch);
             }
+        for(const char* key:{"channels_alpha","also_merge_alpha"}) {
+            const std::string ch=params.str(key,"none");
+            if(ch!="none" && std::find(c.begin(),c.end(),ch)==c.end())c.push_back(ch);
+        }
         return c;
     }
 
@@ -231,7 +235,10 @@ public:
         out.copyFrom(*B);
 
         ChannelSet sel = parseChannels(params, "channels", "rgba", out.channels);
-        int outA = out.ch("A");
+        const std::string alphaOut=params.str("channels_alpha","A");
+        if(alphaOut!="A")for(auto& ch:sel)if(ch=="A")ch=alphaOut;
+        {ChannelSet unique;for(auto& ch:sel)if(std::find(unique.begin(),unique.end(),ch)==unique.end())unique.push_back(ch);sel=std::move(unique);}
+        int outA = out.ch(alphaOut);
         bool alphaMasking = params.flag("alpha_masking", false);
         // the classic A channels / B channels: which layer of each input plays rgba
         // channels switched off in the A / B rows (the classic per-channel boxes) read as black
@@ -243,18 +250,21 @@ public:
             return r;
         };
         const std::set<std::string> aOff = offSet("Achannels_off"), bOff = offSet("Bchannels_off");
-        auto layerCh = [](const Image& im, const std::string& layer, const std::string& c, const std::set<std::string>& off) {
+        auto layerCh = [](const Image& im, const std::string& layer, const std::string& c, const std::set<std::string>& off, const std::string& alpha=std::string()) {
             if (off.count(c)) return -1;
-            if (layer.empty() || layer == "rgba" || layer == "rgb") return im.ch(c);
+            if (c == "A" && !alpha.empty()) return alpha == "none" ? -1 : im.ch(alpha);
+            if(layer=="none")return c=="A"?im.ch("A"):-1;
+            if (layer.empty() || layer == "rgba" || layer == "rgb" || layer=="all") return im.ch(c);
             int i = im.ch(layer + "." + c);
             if (i < 0 && c == "A") i = im.ch("A");
             return i;
         };
         const std::string aLayer = params.str("Achannels", "rgba"), bLayer = params.str("Bchannels", "rgba");
-        if ((bLayer != "rgba" && bLayer != "rgb" && !bLayer.empty()) || !bOff.empty())
+        const std::string aAlpha=params.str("Achannels_alpha",""), bAlpha=params.str("Bchannels_alpha","");
+        if ((bLayer != "rgba" && bLayer != "rgb" && !bLayer.empty()) || !bOff.empty() || !bAlpha.empty() || alphaOut!="A")
             for (auto& c : sel) {
-                int oi = out.ch(c), bi = layerCh(*B, bLayer, c, bOff);
-                if (oi < 0 || c.find('.') != std::string::npos) continue;
+                int oi = out.ch(c), bi = layerCh(*B, bLayer, c==alphaOut?"A":c, bOff, bAlpha);
+                if (oi < 0 || (c.find('.') != std::string::npos && c!=alphaOut)) continue;
                 for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
                     for (int x = out.bounds.x1; x < out.bounds.x2; ++x) out.px(x, y)[oi] = bi >= 0 ? B->at(x, y, bi) : 0.0f;
             }
@@ -269,6 +279,9 @@ public:
         ChannelSet also;  // also merge: more channels, merged the same way
         if (params.has("also_merge") && params.str("also_merge", "none") != "none")
             also = parseChannels(params, "also_merge", "none", out.channels);
+
+        const std::string extra=params.str("also_merge_alpha","none");
+        if(extra!="none" && std::find(also.begin(),also.end(),extra)==also.end())also.push_back(extra);
 
         // each A input: its pixels and which of its channels go where
         struct AJob {
@@ -288,10 +301,10 @@ public:
                     int i = layerCh(A, aLayer, ch, {});
                     if (i >= 0) j.video.push_back(i);
                 }
-            j.Aa = layerCh(A, aLayer, "A", aOff);
+            j.Aa = layerCh(A, aLayer, "A", aOff, aAlpha);
             for (auto& c : sel) {
                 int oi = out.ch(c);
-                if (oi >= 0) j.pairs.emplace_back(oi, c.find('.') == std::string::npos ? layerCh(A, aLayer, c, aOff) : A.ch(c));
+                if (oi >= 0) j.pairs.emplace_back(oi, c==alphaOut ? j.Aa : c.find('.') == std::string::npos ? layerCh(A, aLayer, c, aOff) : A.ch(c));
             }
             for (auto& c : also) {
                 int oi = out.ch(c);
@@ -299,8 +312,8 @@ public:
             }
             // Alpha last, so colour channels see B's original alpha.
             std::stable_partition(j.pairs.begin(), j.pairs.end(), [&](auto& p) { return p.first != outA; });
-            // A without an alpha channel is solid (#30); one switched off in the A channels reads as 0
-            j.aNone = j.Aa < 0 && !aOff.count("A") ? 1.0f : 0.0f;
+            // An RGB plate is solid by default (#30). An explicitly disabled alpha reads as zero.
+            j.aNone = j.Aa < 0 && !aOff.count("A") && aAlpha != "none" ? 1.0f : 0.0f;
             jobs.push_back(std::move(j));
         }
 
@@ -349,7 +362,7 @@ public:
         }
         if (!mm.active()) return;
         std::vector<int> idx;
-        for (auto& c : sel)
+        for (auto& c : unionChannels(sel,also))
             if (out.ch(c) >= 0) idx.push_back(out.ch(c));
         for (int y = out.bounds.y1; y < out.bounds.y2; ++y)
             for (int x = out.bounds.x1; x < out.bounds.x2; ++x) {

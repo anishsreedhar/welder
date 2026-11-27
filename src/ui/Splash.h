@@ -9,6 +9,9 @@ namespace splash {
 // Call after glfwInit(). Does nothing (returns false) if the window can't be made.
 bool show();
 
+// Writes the same rendered artwork for startup visual verification.
+bool preview(const char* path);
+
 // Repaints the splash between loading steps (window systems without a compositor drop its picture).
 void pump();
 

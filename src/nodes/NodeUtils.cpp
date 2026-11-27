@@ -53,7 +53,7 @@ MaskMix MaskMix::setup(RenderArgs& a, Node* self, int maskInput) {
     MaskMix m;
     m.mix = std::clamp(self->params.num("mix", a.frame, 1.0), 0.0, 1.0);
     Node* mk = maskInput >= 0 ? self->input(maskInput) : nullptr;
-    if (mk) {
+    if (mk && self->params.str("mask_channel", "A") != "none") {
         m.mask = a.fetch(mk, a.region);
         m.maskCh = m.mask->ch(self->params.str("mask_channel", "A"));
         m.invert = self->params.flag("invert_mask", false);

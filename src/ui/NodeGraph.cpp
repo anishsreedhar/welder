@@ -77,6 +77,9 @@ std::string expandLabel(const Node* n, std::string t) {
 }
 
 std::string subtitleOnly(const Node* n);
+std::string nodeTitle(const Node* n) {
+    return n->type == "Merge" ? n->name + " (" + n->params.str("operation", "over") + ")" : n->name;
+}
 // The text under the name: the node's own subtitle, then its label's lines.
 std::string subtitle(const Node* n) {
     std::string s = subtitleOnly(n);
@@ -112,14 +115,26 @@ std::string channelText(const Node* n, const std::string& knob, std::string* def
 }
 
 std::string subtitleOnly(const Node* n) {
-    if (n->type == "Merge") return "(" + n->params.str("operation", "over") + ")";
+    if (n->type == "Merge") return "";  // operation sits beside the name
+    if (n->type == "Blur") return "(" + channelText(n, "channels") + ")";
+    if (n->type == "Copy") {
+        const auto from = n->params.strList("from");
+        const auto to = n->params.strList("to").empty() ? from : n->params.strList("to");
+        auto shortChannel = [](const std::string& ch) {
+            return ch == "A" ? std::string("alpha") : ch == "R" ? std::string("red") :
+                   ch == "G" ? std::string("green") : ch == "B" ? std::string("blue") : ch;
+        };
+        if (!from.empty() && !to.empty()) return "(" + shortChannel(from[0]) + " -> " + shortChannel(to[0]) +
+                                                     (from.size() > 1 ? ", ..." : "") + ")";
+    }
     if (n->type == "FrameHold") return "(frame " + std::to_string((long)std::lround(n->params.num("first_frame", 0, 1))) + ")";
     if (n->type == "Group") {
         std::string gz = n->params.str("gizmo", "");
         return gz.empty() ? "(group)" : "(" + std::filesystem::path(gz).stem().string() + ")";
     }
     if (n->type == "Input") return "(input " + std::to_string((int)n->params.num("number", 0, 0)) + ")";
-    if (n->type == "Read" || n->type == "Write") {
+    if (n->type == "Read") return "";  // compact stamp: filename is available in the tooltip
+    if (n->type == "Write") {
         std::string f = n->params.str("file");
         return f.empty() ? "" : std::filesystem::path(f).filename().string();
     }
@@ -158,12 +173,12 @@ std::string subtitleOnly(const Node* n) {
     return "";
 }
 
-bool hexagonal(const Node* n) { return n->type == "FrameHold" || n->type == "TimeOffset"; }
+bool hexagonal(const Node* n) { return n->type == "Viewer" || n->type == "FrameHold" || n->type == "TimeOffset"; }
 
 // the classic postage stamp: Reads show a thumbnail above their name (Node tab: postage stamp).
-bool hasStamp(const Node* n) { return n->type == "Read" && n->ui.value("postage_stamp", true); }
-constexpr float kStampW = 88;  // 16:9 inside, about the usual stamp height
-float stampHeight(const Node* n) { return hasStamp(n) ? std::round(kStampW * 9.0f / 16.0f) : 0.0f; }
+bool hasStamp(const Node* n) { return n->ui.value("postage_stamp", n->type == "Read") && !isAnnotation(n) && n->type!="Dot" && n->type!="Viewer"; }
+constexpr float kStampW = 100;
+float stampHeight(const Node* n) { return hasStamp(n) ? 64.0f : 0.0f; }
 
 std::vector<std::string> noteLines(const Node* n) {
     std::vector<std::string> lines;
@@ -226,9 +241,10 @@ ImVec2 size(const Node* n) {
         }
         return ImVec2(w, std::max(h + 6, 30.0f));
     }
-    if (n->type == "Viewer") return ImVec2(std::max(160.0f, std::ceil(ImGui::CalcTextSize(n->name.c_str()).x / 10.0f) * 10.0f + 40.0f), kNodeH);
+    if (hasStamp(n) && n->type=="Read") return evenSize(kStampW, 90.0f + (subtitle(n).empty() ? 0.0f : 16.0f));
+    if (n->type == "Viewer") return evenSize(std::max(kNodeW, ImGui::CalcTextSize(n->name.c_str()).x + 28), kNodeH);
     // Graph units are pixels at zoom 1, so measure the name at the base font size.
-    float w = std::max(kNodeW, std::ceil(ImGui::CalcTextSize(n->name.c_str()).x / 10.0f) * 10.0f + 20.0f);
+    float w = std::max(kNodeW, std::ceil(ImGui::CalcTextSize(nodeTitle(n).c_str()).x / 10.0f) * 10.0f + 20.0f);
     const float stamp = stampHeight(n);
     if (stamp > 0) w = std::max(w, kStampW + 8);
     std::string sub = subtitle(n);
@@ -239,6 +255,12 @@ ImVec2 size(const Node* n) {
         if (b == std::string::npos) b = sub.size();
         w = std::max(w, std::min(300.0f, ImGui::CalcTextSize(sub.substr(a, b - a).c_str()).x * 0.82f + 16));
         a = b + 1;
+    }
+    if(!n->ui.value("label",std::string()).empty()) {
+        const float labelSize=(float)n->ui.value("note_font_size",11.0);
+        ImFont* labelFont=nodeLabelFont(n);if(!labelFont)labelFont=ImGui::GetFont();
+        for(size_t a=0;a<=sub.size();) {size_t b=sub.find('\n',a);if(b==std::string::npos)b=sub.size();w=std::max(w,labelFont->CalcTextSizeA(labelSize,FLT_MAX,0,sub.substr(a,b-a).c_str()).x+16);a=b+1;}
+        return evenSize(w,kNodeH+lines*(labelSize+2)+stamp);
     }
     return evenSize(w, kNodeHSub + (lines - 1) * (ImGui::GetFontSize() * 0.82f + 1) + stamp);
 }
@@ -303,7 +325,15 @@ ImU32 nodeColor(const Node* n) {
         auto c = n->params.vec<4>("tile_color", 0, {0.5, 0.5, 0.5, 1});
         return ImGui::ColorConvertFloat4ToU32(ImVec4((float)c[0], (float)c[1], (float)c[2], 1));
     }
-    return categoryColor(categoryOf(n->type));
+    if (n->type == "Viewer" || n->type == "Read") return IM_COL32(195, 195, 195, 255);
+    if (n->type == "Write") return IM_COL32(180, 190, 0, 255);
+    const std::string category = categoryOf(n->type);
+    if (category == "Color") return IM_COL32(125, 158, 207, 255);
+    if (category == "Filter") return IM_COL32(204, 122, 66, 255);
+    if (category == "Transform") return IM_COL32(147, 99, 151, 255);
+    if (category == "Merge") return IM_COL32(78, 83, 190, 255);
+    if (category == "Channel") return IM_COL32(166, 53, 101, 255);
+    return categoryColor(category);
 }
 
 // A Precomp's tabs (graph space): its title on top (input 1 enters its top; its bottom feeds the
@@ -339,15 +369,25 @@ ImVec2 inputPoint(const Node* n, int i, ImVec2* dir) {
         return ImVec2(p.x, p.y + std::min(s.y * 0.5f, 10.0f) + 14.0f * (i - Node::kKnobBase));
     }
     std::string label = n->inputLabel(i);
-    if (n->type == "Viewer") {  // ten pipes across the top, 1 on the left ... 0 on the right
+    if (n->type == "Viewer") {
         *dir = ImVec2(0, -1);
+        int connected = 0;
+        for (Node* source : n->inputs) if (source) ++connected;
+        if (connected <= 1 && (n->input(i) || (connected == 0 && i == 0))) return ImVec2(p.x + s.x / 2, p.y);
         return ImVec2(p.x + s.x * (i + 0.5f) / 10, p.y);
     }
     if (n->type == "Dot") {  // pipes run through a Dot's centre, so a corner made with Dots is square
         *dir = ImVec2(0, -1);
         return ImVec2(p.x + s.x / 2, p.y + s.y / 2);
     }
-    // Masks come in on the right side, one under the other; every other input along the top.
+    // Spare Merge inputs wait at the left edge. Once connected, facingPoint turns
+    // their arrows toward the source just like the main A/B inputs.
+    if (n->type == "Merge" && i >= 3) {
+        *dir = ImVec2(-1, 0);
+        const int count = std::max(1, n->maxInputs() - 3);
+        return ImVec2(p.x, p.y + s.y * (i - 3 + .5f) / count);
+    }
+    // Masks come in on the right side; the main image inputs sit along the top.
     int maskIdx = 0, topIdx = 0, tops = 0;
     for (int k = 0; k < std::max(n->maxInputs(), i + 1); ++k) {
         const bool m = n->inputLabel(k) == "mask";
@@ -359,11 +399,23 @@ ImVec2 inputPoint(const Node* n, int i, ImVec2* dir) {
         return ImVec2(p.x + s.x, p.y + std::min(s.y * 0.5f + 12.0f * maskIdx, s.y - 2));
     }
     *dir = ImVec2(0, -1);
-    if (tops <= 1) return ImVec2(p.x + s.x / 2, p.y);
-    // B (input 0) a third of the way in, A two thirds; any more (A2, A3...) out by the right edge,
-    // so B and A stay put as extra inputs come and go
+    if (tops <= 1) { *dir = ImVec2(-0.5f, -1); return ImVec2(p.x + s.x / 2, p.y); }
+    // A is drawn on the left, B on the right. Input indices stay unchanged.
+    if (label == "A") { *dir = ImVec2(-0.5f, -1); return ImVec2(std::round(p.x + s.x / 3), p.y); }
+    if (label == "B") { *dir = ImVec2(0.5f, -1); return ImVec2(std::round(p.x + s.x * 2 / 3), p.y); }
     float t = topIdx == 0 ? 1.0f / 3 : topIdx == 1 ? 2.0f / 3 : 0.88f + 0.04f * (topIdx - 2);
     return ImVec2(std::round(p.x + s.x * std::min(t, 0.96f)), p.y);
+}
+
+// Intersect the centre-to-source direction with the tile boundary. Connected arrows
+// follow the source, rather than being pinned to the top A/B slots.
+ImVec2 facingPoint(const Node* n, ImVec2 toward) {
+    const ImVec2 p = pos(n), s = size(n);
+    const ImVec2 c(p.x + s.x * .5f, p.y + s.y * .5f);
+    if (n->type == "Dot") return c;
+    const float dx = toward.x - c.x, dy = toward.y - c.y;
+    const float scale = std::max(std::fabs(dx) / (s.x * .5f), std::fabs(dy) / (s.y * .5f));
+    return scale > 1e-5f ? ImVec2(c.x + dx / scale, c.y + dy / scale) : c;
 }
 
 // The path a pipe takes on screen from a source's output (a) to an input (b) that points away
@@ -606,10 +658,11 @@ bool graphTestPipe(App& app, UiState& ui, int frame) {
     return true;
 }
 
-void graphDropFiles(App& app, UiState& ui, const std::vector<std::string>& paths0, ImVec2 screenPos) {
+static void graphImportFiles(App& app, UiState& ui, const std::vector<std::string>& paths0,
+                             ImVec2 screenPos, bool pasted) {
     std::vector<std::string> paths;
     for (auto& p : paths0) paths.push_back(netpath::maybeUnc(p));  // mapped drives: their network path
-    for (auto& p : paths) crash::crumb("dropped " + p);
+    for (auto& p : paths) crash::crumb((pasted ? "pasted " : "dropped ") + p);
     namespace fs = std::filesystem;
     GraphState& g = ui.graph;
     // where: under the mouse when it's over the graph, else the middle of the graph view
@@ -687,8 +740,11 @@ void graphDropFiles(App& app, UiState& ui, const std::vector<std::string>& paths
         });
         app.selection = std::set<std::string>(names.begin(), names.end());
         if (make.size() == 1 && make[0].type == "Read") app.setViewed(names[0]);
-        app.message("dropped: " + std::to_string(make.size()) + " node(s)");
+        app.message(pasted ? "pasted footage: " + std::to_string(make.size()) + " node(s)"
+                           : "dropped: " + std::to_string(make.size()) + " node(s)");
         at.x += 130.0f * (float)make.size();  // anything pasted next goes beside them
+    } else if (pasted) {
+        app.message("no supported footage found in the clipboard folder");
     }
     for (auto& nk : nkFiles) {  // a .nk script dropped: its nodes, pasted where it landed
         std::ifstream f(nk, std::ios::binary);
@@ -715,6 +771,10 @@ void graphDropFiles(App& app, UiState& ui, const std::vector<std::string>& paths
         for (auto& u : unknown) t += (t.empty() ? "" : ", ") + u;
         app.message("can't use dropped file(s): " + t);
     }
+}
+
+void graphDropFiles(App& app, UiState& ui, const std::vector<std::string>& paths, ImVec2 screenPos) {
+    graphImportFiles(app, ui, paths, screenPos, false);
 }
 
 // A shake: a real one, not nudging a node into place. The drag's direction reverses 6+ times
@@ -838,6 +898,40 @@ static bool looksLikeNk(const std::string& t) {
     return b != std::string::npos && b < 64 && t.find('}') != std::string::npos;
 }
 
+static bool graphPasteFootage(App& app, UiState& ui, const std::string& clip) {
+    const size_t first = clip.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return false;
+    std::string path = clip.substr(first, clip.find_last_not_of(" \t\r\n") - first + 1);
+    if (path.find_first_of("\r\n") != std::string::npos) return false;
+    // Explorer's Copy as path wraps the path in double quotes.
+    if (path.size() >= 2 && path.front() == '"' && path.back() == '"')
+        path = path.substr(1, path.size() - 2);
+    namespace fs = std::filesystem;
+    try {
+        const bool image = isSupportedImagePath(path);
+        const bool movie = movie::isMoviePath(path);
+        path = app.comp->resolvePath(path);
+        std::error_code ec;
+        const fs::path absolute = fs::absolute(path, ec);
+        if (!ec) {
+            path = absolute.string();
+            int firstFrame = 0, lastFrame = 0;
+            if (fs::is_directory(absolute, ec) ||
+                ((image || movie) && fs::is_regular_file(absolute, ec)) ||
+                (image && sequenceRange(path, firstFrame, lastFrame))) {
+                graphImportFiles(app, ui, {path}, ImGui::GetIO().MousePos, true);
+                return true;
+            }
+        }
+        if (!image && !movie) return false;
+    } catch (const std::exception&) {
+        app.message("couldn't read the clipboard footage path");
+        return true;
+    }
+    app.message("couldn't find the clipboard footage on disk");
+    return true;
+}
+
 void graphPaste(App& app, UiState& ui) {
     const char* clipC = ImGui::GetClipboardText();
     std::string clip = clipC ? clipC : "";
@@ -856,7 +950,8 @@ void graphPaste(App& app, UiState& ui) {
         }
     }
     if (arr.is_null() || arr.empty()) {
-        app.message("clipboard has no nodes");
+        if (arr.is_null() && graphPasteFootage(app, ui, clip)) return;
+        app.message("clipboard has no nodes or footage path");
         return;
     }
     graphPasteNodes(app, ui, arr);
@@ -1706,7 +1801,7 @@ static void frameNodes(App& app, UiState& ui, ImVec2 winSize) {
         return;
     }
     float w = hi.x - lo.x + 120, h = hi.y - lo.y + 100;
-    ui.graph.zoom = std::clamp(std::min(winSize.x / w, winSize.y / h), kGraphMinZoom, 1.5f);
+    ui.graph.zoom = std::clamp(std::min(winSize.x / w, winSize.y / h), kGraphMinZoom, .8f);
     ImVec2 c((lo.x + hi.x) / 2, (lo.y + hi.y) / 2);
     ui.graph.pan = ImVec2(c.x - winSize.x / 2 / ui.graph.zoom, c.y - winSize.y / 2 / ui.graph.zoom);
 }
@@ -1758,7 +1853,7 @@ void drawNodeGraph(App& app, UiState& ui) {
     ImGuiIO& io = ImGui::GetIO();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRect(o, ImVec2(o.x + sz.x, o.y + sz.y), true);
-    dl->AddRectFilled(o, ImVec2(o.x + sz.x, o.y + sz.y), theme().canvas);
+    dl->AddRectFilled(o, ImVec2(o.x + sz.x, o.y + sz.y), IM_COL32(50, 50, 50, 255));
 
     auto S = [&](ImVec2 p) { return ImVec2(o.x + (p.x - g.pan.x) * g.zoom, o.y + (p.y - g.pan.y) * g.zoom); };
     auto G = [&](ImVec2 s) { return ImVec2(g.pan.x + (s.x - o.x) / g.zoom, g.pan.y + (s.y - o.y) / g.zoom); };
@@ -1769,7 +1864,7 @@ void drawNodeGraph(App& app, UiState& ui) {
     g.hovered = hovered;
 
     // Grid: dots (a coarser step when zoomed out, so there are never too many)
-    {
+    if (theme().name != "graphite") {
         float step = 25 * g.zoom;
         while (step < 14) step *= 2;
         float sx = std::fmod(-g.pan.x * g.zoom, step), sy = std::fmod(-g.pan.y * g.zoom, step);
@@ -1781,7 +1876,7 @@ void drawNodeGraph(App& app, UiState& ui) {
             for (float x = sx; x < sz.x; x += step) dl->AddRectFilled(ImVec2(o.x + x - r * 0.5f, o.y + y - r * 0.5f), ImVec2(o.x + x + r * 0.5f, o.y + y + r * 0.5f), dot);
     }
 
-    ImFont* font = theme().medium ? theme().medium : ImGui::GetFont();  // names in the medium weight
+    ImFont* font = ImGui::GetFont();
     const float fs = ImGui::GetFontSize() * g.zoom;
     const bool drawText = g.zoom > 0.35f;
 
@@ -1869,16 +1964,14 @@ void drawNodeGraph(App& app, UiState& ui) {
         }
         return best;
     };
-    // Output port: a small circle just under each node (screen space).
+    // Output grab point sits beyond the downward triangle, outside the node body.
     auto outPort = [&](const Node* n) {
         ImVec2 o = S(outputPoint(n));
-        return ImVec2(o.x, o.y + (n->type == "Dot" ? 0.0f : 5.0f * g.zoom));
+        return ImVec2(o.x, o.y + (n->type == "Dot" ? 0.0f : 14.0f * g.zoom));
     };
     auto outPortAt = [&](ImVec2 sp) -> Node* {
-        // Over a node's body the node wins: its output is only grabbed from its bottom edge or
-        // below (zoomed out, the port's pick radius would otherwise cover the whole node).
-        if (Node* body = nodeAt(G(sp)); body && body->type != "Dot" && !isAnnotation(body) &&
-                                        sp.y < S(pos(body)).y + size(body).y * g.zoom - 3.0f)
+        // The node body is reserved for selection and movement, even when zoomed out.
+        if (Node* body = nodeAt(G(sp)); body && body->type != "Dot" && !isAnnotation(body))
             return nullptr;
         Node* best = nullptr;
         float bestD = grabR;
@@ -1905,6 +1998,16 @@ void drawNodeGraph(App& app, UiState& ui) {
         float a = 9 * std::max(0.6f, g.zoom), w = 4.5f * std::max(0.6f, g.zoom);
         ImVec2 base(tip.x - d.x * a, tip.y - d.y * a);
         dl->AddTriangleFilled(tip, ImVec2(base.x - d.y * w, base.y + d.x * w), ImVec2(base.x + d.y * w, base.y - d.x * w), col);
+    };
+    auto dashedPipe = [&](ImVec2 a, ImVec2 b, ImU32 color) {
+        const float length = std::hypot(b.x - a.x, b.y - a.y);
+        if (length < 1) return;
+        const float dash = 3 * std::max(.6f, g.zoom), gap = 3 * std::max(.6f, g.zoom);
+        for (float d = 0; d < length; d += dash + gap) {
+            const float end = std::min(length, d + dash);
+            dl->AddLine(ImVec2(a.x + (b.x - a.x) * d / length, a.y + (b.y - a.y) * d / length),
+                        ImVec2(a.x + (b.x - a.x) * end / length, a.y + (b.y - a.y) * end / length), color, 1.3f);
+        }
     };
 
     // ---- backdrops (behind everything; larger ones further back)
@@ -2017,20 +2120,7 @@ void drawNodeGraph(App& app, UiState& ui) {
             Node* src = n->input(i);
             std::string label = n->inputName(i);
             bool isMask = label == "mask";
-            ImU32 col = isMask ? IM_COL32(150, 150, 150, 200) : IM_COL32(210, 210, 210, 230);
-            if (src && src->type != "Dot") {  // tinted by the node it comes from, as is standard
-                ImVec4 c = ImGui::ColorConvertU32ToFloat4(nodeColor(src));
-                const float mx = std::max({c.x, c.y, c.z, 0.01f}), k = 0.85f / mx;  // full brightness, same hue
-                c = ImVec4(std::min(1.f, c.x * k * 0.85f + 0.12f), std::min(1.f, c.y * k * 0.85f + 0.12f), std::min(1.f, c.z * k * 0.85f + 0.12f),
-                           isMask ? 0.6f : 0.9f);
-                col = ImGui::ColorConvertFloat4ToU32(c);
-            }
-            if (n->type == "Viewer" && src) {  // the A pipe (shown) in the viewer orange, B in blue
-                if (i == App::pipeIndex((int)n->params.num("a_pipe", 0, 1))) col = theme().accent;
-                else if (n->params.str("compare", "off") != "off" && i == App::pipeIndex((int)n->params.num("b_pipe", 0, -1)))
-                    col = IM_COL32(90, 170, 255, 255);
-                else col = IM_COL32(160, 160, 160, 200);
-            }
+            const ImU32 col = IM_COL32(5, 5, 5, 255);
             if (g.drag == GraphState::Drag::FromInput && g.dragNode == n->name && g.dragInput == i) continue;
             Node* from = src && hiddenIn.count(src) ? hiddenIn[src] : src;  // on a collapsed backdrop: from the backdrop
             if (src && !vis(from)) src = nullptr;  // (connections across levels aren't drawn)
@@ -2044,15 +2134,28 @@ void drawNodeGraph(App& app, UiState& ui) {
                 continue;
             }
             if (src) {
-                ImVec2 a = S(via ? precompInnerPort(via) : outputPoint(from)), b = S(ip);
+                ImVec2 source = via ? precompInnerPort(via) : outputPoint(from);
+                if (!knob && !isPrecomp(n) && !via && !isAnnotation(from)) {
+                    const ImVec2 sp = pos(from), ss = size(from), np = pos(n), ns = size(n);
+                    const ImVec2 sourceCentre(sp.x + ss.x * .5f, sp.y + ss.y * .5f);
+                    const ImVec2 targetCentre(np.x + ns.x * .5f, np.y + ns.y * .5f);
+                    if (!isMask) ip = facingPoint(n, sourceCentre);
+                    source = facingPoint(from, targetCentre);
+                    const float dx = source.x - ip.x, dy = source.y - ip.y;
+                    const float len = std::max(1e-5f, std::hypot(dx, dy));
+                    dir = ImVec2(dx / len, dy / len);
+                }
+                ImVec2 a = S(source), b = S(ip);
                 std::vector<ImVec2> pts = pipeRoute(a, b, dir, app.rightAnglePipes, kStub * g.zoom);
                 pipes.push_back({src, n, i, a, b, pts});
-                dl->AddPolyline(pts.data(), (int)pts.size(), col, 0, 1.5f);
+                if (n->type == "Viewer") {
+                    for (size_t k = 1; k < pts.size(); ++k) dashedPipe(pts[k - 1], pts[k], col);
+                } else dl->AddPolyline(pts.data(), (int)pts.size(), col, 0, std::max(1.3f, 1.8f * g.zoom));
                 const ImVec2 pb = pts[pts.size() - 2];  // the last corner (or a): the arrow and the grab point sit on the last stretch
                 arrow(b, pb, col);
                 ImVec2 d(b.x - pb.x, b.y - pb.y);
                 float len = std::max(1.0f, std::sqrt(d.x * d.x + d.y * d.y));
-                const float gl = std::min(16.0f, len * 0.8f);
+                const float gl = std::min(kStub * g.zoom, len * 0.8f);
                 ImVec2 grab(b.x - d.x / len * gl, b.y - d.y / len * gl);
                 handles.push_back({n, i, grab});
                 float total = 0;
@@ -2065,14 +2168,17 @@ void drawNodeGraph(App& app, UiState& ui) {
                         ImVec2 ts = font->CalcTextSizeA(fs * 0.8f, FLT_MAX, 0, label.c_str());
                         dl->AddText(font, fs * 0.8f, ImVec2(b.x - ts.x - 10, b.y - ts.y - 2), IM_COL32(200, 200, 230, 230), label.c_str());
                     } else
-                        dl->AddText(font, fs * 0.85f, ImVec2(grab.x + 4, grab.y - fs), IM_COL32(200, 200, 200, 220), label.c_str());
+                        dl->AddText(font, fs * 0.85f, ImVec2(grab.x + 4, grab.y - fs), IM_COL32(245, 190, 90, 255), label.c_str());
                 }
-            } else if (i < n->maxInputs() && isMask) {  // the classic side tab: drag from it to connect a mask
+            } else if (i < n->maxInputs() && (isMask || (n->type == "Merge" && i >= 3))) {
+                // Keep unused side arrows visible and draggable, but don't label
+                // a spare Merge input until it is actually connected.
+                const float side = isMask ? 1.f : -1.f;
                 const float t = 6 * std::max(0.6f, g.zoom);
                 ImVec2 b = S(ip);
-                ImVec2 tip(b.x + 1 * g.zoom, b.y), back(b.x + t * 1.3f, b.y);
-                dl->AddTriangleFilled(tip, ImVec2(back.x, back.y - t * 0.75f), ImVec2(back.x, back.y + t * 0.75f), IM_COL32(150, 160, 175, 220));
-                handles.push_back({n, i, ImVec2(b.x + t * 0.9f, b.y)});
+                ImVec2 tip(b.x + side * g.zoom, b.y), back(b.x + side * t * 1.3f, b.y);
+                dl->AddTriangleFilled(tip, ImVec2(back.x, back.y - t * 0.75f), ImVec2(back.x, back.y + t * 0.75f), app.selection.count(n->name)?IM_COL32(255,190,92,255):IM_COL32(5,5,5,255));
+                handles.push_back({n, i, ImVec2(b.x + side * kStub * 0.6f * g.zoom, b.y)});
             } else if (knob) {  // an exposed knob waiting for a value: a short stub in the Value colour, named
                 ImVec2 a = S(ImVec2(ip.x - kStub * 0.6f, ip.y)), b = S(ip);
                 const ImU32 vc = categoryColor("Value");
@@ -2083,23 +2189,30 @@ void drawNodeGraph(App& app, UiState& ui) {
                     ImVec2 ts = font->CalcTextSizeA(fs * 0.8f, FLT_MAX, 0, label.c_str());
                     dl->AddText(font, fs * 0.8f, ImVec2(a.x - ts.x - 4, a.y - ts.y * 0.5f), IM_COL32(200, 200, 230, 230), label.c_str());
                 }
-            } else if (i < n->maxInputs() && n->type == "Viewer") {  // an empty pipe: a small dot to drag from
-                ImVec2 b = S(ip);
-                dl->AddCircleFilled(b, 2.5f * std::max(0.6f, g.zoom), IM_COL32(150, 150, 150, 140));
-                handles.push_back({n, i, ImVec2(b.x, b.y - 4 * g.zoom)});
+            } else if (i < n->maxInputs() && n->type == "Viewer") {
+                bool connected = false;
+                for (Node* source : n->inputs) connected = connected || source;
+                if (connected || i != 0) continue;
+                const ImVec2 b = S(ip), a = S(ImVec2(ip.x - kStub * .5f, ip.y - kStub));
+                dashedPipe(a, b, col);
+                arrow(b, a, col);
+                handles.push_back({n, i, a});
+                if (drawText) dl->AddText(font, fs * .85f, ImVec2(b.x - 12 * g.zoom, b.y - 20 * g.zoom), IM_COL32(245, 190, 90, 255), "1");
             } else if (i < n->maxInputs()) {
+                if (n->type == "Merge" && i >= 3 && !app.selection.count(n->name) &&
+                    !ImGui::IsMouseHoveringRect(S(pos(n)), S(ImVec2(pos(n).x + size(n).x, pos(n).y + size(n).y)))) continue;
                 float stub = isMask ? kStub * 0.6f : kStub;
                 ImVec2 end(ip.x + dir.x * stub, ip.y + dir.y * stub);
                 ImVec2 a = S(end), b = S(ip);
-                ImU32 sc = IM_COL32(150, 150, 150, 160);
-                dl->AddLine(a, b, sc, 1.2f);
+                ImU32 sc = app.selection.count(n->name)?IM_COL32(255,190,92,255):IM_COL32(5,5,5,255);
+                dl->AddLine(a, b, sc, std::max(1.3f, 1.8f * g.zoom));
                 arrow(b, a, sc);
                 handles.push_back({n, i, a});
                 // (a mask's or a spare A2's name only close up: it would sit on its neighbour's)
                 if (drawText && !label.empty() && ((!isMask && dir.y < 0 && i < 2) || g.zoom > 0.9f || (!isMask && dir.y >= 0))) {
                     ImVec2 ts = font->CalcTextSizeA(fs * 0.85f, FLT_MAX, 0, label.c_str());
-                    ImVec2 tp(a.x - ts.x / 2 + dir.x * (ts.x / 2 + 3), a.y - ts.y - 1);
-                    dl->AddText(font, fs * 0.85f, tp, IM_COL32(190, 190, 190, 220), label.c_str());
+                    ImVec2 tp(b.x - ts.x / 2 + dir.x * 9 * g.zoom, b.y - ts.y - 6 * g.zoom);
+                    dl->AddText(font, fs * 0.85f, tp, IM_COL32(245, 190, 90, 255), label.c_str());
                 }
             }
         }
@@ -2153,68 +2266,7 @@ void drawNodeGraph(App& app, UiState& ui) {
                                              : "drag onto a node to connect this input");
         }
     }
-    // A node's top and bottom edges are generous grab zones for its pipes: the top for its main
-    // input (re-connect, or drop in empty space to disconnect), the bottom for a new pipe out of it.
-    // The middle of the node stays for selecting and moving, and nodes too small on screen to
-    // have room for the zones (zoomed far out) don't get them.
-    struct EdgeHit { Node* node = nullptr; int input = -1; bool bottom = false; };
-    auto edgeAt = [&](ImVec2 sp) -> EdgeHit {
-        EdgeHit best;
-        float bestD = 1e9f;
-        for (auto& up : comp.nodes) {
-            Node* n = up.get();
-            if (!vis(n) || isAnnotation(n) || n->type == "Dot") continue;
-            const ImVec2 p0 = S(pos(n)), sz = size(n);
-            const float w = sz.x * g.zoom, h = sz.y * g.zoom;
-            if (h < 14.0f) continue;
-            const float band = std::clamp(h * 0.3f, 5.0f, 12.0f), out = 8.0f, side = 6.0f;
-            if (sp.x < p0.x - side || sp.x > p0.x + w + side) continue;
-            const float top = p0.y, bot = p0.y + h;
-            if (sp.y >= top - out && sp.y <= top + band && n->maxInputs() > 0) {
-                // the top-edge input nearest the mouse (the main input in the middle, extra ones to its right)
-                int bi = -1;
-                float bx = 1e9f;
-                for (int i = 0; i < n->maxInputs(); ++i) {
-                    if (n->inputLabel(i) == "mask") continue;
-                    ImVec2 dir;
-                    const float ix = S(inputPoint(n, i, &dir)).x;
-                    if (dir.y >= 0) continue;
-                    if (std::fabs(ix - sp.x) < bx) { bx = std::fabs(ix - sp.x); bi = i; }
-                }
-                const float d = std::fabs(sp.y - top);
-                if (bi >= 0 && d < bestD) { bestD = d; best = {n, bi, false}; }
-            } else if (sp.y >= bot - band && sp.y <= bot + out) {
-                const float d = std::fabs(sp.y - bot);
-                if (d < bestD) { bestD = d; best = {n, -1, true}; }
-            }
-        }
-        return best;
-    };
-    EdgeHit hoverEdge;
-    if (hovered && g.drag == GraphState::Drag::None && !hoverHandle && !hoverOut) {
-        hoverEdge = edgeAt(io.MousePos);
-        if (hoverEdge.node) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            Node* en = hoverEdge.node;
-            if (hoverEdge.bottom) {
-                dl->AddCircleFilled(outPort(en), 5.0f, theme().accent);
-            } else {
-                ImVec2 dir;
-                const ImVec2 ip = S(inputPoint(en, hoverEdge.input, &dir));
-                dl->AddCircleFilled(ImVec2(ip.x, ip.y - 4), 5.0f, theme().accent);
-            }
-        }
-    }
-    for (auto& h : tails)  // a pipe's source end lights up under the mouse
-        if (&h == hoverHandle) dl->AddCircleFilled(h.at, 5.0f, theme().accent);
-    // Input pipe ends: small rings; the one under the mouse lights up.
-    for (auto& h : handles) {
-        bool hot = &h == hoverHandle;
-        float r = hot ? 6.0f : 3.5f * std::max(0.7f, g.zoom);
-        if (hot) dl->AddCircleFilled(h.at, r, theme().accent);
-        else if (!h.node->input(h.input) && h.node->inputLabel(h.input) != "mask")
-            dl->AddCircle(h.at, r, IM_COL32(170, 170, 170, 200), 0, 1.2f);
-    }
+    // Connector targets are invisible, including on hover; the hand cursor indicates access.
 
     // ---- nodes
     // Problems (issue #11): red for a node that can't work (a type this build doesn't know, or the
@@ -2257,51 +2309,47 @@ void drawNodeGraph(App& app, UiState& ui) {
         }
         if (n->type == "Dot") {
             ImVec2 c((p0.x + p1.x) / 2, (p0.y + p1.y) / 2);
-            dl->AddCircleFilled(c, s.x * 0.5f * g.zoom, base);
+            dl->AddCircleFilled(c, s.x * 0.5f * g.zoom, sel?IM_COL32(255,190,92,255):base);
             dl->AddCircle(c, s.x * 0.5f * g.zoom, sel ? theme().accent : IM_COL32(20, 20, 20, 255), 0, sel ? 2.0f : 1.0f);
             continue;
         }
-        // Header tiles: a quiet body in the theme's tile colour, the category colour as a strip
-        // along the top (and the edge, faintly), a soft accent glow when selected; time nodes
-        // keep their hexagon.
+        // Compact full-color tiles with a restrained vertical bevel.
         ImVec4 bc = ImGui::ColorConvertU32ToFloat4(base);
         const bool disabled = n->params.flag("disable", false);
-        if (disabled) bc = ImVec4(0.45f, 0.45f, 0.45f, 1);
-        ImVec4 tv = ImGui::ColorConvertU32ToFloat4(theme().tile);
-        auto mixc = [&](float k, float a) {  // the tile tinted k toward the category colour
-            return ImGui::ColorConvertFloat4ToU32(ImVec4(tv.x + (bc.x - tv.x) * k, tv.y + (bc.y - tv.y) * k, tv.z + (bc.z - tv.z) * k, a));
-        };
-        const ImU32 fill = mixc(0.12f, 1);
-        const ImU32 edge = mixc(0.55f, 1);  // also the output port
-        const ImU32 strip = ImGui::ColorConvertFloat4ToU32(bc);
-        const float rad = std::max(1.5f, 5.0f * g.zoom);
-        if (sel) {  // the glow
-            for (int k = 6; k >= 1; --k) {
-                const float e = k * 1.2f * std::max(0.7f, g.zoom);
-                dl->AddRect(ImVec2(p0.x - e, p0.y - e), ImVec2(p1.x + e, p1.y + e), themeAccent(14 + (6 - k) * 13), rad + e, 0, 1.6f);
-            }
-        }
+        if (disabled) bc = ImVec4(.48f, .48f, .48f, 1);
+        // Selection keeps a blue-gray frame around the orange inset.
+        const ImU32 selectionFrame=IM_COL32(142,160,188,255);
+        const ImU32 selectionFill=IM_COL32(255,190,92,255);
+        const ImU32 topColor = ImGui::GetColorU32(ImVec4(bc.x + (1 - bc.x) * .20f, bc.y + (1 - bc.y) * .20f, bc.z + (1 - bc.z) * .20f, 1));
+        const ImU32 bottomColor = ImGui::GetColorU32(ImVec4(bc.x * .72f, bc.y * .72f, bc.z * .72f, 1));
+        const ImU32 edge = IM_COL32(8, 8, 8, 255);
+        const float rad = 0;
+        const ImU32 textColor = !sel && (.2126f * bc.x + .7152f * bc.y + .0722f * bc.z) < .18f
+                                   ? IM_COL32(240, 240, 240, 255) : IM_COL32(5, 5, 5, 255);
         if (hexagonal(n)) {
-            const float in = (p1.y - p0.y) * 0.5f;
-            ImVec2 pts[6] = {ImVec2(p0.x, (p0.y + p1.y) * 0.5f), ImVec2(p0.x + in, p0.y), ImVec2(p1.x - in, p0.y),
-                             ImVec2(p1.x, (p0.y + p1.y) * 0.5f), ImVec2(p1.x - in, p1.y), ImVec2(p0.x + in, p1.y)};
-            dl->AddConvexPolyFilled(pts, 6, fill);
-            dl->AddPolyline(pts, 6, sel ? theme().accent : strip, ImDrawFlags_Closed, sel ? 2.0f : 1.5f);
-        } else {
-            dl->AddRectFilled(ImVec2(p0.x + 1, p0.y + 2), ImVec2(p1.x + 1, p1.y + 2), IM_COL32(0, 0, 0, 70), rad);  // a little shadow
-            dl->AddRectFilled(p0, p1, fill, rad);
-            const float sh = std::max(2.0f, 3.5f * g.zoom);  // the header strip
-            dl->AddRectFilled(p0, ImVec2(p1.x, p0.y + sh + rad * 0.5f), strip, rad, ImDrawFlags_RoundCornersTop);
-            dl->AddRectFilled(ImVec2(p0.x, p0.y + sh), ImVec2(p1.x, p0.y + sh + rad * 0.5f + 1), fill);
-            dl->AddRect(p0, p1, sel ? theme().accent : mixc(0.3f, 1), rad, 0, sel ? 1.5f : 1.0f);
-        }
-        // the category's line icon on the left, when the name leaves room for it
-        if (drawText && g.zoom > 0.55f && !hexagonal(n) && stampHeight(n) <= 0 && n->type != "Viewer") {
-            const float ih = 7.0f * g.zoom, nameW = font->CalcTextSizeA(fs, FLT_MAX, 0, n->name.c_str()).x;
-            if ((p1.x - p0.x) - nameW >= 4 * ih + 16 * g.zoom) {
-                const float cy = subtitle(n).empty() ? (p0.y + p1.y) * 0.5f + 1 * g.zoom : p0.y + 3 * g.zoom + fs * 0.5f;
-                categoryIcon(dl, categoryOf(n->type), ImVec2(p0.x + 6 * g.zoom + ih, cy), ih * 0.85f, mixc(0.7f, 0.9f));
+            const float in = (p1.y - p0.y) * (n->type == "Viewer" ? .22f : .5f);
+            ImVec2 pts[6] = {ImVec2(p0.x, (p0.y + p1.y) * .5f), ImVec2(p0.x + in, p0.y), ImVec2(p1.x - in, p0.y),
+                             ImVec2(p1.x, (p0.y + p1.y) * .5f), ImVec2(p1.x - in, p1.y), ImVec2(p0.x + in, p1.y)};
+            const int firstVertex = dl->VtxBuffer.Size;
+            dl->AddConvexPolyFilled(pts, 6, IM_COL32_WHITE);
+            ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, firstVertex, dl->VtxBuffer.Size, p0, ImVec2(p0.x, p1.y), topColor, bottomColor);
+            if(sel){
+                dl->AddConvexPolyFilled(pts,6,selectionFrame);
+                const float pad=std::min((p1.y-p0.y)*.15f,std::max(1.5f,3.f*g.zoom));
+                ImVec2 q0(p0.x+pad,p0.y+pad),q1(p1.x-pad,p1.y-pad);
+                const float qin=(q1.y-q0.y)*(n->type=="Viewer"?.22f:.5f);
+                ImVec2 q[6]={{q0.x,(q0.y+q1.y)*.5f},{q0.x+qin,q0.y},{q1.x-qin,q0.y},{q1.x,(q0.y+q1.y)*.5f},{q1.x-qin,q1.y},{q0.x+qin,q1.y}};
+                dl->AddConvexPolyFilled(q,6,selectionFill);
             }
+            dl->AddPolyline(pts,6,edge,ImDrawFlags_Closed,1.f);
+        } else {
+            dl->AddRectFilledMultiColor(p0, p1, topColor, topColor, bottomColor, bottomColor);
+            if(sel){
+                dl->AddRectFilled(p0,p1,selectionFrame);
+                const float pad=std::min((p1.y-p0.y)*.15f,std::max(1.5f,3.f*g.zoom));
+                dl->AddRectFilled(ImVec2(p0.x+pad,p0.y+pad),ImVec2(p1.x-pad,p1.y-pad),selectionFill);
+            }
+            dl->AddRect(p0,p1,edge,0,0,1.f);
         }
         if (n->type == "Group")  // a container: a second frame inside
             dl->AddRect(ImVec2(p0.x + 3 * g.zoom, p0.y + 3 * g.zoom), ImVec2(p1.x - 3 * g.zoom, p1.y - 3 * g.zoom), IM_COL32(255, 255, 255, 60), rad, 0, 1.0f);
@@ -2322,7 +2370,7 @@ void drawNodeGraph(App& app, UiState& ui) {
         const float stampH = stampHeight(n) * g.zoom;
         const Stamp* stamp = stampH > 0 && g.zoom > 0.25f ? stampFor(app, n) : nullptr;
         if (stampH > 0) {
-            const float in = 3 * g.zoom;
+            const float in = 1 * g.zoom;
             ImVec2 a0(p0.x + in, p0.y + in), a1(p1.x - in, p0.y + stampH - in * 0.3f);
             dl->AddRectFilled(a0, a1, IM_COL32(12, 12, 12, 255), std::max(1.0f, rad - 1));
             if (stamp && stamp->w > 0) {
@@ -2333,47 +2381,14 @@ void drawNodeGraph(App& app, UiState& ui) {
                 dl->AddImage((ImTextureID)(intptr_t)stamp->tex, i0, ImVec2(i0.x + iw, i0.y + ih));
             }
         }
-        // the channels it works on: red / green / blue / alpha marks along the bottom (grey: other layers)
-        if (g.zoom > 0.45f) {
-            std::string ck = channelKnob(n), ct;
-            if (!ck.empty()) ct = channelText(n, ck);
-            else if (stamp) {  // a Read: what its image holds
-                bool r = false, gr = false, b = false, al = false, other = false;
-                for (auto& c : stamp->channels) {
-                    if (c == "R") r = true;
-                    else if (c == "G") gr = true;
-                    else if (c == "B") b = true;
-                    else if (c == "A") al = true;
-                    else other = true;
-                }
-                ck = "-";
-                ct = std::string(r ? "R " : "") + (gr ? "G " : "") + (b ? "B " : "") + (al ? "A " : "") + (other ? "+ " : "");
-                if (!ct.empty()) ct.pop_back();
-            }
-            if (!ck.empty()) {
-                std::vector<ImU32> marks;
-                auto has = [&](const char* w) { return (" " + ct + " ").find(std::string(" ") + w + " ") != std::string::npos; };
-                const bool all = ct == "all", rgba = ct == "rgba" || all, rgb = ct == "rgb" || rgba;
-                if (rgb || has("R")) marks.push_back(IM_COL32(230, 70, 70, 255));
-                if (rgb || has("G")) marks.push_back(IM_COL32(80, 205, 90, 255));
-                if (rgb || has("B")) marks.push_back(IM_COL32(80, 130, 255, 255));
-                if (rgba || ct == "alpha" || has("A")) marks.push_back(IM_COL32(235, 235, 235, 255));
-                if (all || has("+") || (!ct.empty() && ct != "none" && marks.empty() && ct != "rgb" && ct != "rgba"))
-                    marks.push_back(IM_COL32(150, 150, 150, 255));  // other layers
-                const float mw = 5.0f * g.zoom, mh = std::max(1.5f, 2.0f * g.zoom), gap = 1.5f * g.zoom;
-                float x = p0.x + rad + 2 * g.zoom;
-                for (ImU32 m : marks) {
-                    dl->AddRectFilled(ImVec2(x, p1.y - mh - 2 * g.zoom), ImVec2(x + mw, p1.y - 2 * g.zoom), m);
-                    x += mw + gap;
-                }
-            }
-        }
+        if (hasStamp(n) && hovered && ImGui::IsMouseHoveringRect(p0, p1) && g.drag == GraphState::Drag::None)
+            ImGui::SetTooltip("%s\n%s", n->name.c_str(), n->params.str("file").c_str());
         if (drawText) {
-            ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, n->name.c_str());
+            ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, nodeTitle(n).c_str());
             const float ty0 = p0.y + stampH;  // the text area: under the stamp
             float cy = subtitle(n).empty() ? (ty0 + p1.y - ts.y) / 2 : ty0 + 3 * g.zoom;
-            const ImU32 nameCol = disabled ? theme().muted : theme().tileText;
-            dl->AddText(font, fs, ImVec2((p0.x + p1.x - ts.x) / 2, cy), nameCol, n->name.c_str());
+            const ImU32 nameCol = textColor;
+            dl->AddText(font, fs, ImVec2((p0.x + p1.x - ts.x) / 2, cy), nameCol, nodeTitle(n).c_str());
             std::string subAll = subtitle(n);
             float ly = cy + fs + 1;
             for (size_t a = 0; !subAll.empty() && a <= subAll.size();) {
@@ -2382,14 +2397,23 @@ void drawNodeGraph(App& app, UiState& ui) {
                 std::string sub = subAll.substr(a, b - a);
                 a = b + 1;
                 float sfs = fs * 0.82f;
-                ImVec2 ss = font->CalcTextSizeA(sfs, FLT_MAX, 0, sub.c_str());
+                ImFont* subFont=font;
+                ImU32 subColor=textColor;
+                if(!n->ui.value("label",std::string()).empty()) {
+                    subFont=nodeLabelFont(n); if(!subFont)subFont=font;
+                    sfs=(float)n->ui.value("note_font_size",11.0)*g.zoom;
+                    if(n->ui.contains("note_font_color") && n->ui["note_font_color"].is_array()){
+                        const auto& color=n->ui["note_font_color"];subColor=ImGui::ColorConvertFloat4ToU32(ImVec4(color[0],color[1],color[2],1));
+                    }
+                }
+                ImVec2 ss = subFont->CalcTextSizeA(sfs, FLT_MAX, 0, sub.c_str());
                 float maxW = p1.x - p0.x - 6;
                 if (ss.x > maxW) {
-                    while (sub.size() > 4 && font->CalcTextSizeA(sfs, FLT_MAX, 0, (sub + "...").c_str()).x > maxW) sub.pop_back();
+                    while (sub.size() > 4 && subFont->CalcTextSizeA(sfs, FLT_MAX, 0, (sub + "...").c_str()).x > maxW) sub.pop_back();
                     sub += "...";
-                    ss = font->CalcTextSizeA(sfs, FLT_MAX, 0, sub.c_str());
+                    ss = subFont->CalcTextSizeA(sfs, FLT_MAX, 0, sub.c_str());
                 }
-                dl->AddText(font, sfs, ImVec2((p0.x + p1.x - ss.x) / 2, ly), theme().muted, sub.c_str());
+                dl->AddText(subFont, sfs, ImVec2((p0.x + p1.x - ss.x) / 2, ly), subColor, sub.c_str());
                 ly += sfs + 1 * g.zoom;
             }
         }
@@ -2399,13 +2423,8 @@ void drawNodeGraph(App& app, UiState& ui) {
             bool hot = n == hoverOut || (g.drag == GraphState::Drag::FromOutput && g.dragNode == n->name);
             const float t = (hot ? 6.5f : 4.5f) * std::max(0.6f, g.zoom);
             const float top = p1.y + 1.5f * g.zoom;
-            const ImU32 oc = hot ? theme().accent : edge;
+            const ImU32 oc = hot ? theme().accent : IM_COL32(5, 5, 5, 255);
             dl->AddTriangleFilled(ImVec2(o.x - t, top), ImVec2(o.x + t, top), ImVec2(o.x, top + t * 1.1f), oc);
-        }
-        // The viewed marker (the active viewer's A pipe comes from here).
-        if (app.viewed == n->name) {
-            const float tx = p1.x + 4 * g.zoom;
-            dl->AddRectFilled(ImVec2(tx, p0.y), ImVec2(tx + 5 * g.zoom, p1.y), theme().accent, 1);
         }
         // Animated (keyframes, shape keys, baked tracks or transforms): a little curve-and-key badge
         // on the node's top-left corner.
@@ -2478,7 +2497,7 @@ void drawNodeGraph(App& app, UiState& ui) {
         } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             g.dragStartScreen = io.MousePos;
             g.moved = false;
-            // 1) ports: an input pipe end, or an output port (also a node's bottom edge)
+            // 1) connectors: external input pipe ends and the point below the output triangle
             Node* exact = nodeAt(mouseG);
             Node* hit = exact ? exact : nearTiny;  // (zoomed far out: a node just next to the mouse)
             Node* corner = hit ? nullptr : cornerAt(mouseG);
@@ -2513,16 +2532,9 @@ void drawNodeGraph(App& app, UiState& ui) {
                 g.drag = GraphState::Drag::FromInput;
                 g.dragNode = hoverHandle->node->name;
                 g.dragInput = hoverHandle->input;
-            } else if (EdgeHit e = edgeAt(io.MousePos); e.node && !io.KeyCtrl && !io.KeyShift &&
-                                                         !ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                g.drag = e.bottom ? GraphState::Drag::FromOutput : GraphState::Drag::FromInput;
-                g.dragNode = e.node->name;
-                g.dragInput = e.bottom ? 0 : e.input;
-                g.edgeNode = e.node->name;
-                g.edgeArmed = true;
-            } else if (hoverOut || (exact && exact->type != "Dot" && exact->type != "Viewer" && !isAnnotation(exact) && mouseG.y > pos(exact).y + size(exact).y - 4)) {
+            } else if (hoverOut) {
                 g.drag = GraphState::Drag::FromOutput;
-                g.dragNode = hoverOut ? hoverOut->name : exact->name;
+                g.dragNode = hoverOut->name;
             } else if (hit) {
                 g.lastClicked = hit->name;
                 // Clicked nodes go to the end of the selection order.
@@ -2834,9 +2846,8 @@ void drawNodeGraph(App& app, UiState& ui) {
                 for (auto& n : comp.nodes) {
                     if (!vis(n.get())) continue;
                     ImVec2 p = pos(n.get()), s = size(n.get());
-                    bool touch = p.x + s.x >= glo.x && p.x <= ghi.x && p.y + s.y >= glo.y && p.y <= ghi.y;
-                    bool inside = p.x >= glo.x && p.x + s.x <= ghi.x && p.y >= glo.y && p.y + s.y <= ghi.y;
-                    if (isBackdrop(n.get()) ? inside : touch) app.selection.insert(n->name);
+                    if (p.x >= glo.x && p.y >= glo.y && p.x + s.x <= ghi.x && p.y + s.y <= ghi.y)
+                        app.selection.insert(n->name);
                 }
                 g.drag = GraphState::Drag::None;
             }
@@ -2869,7 +2880,9 @@ void drawNodeGraph(App& app, UiState& ui) {
             ImVec2 from;
             if (g.drag == GraphState::Drag::FromInput) {
                 ImVec2 dir;
-                from = S(inputPoint(n, g.dragInput, &dir));
+                ImVec2 anchor = inputPoint(n, g.dragInput, &dir);
+                if (n->type == "Merge" && g.dragInput >= 3) anchor = facingPoint(n, mouseG);
+                from = S(anchor);
                 dl->AddLine(io.MousePos, from, theme().accent, 2);
                 arrow(from, io.MousePos, theme().accent);
             } else {
@@ -2886,9 +2899,6 @@ void drawNodeGraph(App& app, UiState& ui) {
                     float d = std::hypot(h.at.x - io.MousePos.x, h.at.y - io.MousePos.y);
                     if (d < bestD) { bestD = d; target = h.node; snapInput = h.input; }
                 }
-                if (snapInput >= 0)
-                    for (auto& h : handles)
-                        if (h.node == target && h.input == snapInput) dl->AddCircleFilled(h.at, 7, theme().accent);
             } else if (!target) {
                 // dragging an input end: dropping on a node's output port counts as the node
                 target = outPortAt(io.MousePos);
@@ -3020,6 +3030,15 @@ void drawNodeGraph(App& app, UiState& ui) {
         if (ImGui::MenuItem("Precomp around selection", nullptr, false, !app.selection.empty())) graphPrecomp(app, ui);
         if (one && one->type == "Backdrop" && ImGui::MenuItem("Convert backdrop to Precomp")) graphConvertBox(app, one);
         if (one && isPrecomp(one) && ImGui::MenuItem("Convert Precomp to backdrop")) graphConvertBox(app, one);
+        if(ImGui::BeginMenu("Bookmarks")) {
+            bool any=false;
+            for(auto& n:comp.nodes)if(n->ui.value("bookmark",false)) {
+                any=true;
+                if(ImGui::MenuItem(n->name.c_str())){g.level=n->group;app.selection={n->name};frameNodes(app,ui,sz);}
+            }
+            if(!any)ImGui::TextDisabled("Enable Bookmark in a node's Node tab");
+            ImGui::EndMenu();
+        }
         if (ImGui::MenuItem("Find node...", "Ctrl+F")) g.openFind = true;
         if (ImGui::MenuItem("Auto-align", "Alt+Shift+A")) graphAutoAlign(app, ui);
         if (ImGui::MenuItem("Sticky note")) createNode(app, ui, "StickyNote", {{"label", "note"}});

@@ -11,6 +11,7 @@
 #include <set>
 
 #include "Comp.h"
+#include "nodes/ColorCorrect.h"
 
 namespace strata::nk {
 
@@ -652,11 +653,16 @@ struct Writer {
             for (std::string k : {"Achannels", "Bchannels"}) {
                 std::string layer = has(k.c_str()) && p[k].is_string() && !p[k].get<std::string>().empty() ? p[k].get<std::string>() : "rgba";
                 const json off = p.value(k + "_off", json::array());
-                if (off.is_array() && !off.empty() && (layer == "rgba" || layer == "rgb")) {  // {-rgba.red rgba.green ...}
+                const std::string alpha = p.value(k + "_alpha", std::string());
+                if (!alpha.empty() || (off.is_array() && !off.empty() && (layer == "rgba" || layer == "rgb"))) {
+                    // Nuke's Channel_Knob has four positional slots. The fourth
+                    // selects the alpha independently of the RGB layer/checkboxes.
                     std::string w = "{";
                     for (auto [ch, nm] : std::vector<std::pair<std::string, std::string>>{{"R", "red"}, {"G", "green"}, {"B", "blue"}, {"A", "alpha"}}) {
                         bool isOff = std::find(off.begin(), off.end(), json(ch)) != off.end();
-                        w += (w.size() > 1 ? " " : "") + std::string(isOff ? "-" : "") + "rgba." + nm;
+                        const std::string channel = ch == "A" && !alpha.empty() ? nkChannel(alpha) :
+                            layer == "none" ? "none" : (layer == "rgba" || layer == "rgb" ? "rgba" : layer) + "." + nm;
+                        w += (w.size() > 1 ? " " : "") + std::string(isOff && channel != "none" ? "-" : "") + channel;
                     }
                     raw(k, w + "}");
                 } else if (layer != "rgba")
@@ -700,9 +706,33 @@ struct Writer {
                 if (has("black_clamp")) raw("black_clamp", p.value("black_clamp", true) ? "true" : "false");
                 if (has("white_clamp")) raw("white_clamp", p.value("white_clamp", false) ? "true" : "false");
                 if (p.value("reverse", false)) raw("reverse", "true");
+                copy("mix_luminance");
+                for(const char* k:{"inject","enable_mix_luminance"})
+                    if(has(k))raw(k,p.value(k,false)?"true":"false");
             } else if (type == "ColorCorrect") {
                 for (std::string rng : {"", "shadows.", "midtones.", "highlights."})
                     for (const char* k : {"saturation", "contrast", "gamma", "gain", "offset"}) copy((rng + k).c_str());
+                copy("mix_luminance");
+                for (const char* k : {"test", "inject", "enable_mix_luminance"})
+                    if (has(k)) raw(k, p.value(k, false) ? "true" : "false");
+                if (has("lookup") && p["lookup"].is_object()) {
+                    const cc::RangeCurve shadow(p["lookup"], "shadow"), highlight(p["lookup"], "highlight");
+                    std::string text = "{";
+                    for (const char* name : {"shadow", "midtone", "highlight"}) {
+                        text += std::string(name) + " {curve";
+                        for (int i = 0; i <= 100; ++i) {
+                            const double x = i / 100.0, s = shadow.eval(x), h = highlight.eval(x);
+                            const double y = std::string(name) == "shadow" ? s : std::string(name) == "highlight" ? h : 1 - s - h;
+                            text += " x" + fmt(x) + " " + fmt(y);
+                        }
+                        text += "} ";
+                    }
+                    raw("lookup", text + "}");
+                    warn("range curves sampled for .nk export");
+                }
+                if (n.contains("ui") && n["ui"].contains("cc_controls") && n["ui"]["cc_controls"].is_object())
+                    for (auto& [key, state] : n["ui"]["cc_controls"].items())
+                        if (state.is_object() && state.value("wheel", false)) raw(key + "_panelDropped", "true");
             } else if (type == "Saturation") {
                 copy("saturation");
                 if (has("mode") && p["mode"] != "Rec 709") raw("mode", word(p["mode"].get<std::string>()));
@@ -1133,7 +1163,24 @@ struct Exporter {
             names.type[n.value("name", "")] = n.value("type", "");
             nodes.push_back(n);
         }
+        // Declare selected custom mattes even when their source footage is not
+        // loaded yet. Otherwise Nuke replaces an unknown alpha slot with none.
+        std::map<std::string, std::set<std::string>> matteLayers;
+        for (const auto& n : nodes) if (n.value("type", "") == "Merge") {
+            const json p = n.value("params", json::object());
+            for (const char* key : {"Achannels_alpha", "Bchannels_alpha"}) if (p.contains(key) && p[key].is_string()) {
+                const std::string channel = nkChannel(p[key].get<std::string>());
+                const auto dot = channel.find('.');
+                if (dot != std::string::npos && channel.substr(0, dot) != "rgba")
+                    matteLayers[channel.substr(0, dot)].insert(channel);
+            }
+        }
         std::string out;
+        for (const auto& [layer, channels] : matteLayers) {
+            out += "add_layer {" + word(layer);
+            for (const auto& channel : channels) out += " " + word(channel);
+            out += "}\n";
+        }
         writeLevel(out, "", "");
         return out;
     }

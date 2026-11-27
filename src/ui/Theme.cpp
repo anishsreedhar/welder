@@ -5,6 +5,8 @@
 //   midnight  cool blue-black, teal accent
 //   neutral   true mid grey, quiet blue accent (colour-critical work)
 #include <cstdlib>
+#include <array>
+#include <filesystem>
 
 #include "Panels.h"
 #include "imgui_internal.h"
@@ -14,6 +16,35 @@ namespace strata::ui {
 ThemeColors& theme() {
     static ThemeColors t;
     return t;
+}
+
+static std::map<std::string, std::array<ImFont*,4>> gLabelFonts;
+static std::vector<std::string> gLabelFamilies = {"Roboto"};
+void loadNodeLabelFonts() {
+    gLabelFonts.clear(); gLabelFamilies={"Roboto"};
+#ifdef _WIN32
+    const char* root=std::getenv("WINDIR");
+    const std::filesystem::path dir=std::filesystem::path(root?root:"C:/Windows")/"Fonts";
+    const std::vector<std::pair<std::string,std::array<const char*,4>>> families={
+        {"Verdana",{"verdana.ttf","verdanab.ttf","verdanai.ttf","verdanaz.ttf"}},
+        {"Arial",{"arial.ttf","arialbd.ttf","ariali.ttf","arialbi.ttf"}},
+        {"Consolas",{"consola.ttf","consolab.ttf","consolai.ttf","consolaz.ttf"}}};
+    for(const auto& [name,files]:families) {
+        bool all=true;for(auto file:files)all=all&&std::filesystem::exists(dir/file);
+        if(!all)continue;
+        std::array<ImFont*,4> fonts{};
+        for(int i=0;i<4;++i)fonts[i]=ImGui::GetIO().Fonts->AddFontFromFileTTF((dir/files[i]).string().c_str(),14);
+        gLabelFonts[name]=fonts;gLabelFamilies.push_back(name);
+    }
+    if(gLabelFamilies.size()>1)gLabelFamilies.erase(gLabelFamilies.begin());
+#endif
+}
+const std::vector<std::string>& nodeLabelFamilies(){return gLabelFamilies;}
+ImFont* nodeLabelFont(const Node* n) {
+    const std::string family=n->ui.value("note_font",std::string("Verdana"));
+    auto it=gLabelFonts.find(family);
+    if(it!=gLabelFonts.end())return it->second[(n->ui.value("note_bold",false)?1:0)+(n->ui.value("note_italic",false)?2:0)];
+    return n->ui.value("note_bold",false)?theme().medium:theme().regular;
 }
 
 const std::vector<std::string>& themeNames() {
@@ -54,9 +85,9 @@ struct Palette {
 
 Palette palette(const std::string& name) {
     if (name == "graphite")
-        return {{34, 34, 36}, {46, 46, 49}, {54, 54, 58}, {30, 30, 32}, {40, 40, 43}, {64, 64, 68}, {80, 80, 85}, {22, 22, 24},
-                {214, 214, 216}, {146, 146, 152}, {236, 236, 238}, {240, 172, 60}, {27, 27, 29}, {20, 20, 21}, {44, 44, 48},
-                {52, 52, 56}, {232, 232, 234}, {190, 190, 196}};
+        return {{40,40,40},{50,50,50},{56,56,56},{61,61,61},{71,71,71},{65,65,65},{80,80,80},{24,24,24},
+                {205,205,205},{145,145,145},{215,215,215},{250,157,25},{50,50,50},{0,0,0},{50,50,50},
+                {140,140,140},{0,0,0},{155,155,155}};
     if (name == "midnight")
         return {{17, 22, 32}, {26, 33, 47}, {33, 42, 60}, {15, 19, 28}, {28, 36, 52}, {40, 52, 74}, {54, 70, 98}, {9, 12, 18},
                 {208, 220, 238}, {124, 140, 168}, {232, 240, 252}, {61, 219, 217}, {13, 18, 27}, {9, 12, 19}, {30, 38, 54},
@@ -88,22 +119,22 @@ void applyTheme(const std::string& requested) {
     for (int i = 0; i < ImGuiCol_COUNT; ++i) fresh.Colors[i] = s.Colors[i];
     s = fresh;
     s.WindowRounding = 0;
-    s.ChildRounding = 6;
-    s.FrameRounding = 4;
-    s.GrabRounding = 4;
-    s.TabRounding = 4;
-    s.PopupRounding = 6;
-    s.ScrollbarRounding = 6;
+    s.ChildRounding = 0;
+    s.FrameRounding = 0;
+    s.GrabRounding = 0;
+    s.TabRounding = 2;
+    s.PopupRounding = 0;
+    s.ScrollbarRounding = 0;
     s.WindowBorderSize = 1;
-    s.FrameBorderSize = 0;
+    s.FrameBorderSize = 1;
     s.WindowPadding = ImVec2(8, 6);
-    s.FramePadding = ImVec2(8, 4);   // 14 px type + 8 = 22 px fields, 26 px rows with the spacing
-    s.ItemSpacing = ImVec2(6, 4);    // (4 px grid)
+    s.FramePadding = ImVec2(4, 4);   // 14 px type + 8 = 22 px fields, 26 px rows with the spacing
+    s.ItemSpacing = ImVec2(4, 2);    // (4 px grid)
     s.ItemInnerSpacing = ImVec2(4, 4);
     s.IndentSpacing = 16;
     s.ScrollbarSize = 10;
     s.GrabMinSize = 10;
-    s.DockingSeparatorSize = 3;
+    s.DockingSeparatorSize = 2;
     if (scale != 1.0f) s.ScaleAllSizes(scale);  // (below 1 too: the UI scale preference can shrink it)
 
     ImVec4* c = s.Colors;
@@ -139,7 +170,7 @@ void applyTheme(const std::string& requested) {
     c[ImGuiCol_Tab] = c[ImGuiCol_TabDimmed] = v4(p.bg);
     c[ImGuiCol_TabHovered] = v4(p.button);
     c[ImGuiCol_TabSelected] = c[ImGuiCol_TabDimmedSelected] = v4(p.panel);
-    c[ImGuiCol_TabSelectedOverline] = accent;
+    c[ImGuiCol_TabSelectedOverline] = ImVec4(0,0,0,0);
     c[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_DockingPreview] = ImVec4(accent.x, accent.y, accent.z, 0.5f);
     c[ImGuiCol_DockingEmptyBg] = v4(p.bg);

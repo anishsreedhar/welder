@@ -46,14 +46,21 @@ double fromT(double t, double lo, double hi, bool log) {
 
 ImU32 accent() { return kAccent; }
 
-float labelWidth() { return std::round(ImGui::GetFontSize() * 9.0f); }
+static float gLabelWidth = 0;
+static bool gReferenceFields = false;
+bool setReferenceFields(bool enabled) { bool old=gReferenceFields;gReferenceFields=enabled;return old; }
+float setLabelWidth(float width) { float old=gLabelWidth; gLabelWidth=width; return old; }
+float labelWidth() { return gLabelWidth > 0 ? gLabelWidth : std::round(ImGui::GetFontSize() * 9.0f); }
 
 void rowLabel(const char* text, const char* tip) {
     ImGui::AlignTextToFramePadding();
     const float room = labelWidth() - ImGui::GetCursorPosX() - 6;
     const ImVec2 ts = ImGui::CalcTextSize(text);
     ImGui::PushStyleColor(ImGuiCol_Text, theme().muted);
-    if (ts.x <= room) ImGui::TextUnformatted(text);
+    if (ts.x <= room) {
+        ImGui::SetCursorPosX(labelWidth()-6-ts.x);
+        ImGui::TextUnformatted(text);
+    }
     else {  // too long for the column: cut with "...", the whole name on hover
         ImVec2 p = ImGui::GetCursorScreenPos();
         p.y += ImGui::GetCurrentWindow()->DC.CurrLineTextBaseOffset;
@@ -94,14 +101,20 @@ bool takeAltClick() {
 bool valueField(const char* id, double* v, float width, const char* prefix, bool isInt, double speed, double lo, double hi) {
     const double before = *v;
     ImGui::SetNextItemWidth(width);
-    if (theme().medium) ImGui::PushFont(theme().medium, 0.0f);
+    const bool medium = theme().medium && !gReferenceFields;
+    if (medium) ImGui::PushFont(theme().medium, 0.0f);
     ImGui::PushStyleColor(ImGuiCol_Text, theme().value);
     struct Pop {
+        bool medium;
         ~Pop() {
             ImGui::PopStyleColor();
-            if (theme().medium) ImGui::PopFont();
+            if (medium) ImGui::PopFont();
         }
-    } pop;
+    } pop{medium};
+    // Reference panels use left-aligned, compact numbers. Keep ImGui's normal
+    // active text editor and drag behavior; only replace the idle text drawing.
+    const bool idleReference = gReferenceFields && !ImGui::TempInputIsActive(ImGui::GetID(id));
+    if(idleReference)ImGui::PushStyleColor(ImGuiCol_Text,IM_COL32(0,0,0,0));
     bool changed;
     const ImGuiSliderFlags fl = ImGuiSliderFlags_NoRoundToFormat;
     if (isInt) {
@@ -115,18 +128,93 @@ bool valueField(const char* id, double* v, float width, const char* prefix, bool
         const double a = std::fabs(*v);
         const bool whole = a >= 10 && a < 1e7 && *v == std::round(*v);  // 1350, not 1350.00
         const bool twoDp = a < 1e5 && std::fabs(*v * 100 - std::round(*v * 100)) < 1e-7;
-        changed = ImGui::DragScalar(id, ImGuiDataType_Double, v, (float)speed, nullptr, nullptr, whole ? "%.0f" : twoDp ? "%.2f" : "%.4g", fl);
+        changed = ImGui::DragScalar(id, ImGuiDataType_Double, v, (float)speed, nullptr, nullptr, gReferenceFields ? "%.6g" : whole ? "%.0f" : twoDp ? "%.2f" : "%.4g", fl);
+    }
+    if(idleReference)ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered() && !(GImGui->CurrentItemFlags & ImGuiItemFlags_Disabled)) {
+        // Claim the wheel for this field so the Properties bin stays still.
+        ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+        const auto& io=ImGui::GetIO();
+        if(io.MouseWheel!=0 && !io.KeyAlt) {
+            double step=isInt?1.:.1;
+            if(io.KeyShift)step*=.1;
+            if(io.KeyCtrl)step*=10.;
+            if(isInt)step=std::max(1.,step);
+            double next=*v+io.MouseWheel*step;
+            if(isInt){next=std::round(next);if(hi>lo)next=std::clamp(next,lo,hi);}
+            if(std::isfinite(next) && next!=*v){
+                *v=next;changed=true;ImGui::MarkItemEdited(ImGui::GetItemID());
+                // Keep a selected text field in sync instead of restoring its old
+                // editing buffer on the next frame after a wheel adjustment.
+                if(auto* input=ImGui::GetInputTextState(ImGui::GetItemID()))input->ReloadUserBufAndSelectAll();
+            }
+        }
+    }
+    if(gReferenceFields && !ImGui::TempInputIsActive(ImGui::GetID(id))) {
+        char text[48];std::snprintf(text,sizeof text,isInt?"%.0f":"%.6g",*v);
+        const ImVec2 p=ImGui::GetItemRectMin();
+        ImGui::GetWindowDrawList()->AddText(ImVec2(p.x+(prefix&&*prefix?22:4),p.y+ImGui::GetStyle().FramePadding.y),theme().value,text);
     }
     if (altClickItem()) {  // Alt+click: a keyframe, not an edit
         *v = before;
         changed = false;
     }
-    if (prefix && *prefix && !ImGui::IsItemActive()) {
+    if (prefix && *prefix && (gReferenceFields ? !ImGui::TempInputIsActive(ImGui::GetID(id)) : !ImGui::IsItemActive())) {
         ImVec2 a = ImGui::GetItemRectMin();
         ImGui::GetWindowDrawList()->AddText(ImVec2(a.x + ImGui::GetStyle().FramePadding.x + 2, a.y + ImGui::GetStyle().FramePadding.y),
                                             ImGui::GetColorU32(ImGuiCol_TextDisabled), prefix);
     }
     return changed;
+}
+
+// Measured reference rail: 1 px dark / light / dark groove, square-root
+// tick spacing, a five-pixel thumb, and numbers anchored at their tick.
+static void referenceRail(ImVec2 p,float width,float height,double t,
+                          const std::vector<std::pair<double,bool>>& ticks,
+                          const std::vector<std::pair<double,double>>& labels) {
+    ImDrawList* d=ImGui::GetWindowDrawList();
+    const float left=std::floor(p.x),right=left+std::max(1.f,width-6),y=std::floor(p.y)+11;
+    d->AddRectFilled(ImVec2(left,p.y),ImVec2(left+width,p.y+height+3),IM_COL32(50,50,50,255));
+    auto xAt=[&](double position){return std::floor(left+(right-left)*(float)std::clamp(position,0.0,1.0));};
+    for(auto [position,major]:ticks) {
+        const float x=xAt(position);
+        d->AddRectFilled(ImVec2(x,y-(major?8:5)),ImVec2(x+1,y),IM_COL32(33,33,33,255));
+    }
+    for(int row=0;row<3;++row)
+        d->AddRectFilled(ImVec2(left,y+row),ImVec2(right+1,y+row+1),row==1?IM_COL32(75,75,75,255):IM_COL32(0,0,0,255));
+    d->AddRectFilled(ImVec2(left+width-2,y-8),ImVec2(left+width-1,y+12),IM_COL32(33,33,33,255));
+    float lastRight=-1e9f;
+    for(auto [value,position]:labels) {
+        char text[24];std::snprintf(text,sizeof text,"%.3g",std::fabs(value)<1e-9?0:value);
+        const float w=ImGui::GetFont()->CalcTextSizeA(9,FLT_MAX,0,text).x;
+        const float x=std::min(xAt(position),left+width-w);
+        if(x>=lastRight+2){d->AddText(ImGui::GetFont(),9,ImVec2(x,y+3),IM_COL32(0,0,0,255),text);lastRight=x+w;}
+    }
+    const float x=xAt(t);
+    d->AddRectFilled(ImVec2(x-2,y-5),ImVec2(x+3,y+5),IM_COL32(25,25,25,255));
+    d->AddRectFilled(ImVec2(x-1,y-4),ImVec2(x+2,y+4),IM_COL32(98,82,39,255));
+}
+
+static double signedRoot(double value) {return std::copysign(std::sqrt(std::fabs(value)),value);}
+
+static void gradingRail(ImVec2 p,float width,float height,double value,bool zero,bool gamma,double maximum) {
+    auto position=[&](double v){return zero?.5+.5*signedRoot(v):gamma?std::log(std::max(v,.2)/.2)/std::log(25.0):std::sqrt(std::max(0.0,v)/maximum);};
+    std::vector<std::pair<double,bool>> ticks;
+    std::vector<std::pair<double,double>> labels;
+    if(zero) {
+        for(double sign:{-1.,1.}) {
+            for(double v:{.001,.01,.02,.04,.06,.08,.1,.2,.3,.4,.5,.6,.7,.8,.9,1.})ticks.emplace_back(position(sign*v),v==.01||v==.1||v==1.);
+        }
+        ticks.emplace_back(.5,true);
+        for(double v:{-1.,-.7,-.4,-.1,0.,.1,.4,.7,1.})labels.emplace_back(v,position(v));
+    } else if(gamma) {
+        for(double v:{.2,.3,.4,.5,.6,.7,.8,.9,1.,1.2,1.4,1.6,1.8,2.,2.5,3.,3.5,4.,4.5,5.})ticks.emplace_back(position(v),v==.2||v==.5||v==1.||v==2.||v==5.);
+        for(double v:{.2,.3,.5,.7,1.,2.,3.,4.,5.})labels.emplace_back(v,position(v));
+    } else {
+        for(double v:{0.,.001,.01,.02,.04,.06,.08,.1,.2,.3,.4,.5,.6,.7,.8,.9,1.,1.2,1.4,1.6,1.8,2.,2.2,2.4,2.6,2.8,3.,3.2,3.4,3.6,3.8,4.})if(v<=maximum)ticks.emplace_back(position(v),v==0||v==.01||v==.1||v==1||v==maximum);
+        for(double v:{0.,.1,.4,.7,1.,2.,3.,4.})if(v<=maximum)labels.emplace_back(v,position(v));
+    }
+    referenceRail(p,width,height,position(value),ticks,labels);
 }
 
 bool tickSlider(const char* id, double* v, double lo, double hi, float width, bool log, bool isInt) {
@@ -136,7 +224,7 @@ bool tickSlider(const char* id, double* v, double lo, double hi, float width, bo
     altClickItem();  // Alt+click: a keyframe, the value stays
     const bool hot = ImGui::IsItemHovered(), active = ImGui::IsItemActive() && !ImGui::GetIO().KeyAlt;
     const float hw = std::round(h * 0.42f);   // handle width
-    const float x0 = p.x + hw * 0.5f + 2, x1 = p.x + width - hw * 0.5f - 2;
+    const float x0 = gReferenceFields?p.x:p.x + hw * 0.5f + 2, x1 = gReferenceFields?p.x+width-6:p.x + width - hw * 0.5f - 2;
     bool changed = false;
     if (active && x1 > x0) {
         double t = (ImGui::GetIO().MousePos.x - x0) / (x1 - x0);
@@ -148,6 +236,29 @@ bool tickSlider(const char* id, double* v, double lo, double hi, float width, bo
         }
     }
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    if(gReferenceFields && lo==0 && hi==1) {
+        std::vector<std::pair<double,bool>> ticks;std::vector<std::pair<double,double>> labels;
+        for(int i=0;i<=50;++i)ticks.emplace_back(i/50.,i%5==0);
+        for(int i=0;i<=10;++i)labels.emplace_back(i/10.,i/10.);
+        referenceRail(p,width,h,*v,ticks,labels);
+        if(active)ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        return changed;
+    }
+    if(gReferenceFields) {
+        std::vector<std::pair<double,bool>> ticks;std::vector<std::pair<double,double>> labels;
+        for(int i=0;i<=60;++i)ticks.emplace_back(i/60.,i%10==0);
+        if(log && lo>0) {
+            ticks.clear();
+            for(double v=.1;v<=10.001;v+=v<1?.02:.2)ticks.emplace_back(toT(v,lo,hi,log),false);
+            for(double v:{.1,.2,.3,.4,.6,.8,1.,2.,3.,4.,6.,8.,10.})labels.emplace_back(v,toT(v,lo,hi,log));
+        } else {
+            const int divisions=lo==-180?8:10;
+            for(int i=0;i<=divisions;++i){double v=lo+(hi-lo)*i/divisions;labels.emplace_back(v,toT(v,lo,hi,log));}
+        }
+        referenceRail(p,width,h,toT(*v,lo,hi,log),ticks,labels);
+        if(active)ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        return changed;
+    }
     const float ty = std::round(p.y + h * 0.5f);  // track centre
     const float th = std::max(2.0f, std::round(h * 0.09f));  // half the track's thickness
     dl->AddRectFilled(ImVec2(x0 - 2, ty - th), ImVec2(x1 + 2, ty + th), kTrack, th);
@@ -164,6 +275,43 @@ bool tickSlider(const char* id, double* v, double lo, double hi, float width, bo
     return changed;
 }
 
+bool colorCorrectSlider(const char* id,double* value,double neutral,double extent,float width) {
+    const ImVec2 p=ImGui::GetCursorScreenPos();const float h=ImGui::GetFrameHeight();width=std::max(30.f,width);
+    ImGui::InvisibleButton(id,ImVec2(width,h));altClickItem();
+    const bool active=ImGui::IsItemActive()&&!ImGui::GetIO().KeyAlt;
+    const bool zero=neutral==0,gamma=!zero&&extent>3.5;
+    const double maximum=neutral+extent;
+    bool changed=false;
+    if(active) {
+        double t=(ImGui::GetIO().MousePos.x-p.x)/std::max(1.f,width-6);
+        double next=zero?std::copysign(std::pow(2*t-1,2),2*t-1):gamma?(t<0?.2+t*4.8:.2*std::pow(25.,t)):std::copysign(maximum*t*t,t);
+        next=std::clamp(next,neutral-extent,maximum);
+        if(std::fabs(t-.5)*width<2||ImGui::IsMouseDoubleClicked(0))next=neutral;
+        if(next!=*value){*value=next;changed=true;}
+    }
+    gradingRail(p,width,h,*value,zero,gamma,maximum);
+    if(active)ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("%.4g; double-click resets to %.3g",*value,neutral);
+    return changed;
+}
+
+bool gradeSlider(const char* id,double* value,double neutral,bool gamma,float width) {
+    const ImVec2 p=ImGui::GetCursorScreenPos();const float h=ImGui::GetFrameHeight();width=std::max(30.f,width);
+    ImGui::InvisibleButton(id,ImVec2(width,h));altClickItem();
+    const bool active=ImGui::IsItemActive()&&!ImGui::GetIO().KeyAlt;
+    bool changed=false;
+    if(active) {
+        const double t=std::clamp((double)(ImGui::GetIO().MousePos.x-p.x)/std::max(1.f,width-6),0.,1.);
+        double next=neutral==0?std::copysign(std::pow(2*t-1,2),2*t-1):gamma?.2*std::pow(25.,t):4*t*t;
+        if(std::fabs(t-.5)*width<2||ImGui::IsMouseDoubleClicked(0))next=neutral;
+        if(next!=*value){*value=next;changed=true;}
+    }
+    gradingRail(p,width,h,*value,neutral==0,gamma,4);
+    if(active)ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("%.4g; double-click resets to %.3g",*value,neutral);
+    return changed;
+}
+
 bool checkbox(const char* label, bool* v, const char* tip) {
     ImGui::PushID(label);
     const float h = ImGui::GetFrameHeight(), box = std::round(h * 0.78f);
@@ -175,15 +323,17 @@ bool checkbox(const char* label, bool* v, const char* tip) {
     const bool hot = ImGui::IsItemHovered();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 a(p.x, p.y + (h - box) * 0.5f), b(a.x + box, a.y + box);
-    dl->AddRectFilled(a, b, hot ? ImGui::GetColorU32(ImGuiCol_FrameBgHovered) : ImGui::GetColorU32(ImGuiCol_FrameBg), 4);
+    dl->AddRectFilled(a, b, hot ? ImGui::GetColorU32(ImGuiCol_FrameBgHovered) : ImGui::GetColorU32(ImGuiCol_FrameBg), gLabelWidth>0?0:4);
+    if(gLabelWidth>0)dl->AddRect(a,b,IM_COL32(25,25,25,255));
     if (*v) {  // the accent tick
         const float s = box;
         ImVec2 q[3] = {ImVec2(a.x + s * 0.22f, a.y + s * 0.52f), ImVec2(a.x + s * 0.42f, a.y + s * 0.72f),
                        ImVec2(a.x + s * 0.78f, a.y + s * 0.3f)};
-        dl->AddPolyline(q, 3, kAccent, 0, std::max(1.8f, s * 0.13f));
+        if(gLabelWidth>0){const float m=s*.24f;const ImU32 c=ImGui::GetColorU32(ImGuiCol_Text);dl->AddLine(ImVec2(a.x+m,a.y+m),ImVec2(b.x-m,b.y-m),c,1.5f);dl->AddLine(ImVec2(b.x-m,a.y+m),ImVec2(a.x+m,b.y-m),c,1.5f);}
+        else dl->AddPolyline(q, 3, kAccent, 0, std::max(1.8f, s * 0.13f));
     }
     if (end > label) {
-        ImU32 col = *v ? kAccent : ImGui::GetColorU32(ImGuiCol_Text);
+        ImU32 col = *v && gLabelWidth<=0 ? kAccent : ImGui::GetColorU32(ImGuiCol_Text);
         if (ImGui::GetCurrentContext()->CurrentItemFlags & ImGuiItemFlags_Disabled) col = ImGui::GetColorU32(ImGuiCol_TextDisabled);
         dl->AddText(ImVec2(b.x + 6, p.y + ImGui::GetStyle().FramePadding.y), col, label, end);
     }
@@ -232,6 +382,19 @@ bool iconButton(const char* id, Icon icon, bool on, const char* tip) {
             dl->AddLine(tip, top, col, t * 1.6f);
             dl->AddCircleFilled(ImVec2(c.x + s * 0.48f, c.y - s * 0.48f), s * 0.3f, col, 12);
             dl->AddLine(ImVec2(c.x + s * 0.05f, c.y - s * 0.6f), ImVec2(c.x + s * 0.6f, c.y - s * 0.05f), col, t * 1.4f);
+            break;
+        }
+        case Icon::ColorWheel: {
+            const float radius = s * 0.62f;
+            if (hot || on) dl->AddCircle(c, radius + t * 1.5f, col, 24, t);
+            constexpr int segments = 12;
+            constexpr float turn = 6.2831853f;
+            for (int i = 0; i < segments; ++i) {
+                float r, g, b;
+                ImGui::ColorConvertHSVtoRGB(static_cast<float>(i) / segments, 0.85f, 1.0f, r, g, b);
+                dl->PathArcTo(c, radius, turn * i / segments, turn * (i + 1) / segments, 3);
+                dl->PathStroke(ImGui::GetColorU32(ImVec4(r, g, b, 1.0f)), 0, t * 1.5f);
+            }
             break;
         }
         case Icon::Crosshair:

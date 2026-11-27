@@ -559,6 +559,28 @@ int main(int argc, char** argv) {
         CHECK_NEAR(px(img, 0, 0, "A"), 1.0, 1e-6);  // default channels = rgb
     });
 
+    test("Grade and ColorCorrect unpremult use the source mask after reconnecting", [] {
+        for (const char* type : {"Grade", "ColorCorrect"}) {
+            auto c = comp(json::array({
+                {{"name", "Source"}, {"type", "Constant"}, {"params", {{"color", {0.2, 0.2, 0.2, 1}}}}},
+                {{"name", "SourceMask"}, {"type", "Constant"}, {"params", {{"color", {0, 0, 0, 0.4}}}}},
+                {{"name", "EffectMask"}, {"type", "Constant"}, {"params", {{"color", {0, 0, 0, 0.25}}}}},
+                {{"name", "WithMask"}, {"type", "Grade"}, {"inputs", {"Source", "SourceMask"}},
+                 {"params", {{"inject", true}}}},
+                {{"name", "Correction"}, {"type", type}, {"inputs", {"WithMask", "EffectMask"}},
+                 {"params", {{"inject", true}, {"unpremult", "mask.a"}, {"offset", 0.4}}}},
+            }), 8, 8);
+            auto masked = render(*c, "Correction");
+            CHECK_NEAR(px(masked, 0, 0, "R"), 0.24, 1e-6);  // 0.2 + offset * source alpha * effect mask
+            CHECK_NEAR(px(masked, 0, 0, "mask.a"), 0.25, 1e-6);
+
+            CHECK(c->setInput(c->find("Correction"), 0, c->find("Source")));
+            auto reconnected = render(*c, "Correction");
+            CHECK_NEAR(px(reconnected, 0, 0, "R"), 0.30, 1e-6);  // missing source channel: just the effect mask
+            CHECK_NEAR(px(reconnected, 0, 0, "mask.a"), 0.25, 1e-6);
+        }
+    });
+
     test("integer translate is exact and moves the bbox", [] {
         auto c = comp(json::array({
             {{"name", "P"}, {"type", "TestPattern"}},
@@ -1601,6 +1623,137 @@ int main(int argc, char** argv) {
 
         setCacheRoot("");
         ml::setHome("");
+    });
+
+    test("Grade controls: luminance mix, unpremult and injected mask", [] {
+        auto c=comp(json::array({
+            {{"name","S"},{"type","Constant"},{"params",{{"color",{.12,.3,.5,.5}}}}},
+            {{"name","Mask"},{"type","Constant"},{"params",{{"color",{.2,.4,.6,.8}}}}},
+            {{"name","G"},{"type","Grade"},{"inputs",{"S"}},{"params",{{"gain",{1.7,.8,.6,1}},{"black_clamp",false},{"mix_luminance",.75}}}},
+            {{"name","C"},{"type","ColorCorrect"},{"inputs",{"S"}},{"params",{{"gain",{1.7,.8,.6,1}},{"mix_luminance",.75}}}},
+            {{"name","GU"},{"type","Grade"},{"inputs",{"S"}},{"params",{{"gain",{1.7,.8,.6,1}},{"black_clamp",false},{"mix_luminance",.75},{"unpremult","A"}}}},
+            {{"name","CU"},{"type","ColorCorrect"},{"inputs",{"S"}},{"params",{{"gain",{1.7,.8,.6,1}},{"mix_luminance",.75},{"unpremult","A"}}}},
+            {{"name","Off"},{"type","Grade"},{"inputs",{"S"}},{"params",{{"gain",2},{"mix_luminance",1},{"enable_mix_luminance",false}}}},
+            {{"name","Injected"},{"type","Grade"},{"inputs",{"S","Mask"}},{"params",{{"gain",2},{"mask_channel","G"},{"inject",true}}}}
+        }));
+        for(auto route:{gpu::RouteMode::Cpu,gpu::RouteMode::Gpu}){
+            gpu::setRoute(route);
+            auto g=render(*c,"G"),cc=render(*c,"C"),gu=render(*c,"GU"),cu=render(*c,"CU");
+            for(const char* ch:{"R","G","B","A"}){CHECK_NEAR(px(g,3,3,ch),px(cc,3,3,ch),1e-5);CHECK_NEAR(px(gu,3,3,ch),px(cu,3,3,ch),1e-5);}
+            CHECK_NEAR(px(render(*c,"Off"),3,3,"R"),.24,1e-5);
+            auto mask=render(*c,"Injected");CHECK(mask->ch("mask.a")>=0);CHECK_NEAR(px(mask,3,3,"mask.a"),.4,1e-5);CHECK_NEAR(px(mask,3,3,"R"),.168,1e-5);
+        }
+        gpu::setRoute(gpu::RouteMode::Auto);
+    });
+
+    test("Merge: an explicit none alpha matches the disabled alpha checkbox on either input", [] {
+        for (bool sourceOnA : {true, false}) {
+            const std::string knob = sourceOnA ? "Achannels" : "Bchannels";
+            const json inputs = sourceOnA ? json{"Clear", "Plate"} : json{"Plate", "Clear"};
+            auto c = comp(json::array({
+                {{"name", "Clear"}, {"type", "Constant"}, {"params", {{"color", {0, 0, 0, 0}}}}},
+                {{"name", "Plate"}, {"type", "Constant"}, {"params", {{"color", {0.2, 0.3, 0.4, 0.25}}}}},
+                {{"name", "None"}, {"type", "Merge"}, {"inputs", inputs},
+                 {"params", {{"operation", "plus"}, {knob + "_alpha", "none"}}}},
+                {{"name", "Off"}, {"type", "Merge"}, {"inputs", inputs},
+                 {"params", {{"operation", "plus"}, {knob + "_off", {"A"}}}}},
+            }), 8, 8);
+            for (const char* name : {"None", "Off"}) {
+                auto image = render(*c, name);
+                CHECK_NEAR(px(image, 3, 3, "R"), 0.2, 1e-6);
+                CHECK_NEAR(px(image, 3, 3, "A"), 0.0, 1e-6);
+            }
+        }
+    });
+
+    test("Merge: RGB none preserves the selected matte just like disabled RGB boxes", [] {
+        auto c = comp(json::array({
+            {{"name","S"},{"type","Constant"},{"params",{{"color",{.1,.2,.3,.75}}}}},
+            {{"name","Other"},{"type","Constant"},{"params",{{"color",{.4,.5,.6,.25}}}}},
+            {{"name","Beauty"},{"type","Copy"},{"inputs",{"S","Other"}},
+             {"params",{{"from",{"R","G","B","A"}},{"to",{"beauty.R","beauty.G","beauty.B","beauty.A"}}}}},
+            {{"name","Clear"},{"type","Constant"},{"params",{{"color",{0,0,0,0}}}}},
+            {{"name","NoneA"},{"type","Merge"},{"inputs",{"Clear","Beauty"}},
+             {"params",{{"Achannels","none"},{"Achannels_alpha","A"}}}},
+            {{"name","OffA"},{"type","Merge"},{"inputs",{"Clear","Beauty"}},
+             {"params",{{"Achannels","beauty"},{"Achannels_alpha","A"},{"Achannels_off",{"R","G","B"}}}}},
+            {{"name","NoneB"},{"type","Merge"},{"inputs",{"Beauty","Clear"}},
+             {"params",{{"Bchannels","none"},{"Bchannels_alpha","A"}}}},
+            {{"name","OffB"},{"type","Merge"},{"inputs",{"Beauty","Clear"}},
+             {"params",{{"Bchannels","beauty"},{"Bchannels_alpha","A"},{"Bchannels_off",{"R","G","B"}}}}}
+        }), 8, 8);
+        for (auto route : {gpu::RouteMode::Cpu, gpu::RouteMode::Gpu}) {
+            gpu::setRoute(route);
+            for (const char* name : {"NoneA","OffA","NoneB","OffB"}) {
+                auto image = render(*c, name);
+                CHECK_NEAR(px(image,3,3,"A"), .75, 1e-6);
+                for (const char* channel : {"R","G","B"}) CHECK_NEAR(px(image,3,3,channel), 0, 1e-6);
+            }
+        }
+        gpu::setRoute(gpu::RouteMode::Auto);
+    });
+
+    test("Merge: .nk custom alpha slots declare their matte layers", [] {
+        const auto text = nk::exportNodes(json::array({
+            {{"name","M"},{"type","Merge"},{"params",{
+                {"Achannels_alpha","matte.A"},{"Bchannels_alpha","other.A"},
+                {"Achannels_off",{"G"}},{"Bchannels_off",{"A"}}}}}
+        })).text;
+        CHECK(text.find("add_layer {matte matte.alpha}\n") != std::string::npos);
+        CHECK(text.find("add_layer {other other.alpha}\n") != std::string::npos);
+        CHECK(text.find("add_layer {matte") < text.find("Merge2 {"));
+        CHECK(text.find(" Achannels {rgba.red -rgba.green rgba.blue matte.alpha}\n") != std::string::npos);
+        CHECK(text.find(" Bchannels {rgba.red rgba.green rgba.blue -other.alpha}\n") != std::string::npos);
+    });
+
+    test("Mask injection: Grade and ColorCorrect handle present and missing channels on CPU", [] {
+        gpu::setRoute(gpu::RouteMode::Cpu);
+        for (const char* type : {"Grade", "ColorCorrect"}) {
+            auto c = comp(json::array({
+                {{"name","S"},{"type","Constant"},{"params",{{"color",{.12,.3,.5,.5}}}}},
+                {{"name","Mask"},{"type","Constant"},{"params",{{"color",{.2,.4,.6,.8}}}}},
+                {{"name","Present"},{"type","Copy"},{"inputs",{"Mask","Mask"}},
+                 {"params",{{"from",{"G"}},{"to",{"mask.a"}}}}},
+                // An existing source mask.a must be overwritten with black when
+                // the selected channel is absent from the connected mask footage.
+                {{"name","Source"},{"type","Copy"},{"inputs",{"S","Mask"}},
+                 {"params",{{"from",{"A"}},{"to",{"mask.a"}}}}},
+                {{"name","WithMask"},{"type",type},{"inputs",{"Source","Present"}},
+                 {"params",{{"gain",2},{"mask_channel","mask.a"},{"inject",true}}}},
+                {{"name","Missing"},{"type",type},{"inputs",{"Source","Mask"}},
+                 {"params",{{"gain",2},{"mask_channel","mask.a"},{"inject",true}}}}
+            }));
+            CHECK(render(*c,"Present")->ch("mask.a") >= 0);
+            CHECK(render(*c,"Mask")->ch("mask.a") < 0);
+            for (const char* name : {"WithMask", "Missing"}) {
+                auto image = render(*c, name, 1, 8);
+                CHECK(image->ch("mask.a") >= 0);
+                const bool present = std::string(name) == "WithMask";
+                for (auto [x,y] : {std::pair{0,0}, std::pair{7,7}, std::pair{15,15}}) {
+                    CHECK_NEAR(px(image,x,y,"mask.a"), present ? .4 : 0, 1e-6);
+                    CHECK_NEAR(px(image,x,y,"R"), present ? .168 : .12, 1e-6);
+                    CHECK_NEAR(px(image,x,y,"A"), .5, 1e-6);
+                }
+            }
+        }
+        gpu::setRoute(gpu::RouteMode::Auto);
+    });
+
+    test("Merge controls: independent alpha inputs, output routing and extra channel mix", [] {
+        auto c=comp(json::array({
+            {{"name","B"},{"type","Constant"},{"params",{{"color",{.2,.4,.6,.8}}}}},
+            {{"name","A"},{"type","Constant"},{"params",{{"color",{.1,.3,.5,.7}}}}},
+            {{"name","M"},{"type","Merge"},{"inputs",{"B","A"}},{"params",{{"operation","over"},{"Achannels_alpha","R"},{"Bchannels_alpha","G"}}}},
+            {{"name","Out"},{"type","Merge"},{"inputs",{"B","A"}},{"params",{{"operation","over"},{"Achannels_alpha","R"},{"Bchannels_alpha","G"},{"channels_alpha","custom.alpha"}}}},
+            {{"name","Extra"},{"type","Merge"},{"inputs",{"B","A"}},{"params",{{"operation","plus"},{"channels","none"},{"also_merge_alpha","R"},{"mix",.5}}}}
+        }));
+        for(auto mode:{gpu::RouteMode::Cpu,gpu::RouteMode::Gpu}) {
+            gpu::setRoute(mode);
+            auto m=render(*c,"M");CHECK_NEAR(px(m,3,3,"R"),.1+.2*.9,1e-5);CHECK_NEAR(px(m,3,3,"A"),.1+.4*.9,1e-5);
+            auto out=render(*c,"Out");CHECK(out->ch("custom.alpha")>=0);CHECK_NEAR(px(out,3,3,"custom.alpha"),.46,1e-5);CHECK_NEAR(px(out,3,3,"A"),.8,1e-5);
+            CHECK_NEAR(px(render(*c,"Extra"),3,3,"R"),.25,1e-5);
+        }
+        gpu::setRoute(gpu::RouteMode::Auto);
     });
 
     test("Merge: channel boxes off, Video colorspace, inject, fringe, range from; their .nk knobs", [] {
