@@ -486,7 +486,6 @@ void drawMenuBar(App& app, UiState& ui) {
         ImGui::MenuItem("Matte Overlay", "M", &ui.viewer.matte);
         ImGui::Separator();
         if (ImGui::MenuItem("Fit", "F")) ui.viewer.fitPending = true;
-        ImGui::MenuItem("Overlays", "Q", &ui.viewer.overlays);
         bool paused = app.viewPaused;
         if (ImGui::MenuItem("Pause", "P", paused)) {
             app.viewPaused = !paused;

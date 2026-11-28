@@ -416,7 +416,6 @@ void viewerDisplayOptions(ViewerState& v) {
     ImGui::Checkbox("Crop to format", &v.cropFormat);
     ImGui::Checkbox("Transparency checkerboard", &v.checkerboard);
     ImGui::Checkbox("Clipping warning", &v.clippingWarning);
-    ImGui::Checkbox("Tool overlays (Q)", &v.overlays);
     if (ImGui::Checkbox("Correct pixel aspect ratio", &v.correctPixelAspect)) v.fitPending = true;
     ImGui::Combo("Guides", &v.guides, "None\0Title safe\0Action safe\0Center\0Format\0");
     ImGui::Combo("Mask", &v.maskMode, "None\0Lines\0Half\0Full\0");
@@ -658,7 +657,9 @@ static bool viewerToolIcon(const char* id, int shape, bool on, const char* tip) 
     else if (shape == 7) { d->AddRectFilled(pt(5,4),pt(8,16),c); d->AddRectFilled(pt(12,4),pt(15,16),c); }
     else if (shape == 8) { line(5,6,10,11); line(10,11,15,6); line(5,11,10,16); line(10,16,15,11); }
     else if(shape==9) { line(6,3,16,8); line(8,5,6,11); line(14,8,11,13); line(6,11,11,13); line(9,12,4,18); }
-    else { for(int i=3;i<17;i+=4){line(i,4,i+2,4);line(i,16,i+2,16);line(3,i,3,i+2);line(17,i,17,i+2);} }
+    else if (shape == 10) { for(int i=3;i<17;i+=4){line(i,4,i+2,4);line(i,16,i+2,16);line(3,i,3,i+2);line(17,i,17,i+2);} }
+    else if (shape == 11) { d->AddEllipse(pt(10,10), ImVec2(7,5), c, 0, 18, 1.3f); }
+    else { d->AddEllipse(pt(10,8), ImVec2(6,4), c, 0.22f, 16, 1.3f); line(7,12,5,16); line(5,16,9,17); }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tip);
     ImGui::PopID();
     return clicked;
@@ -730,7 +731,8 @@ static void drawReferenceToolbar(App& app, UiState& ui, ViewerState& v, Node* vn
     ImGui::PushStyleColor(ImGuiCol_FrameBg,IM_COL32(43,43,43,255));
     ImGui::PushStyleColor(ImGuiCol_Button,IM_COL32(49,49,49,255));
     ImGui::PushStyleColor(ImGuiCol_Border,IM_COL32(25,25,25,255));
-    const float width=std::max(1120.f,ImGui::GetContentRegionAvail().x);
+    const float visibleWidth = ImGui::GetContentRegionAvail().x;
+    const float width = std::max(1120.f, visibleWidth);
     ImGui::SetNextWindowContentSize(ImVec2(width,47));
     ImGui::BeginChild("##viewerTop",ImVec2(0,ImGui::GetContentRegionAvail().x<1120?65:47),ImGuiChildFlags_None,ImGuiWindowFlags_HorizontalScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::SetNextItemWidth(64);
@@ -788,12 +790,22 @@ static void drawReferenceToolbar(App& app, UiState& ui, ViewerState& v, Node* vn
     if(ImGui::BeginCombo("##res",r)){for(int i:{1,2,4,8,16,32}){char b[12];std::snprintf(b,sizeof b,"1:%d",i);if(ImGui::Selectable(b,v.resolutionDivisor==i)){v.resolutionDivisor=i;v.proxy=i>1;v.reqScale=0;}}ImGui::EndCombo();}
     ImGui::SameLine();if(viewerToolIcon("settings",8,v.openSettings,"Viewer tools and display settings"))v.openSettings=true;
     ImGui::SetCursorPos(ImVec2(2,24));
-    const float rulerWidth=(width-125)/3;
+    const float secondRowWidth = std::max(345.0f, visibleWidth);
+    const float rulerWidth=(secondRowWidth-125)/3;
     float gain=std::pow(2.f,v.fstop);viewerRuler("f/8",gain,rulerWidth,0);v.fstop=std::log2(gain);
     ImGui::SameLine(rulerWidth+2);viewerRuler("\xCE\xB3",v.gamma,rulerWidth,1);
     ImGui::SameLine(rulerWidth*2+2);viewerRuler("S",v.saturation,rulerWidth,2);
-    ImGui::SameLine(width-118);
-    if(viewerToolIcon("overlays",10,v.overlays,"Toggle Viewer overlays (Q)"))v.overlays=!v.overlays;
+    ImGui::SameLine(secondRowWidth-118);
+    static constexpr const char* selectionLabels[] = {"Rectangle Selection", "Ellipse Selection", "Lasso Selection"};
+    const int selection = static_cast<int>(v.selectionShape);
+    if (viewerToolIcon("selection", 10 + selection, true, selectionLabels[selection]))
+        ImGui::OpenPopup("##selectionTools");
+    if (ImGui::BeginPopup("##selectionTools")) {
+        for (int shape = 0; shape < 3; ++shape)
+            if (ImGui::MenuItem(selectionLabels[shape], nullptr, shape == selection))
+                v.selectionShape = static_cast<ViewerState::SelectionShape>(shape);
+        ImGui::EndPopup();
+    }
     ImGui::SameLine();ImGui::SetNextItemWidth(54);
     if(ImGui::BeginCombo("##dimension","2D")){if(ImGui::Selectable("2D",true)){}if(ImGui::Selectable("3D")&&active){ui.v3d.on=true;ui.v3d.force2D=false;}ImGui::EndCombo();}
     ImGui::SameLine();
@@ -1377,12 +1389,12 @@ static bool drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
             ImVec2 g0 = toScreen(off.x, res.format.height + off.y), g1 = toScreen(off.x + res.format.width, off.y);
             if (v.overlays && v.showFormat) dl->AddRect(g0, g1, IM_COL32(90, 170, 255, 160));
         } else if (v.compare == "wipe" && res.imageB && res.format.width > 0) {
-            if (!roiTool && !sampleTool) wipeHandles(app, vn, v, dl, viewXf(), nodeA, nodeB);
+            if (v.overlays && !roiTool && !sampleTool) wipeHandles(app, vn, v, dl, viewXf(), nodeA, nodeB);
         } else if (v.compare != "off" && res.imageB) {
             const std::string t = "A " + v.compare + " B";
             dl->AddText(ImVec2(p0.x + 10, p0.y + 8), IM_COL32(255, 255, 255, 170), t.c_str());
         }
-        if (v.safeZone) {
+        if (v.overlays && v.safeZone) {
             for (float inset : {.05f, .10f})
                 dl->AddRect(toScreen(res.format.width * inset, res.format.height * (1 - inset)),
                             toScreen(res.format.width * (1 - inset), res.format.height * inset), IM_COL32(220, 220, 160, 180));
@@ -1414,9 +1426,13 @@ static bool drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
         drawViewerGuides(dl, v, viewXf());
         }
     } else {
-        if(nodeA.empty()) {
-            const auto& f=app.comp->format;
-            dl->AddRect(toScreen(0,f.height),toScreen(f.width,0),IM_COL32(90,90,90,255));
+        if (v.overlays && v.showFormat && nodeA.empty()) {
+            const auto& f = app.comp->format;
+            const ImVec2 lowerRight = toScreen(f.width, 0);
+            const ImU32 color = IM_COL32(150, 150, 150, 200);
+            dl->AddRect(toScreen(0, f.height), lowerRight, color);
+            const std::string label = std::to_string(f.width) + "x" + std::to_string(f.height);
+            dl->AddText(ImVec2(lowerRight.x - ImGui::CalcTextSize(label.c_str()).x, lowerRight.y + 3), color, label.c_str());
         }
 
     }
@@ -1529,14 +1545,6 @@ static bool drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
         dl->AddText(ImVec2(p0.x + 10, p1.y - 22), IM_COL32(255, 210, 120, 255), hint);
     }
 
-    // Q hid the overlays, and with them the viewer tools: a click in the viewer while a tool node's
-    // panel is showing (Roto, Tracker, Transform, any node with handles) brings them back, and the
-    // click goes on to the tool (it was a roto that "wouldn't draw", a handle that wasn't there).
-    if (active && !v.overlays && toolsHovered && v.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::GetIO().KeyAlt)
-        if (Node* tn = activeToolNode(app)) {
-            v.overlays = true;
-            app.message("viewer overlays back on for " + tn->name + " (Q hides them)");
-        }
     // Roto shapes and tools (when a Roto node's properties are open): in the active viewer.
     if (!active) {
     } else if (v.overlays) {
@@ -1582,10 +1590,11 @@ static bool drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
         const ViewXf xf = viewXf();
         drawCamTrackerViewer(app, ui, dl, p0, p1, xf, toolsHovered);
     }
-    if (!v.overlays) {  // Q hid the shapes and handles: say so, so a tool that ignores clicks isn't a mystery
-        const char* t = "overlays off [Q]";
-        ImVec2 ts = ImGui::CalcTextSize(t);
-        dl->AddText(ImVec2(p1.x - ts.x - 10, p1.y - ts.y - 8), IM_COL32(200, 200, 200, 150), t);
+    if (ImGui::GetTime() < v.overlayNoticeUntil) {
+        const char* notice = v.overlays ? "overlay on" : "overlay off";
+        const ImVec2 textSize = ImGui::CalcTextSize(notice);
+        dl->AddText(ImVec2(std::max(p0.x + 8, p1.x - textSize.x - 8), p0.y + 6),
+                    IM_COL32(250, 75, 65, 255), notice);
     }
     if (!res.error.empty()) {
         std::string e = "ERROR: " + res.error;
