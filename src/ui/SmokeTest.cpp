@@ -465,6 +465,34 @@ int tick(App& app, UiState& ui, float lastFrameMs) {
                 if (exists(app.autosavePath(app.compPath))) fail("discarding didn't remove the autosave");
                 else std::printf("SMOKE autosave: discarded\n");
                 app.autosaveSecs = 0;
+                // Real App::save regression: saving to the current recovery filename
+                // must not delete the destination during obsolete-autosave cleanup.
+                const auto destination = app.autosavePath(app.compPath);
+                const auto expected = app.comp->toJson();
+                std::string saveError;
+                if (!app.save(destination, &saveError)) fail("Save As to autosave path failed: " + saveError);
+                else if (!exists(destination)) fail("Save As cleanup deleted its destination");
+                else {
+                    std::ifstream saved(destination);
+                    if (json::parse(saved) != expected) fail("Save As to autosave path lost comp contents");
+                    else std::printf("SMOKE Save As: autosave destination preserved with current comp contents\n");
+                    saved.close();
+                    // Reusing this name as the other comp's recovery template must
+                    // preserve the manually saved source through Save As and reopen.
+                    const auto originalPreferences = app.preferences;
+                    app.preferences["autosave_filename"] = destination;
+                    if (!app.save(s.savedPath, &saveError) || !exists(destination))
+                        fail("Save As removed the manually saved source");
+                    else if (!app.open(s.savedPath, &saveError) || !exists(destination) || !app.recovery.autosave.empty())
+                        fail("reopening removed or offered an artist comp as a recovery");
+                    else {
+                        std::ifstream original(destination);
+                        if (json::parse(original) != expected) fail("Save As changed the original comp");
+                    }
+                    app.preferences = originalPreferences;
+                    std::error_code cleanupError;
+                    fs::remove(destination, cleanupError);
+                }
                 app.dirty = false;
                 s.phase = State::Done;
             } else if (now - s.stepT0 > 15) {

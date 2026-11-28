@@ -1,5 +1,6 @@
 #include <map>
 #include "Comp.h"
+#include "NetPath.h"
 
 #include <algorithm>
 #include <cctype>
@@ -131,6 +132,9 @@ std::unique_ptr<Comp> Comp::fromJson(const json& j, const std::filesystem::path&
         n->name = name;
         n->comp = c.get();
         if (jn.contains("params")) n->params.data = jn["params"];
+        // Missing response identifies a saved Keyer from before the Nuke-style controls.
+        // Persist it explicitly so copying/duplicating cannot silently upgrade its matte.
+        if (type == "Keyer" && !n->params.has("response")) n->params.data["response"] = "legacy";
         if (wasDeepWrite) {
             if (!n->params.data.is_object()) n->params.data = json::object();
             n->params.data["deep"] = true;
@@ -267,6 +271,7 @@ Node* Comp::addNode(const std::string& type0, const std::string& baseName, const
     n->name = uniqueName(baseName.empty() ? type + "1" : baseName);
     n->comp = this;
     n->params.data = params.is_object() ? params : json::object();
+    if (type == "Keyer" && !n->params.has("response")) n->params.data["response"] = "nuke";
     if (wasDeepWrite) {
         n->params.data["deep"] = true;
         n->params.data["file_type"] = "exr";
@@ -383,6 +388,9 @@ bool Comp::rename(Node* n, const std::string& newName) {
     if (old == newName) return true;
     for (auto& o : nodes) {
         if (o->group == old) o->group = newName;  // a group's members follow it
+        if (o->type == "Keyer")
+            for (const char* link : {"input_link", "output_link"})
+                if (o->params.str(link) == old) o->params.data[link] = newName;
         if (o->params.data.dump().find("\"expr\"") != std::string::npos) renameReferences(o->params.data, {{old, newName}});
     }
     return true;
@@ -429,16 +437,20 @@ std::string absolutePath(const std::string& p) {
     return ec ? p : a.string();
 }
 
-std::string Comp::resolvePath(const std::string& p) const {
-    if (p.empty() || isAbsolutePath(p)) return p;
-    std::filesystem::path fp(p);
-    std::filesystem::path base = baseDir;
-    if (!project.projectDir.empty()) {
-        std::filesystem::path pd(project.projectDir);
-        base = isAbsolutePath(project.projectDir) || baseDir.empty() ? pd : baseDir / pd;
-    }
-    if (base.empty()) return p;
-    return (base / fp).string();
+std::filesystem::path Comp::projectBaseDir() const {
+    const auto& dir = project.projectDir;
+    if (dir.empty()) return baseDir;
+    // Keep a foreign POSIX root intact on Windows until its full path can be mapped.
+    if (dir.front() == '/' || isAbsolutePath(dir)) return dir;
+    return baseDir / dir;
+}
+
+std::string Comp::resolvePath(const std::string& original) const {
+    const std::string mapped = netpath::substitute(original);
+    if (mapped.empty() || isAbsolutePath(mapped)) return mapped;
+    const auto base = projectBaseDir();
+    if (base.empty()) return mapped;
+    return netpath::substitute((base / mapped).string());
 }
 
 std::string Comp::defaultWriteFile() const {

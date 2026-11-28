@@ -227,7 +227,7 @@ void drawTransformViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec
     const double ar = rot * M_PI / 180;
     const ImVec2 c = xf.toScreen(cx + tx, cy + ty);
     gTestXformCentre = c;  // tests (STRATA_TEST_VIEWERCLICK): where the centre handle is
-    const float R = (float)std::clamp(26.0 * std::sqrt(std::fabs(sx * sy)), 12.0, 200.0);
+    const float R = (float)std::clamp(26.0 * app.preferences.value("handle_transform_size",1.0) * std::sqrt(std::fabs(sx * sy)), 12.0, 200.0);
     // screen directions of the rotated x / y axes (screen y is down)
     const ImVec2 ux((float)std::cos(ar), -(float)std::sin(ar)), uy(-(float)std::sin(ar), -(float)std::cos(ar));
     const ImVec2 arm(c.x + ux.x * R * 3.0f, c.y + ux.y * R * 3.0f);
@@ -247,7 +247,7 @@ void drawTransformViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec
             if (t > 0.7 && t < 1.05 && d(q) < 5) hot = Transform2DState::Drag::Rotate;
         }
     }
-    const ImU32 normalJack=IM_COL32(185,185,185,255);
+    const ImU32 normalJack=preferenceColor("handle_2d_fg",IM_COL32(185,185,185,255));
     auto colFor = [&](Transform2DState::Drag k) { return (hot == k || (dragging() && st.drag == k)) ? kHot : normalJack; };
     dl->AddCircle(c,R,colFor(Transform2DState::Drag::Scale),64,1.f);
     dl->AddLine(ImVec2(c.x-ux.x*R*1.65f,c.y-ux.y*R*1.65f),arm,colFor(Transform2DState::Drag::Rotate),1.f);

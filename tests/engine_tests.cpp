@@ -3709,6 +3709,29 @@ int main(int argc, char** argv) {
         CHECK_NEAR(px(img, 8, 8, "R"), 0.25, 1e-5);
     });
 
+    test("Keyer: saved responses stay legacy while new nodes retain the Nuke response after reopening", [] {
+        auto c = comp(json::array({
+            {{"name", "P"}, {"type", "Constant"}, {"params", {{"color", {2., 0., 0., 1.}}}}},
+            {{"name", "Old"}, {"type", "Keyer"}, {"inputs", {"P"}}, {"params", {{"operation", "red keyer"}}}},
+        }), 4, 4);
+        auto* fresh = c->addNode("Keyer", "New", {{"operation", "red keyer"}});
+        fresh->inputs = {c->find("P")};
+        CHECK(c->find("Old")->params.str("response") == "legacy");
+        CHECK(fresh->params.str("response") == "nuke");
+        for (int reload = 0; reload < 2; ++reload) {
+            CHECK_NEAR(px(render(*c, "Old"), 1, 1, "A"), 0., 1e-6);
+            CHECK_NEAR(px(render(*c, "New"), 1, 1, "A"), 1., 1e-6);
+            c->find("P")->params.data["color"] = {0.25, 0., 0., 1.};
+            c->find("P")->paramsChanged();
+            CHECK_NEAR(px(render(*c, "Old"), 1, 1, "A"), 0.15625, 1e-6);
+            CHECK_NEAR(px(render(*c, "New"), 1, 1, "A"), 0.25, 1e-6);
+            c->find("P")->params.data["color"] = {2., 0., 0., 1.};
+            c = Comp::fromJson(c->toJson(), {});
+        }
+        auto* clone = c->addNode("Keyer", "Clone", c->find("Old")->params.data);
+        clone->inputs = {c->find("P")};
+        CHECK_NEAR(px(render(*c, "Clone"), 1, 1, "A"), 0., 1e-6);
+    });
     test("Keyer: the default range keys luminance, not a solid white alpha (#31)", [] {
         auto c = comp(json::array({
             {{"name", "Dark"}, {"type", "Constant"}, {"params", {{"color", {0.1, 0.1, 0.1, 1}}}}},
@@ -3717,9 +3740,39 @@ int main(int argc, char** argv) {
             {{"name", "KM"}, {"type", "Keyer"}, {"inputs", {"Mid"}}},
         }), 8, 8);
         const float kd = px(render(*c, "KD"), 2, 2, "A"), km = px(render(*c, "KM"), 2, 2, "A");
-        CHECK(kd < 0.1f);                // dark: mostly keyed out
-        CHECK_NEAR(km, 0.5, 1e-4);       // mid grey: half (the ramp is symmetric about 0.5)
+        CHECK_NEAR(kd, 0.028, 1e-4);     // saved Keyers retain the original smooth ramp
+        CHECK_NEAR(km, 0.5, 1e-4);
         CHECK(kd < km);
+    });
+
+    test("Keyer: redscreen measures the selected layer and combines into the selected channel", [] {
+        auto c = comp(json::array({
+            {{"name", "Plate"}, {"type", "Constant"}, {"params", {{"color", {0.25, 0.75, 0.25, 0.8}}}}},
+            {{"name", "Layers"}, {"type", "Shuffle"}, {"inputs", {"Plate"}},
+             {"params", {{"mapping", {{"screen.R", "G"}, {"screen.G", "R"}, {"screen.B", "B"}}}}}},
+            {{"name", "Key"}, {"type", "Keyer"}, {"inputs", {"Layers"}},
+             {"params", {{"input", "screen"}, {"operation", "redscreen keyer"}, {"output", "rgba.red"}}}},
+        }), 8, 8);
+        auto* key = c->find("Key");
+        const auto check = [&](const char* mode, float expected) {
+            key->params.data["combine"] = mode;
+            key->paramsChanged();
+            auto image = render(*c, "Key");
+            CHECK_NEAR(px(image, 2, 2, "R"), expected, 1e-5);
+            CHECK_NEAR(px(image, 2, 2, "A"), 0.8, 1e-5);
+        };
+        check("replace", 0.5f);
+        check("intersect", 0.25f);
+        check("union", 0.5f);
+        key->params.data["output"] = "G";
+        key->paramsChanged();
+        auto united = render(*c, "Key");
+        CHECK_NEAR(px(united, 2, 2, "G"), 0.75, 1e-5);
+        key->params.data["output"] = "none";
+        check("replace", 0.25f);
+        key->params.data["output"] = "matte.A";
+        key->paramsChanged();
+        CHECK_NEAR(px(render(*c, "Key"), 2, 2, "matte.A"), 0.5, 1e-5);
     });
 
     test("IBKColour: plates at two scales and from two engines at once stay right (#45)", [] {
@@ -5333,6 +5386,51 @@ Connections:  {
         CHECK(err.empty() && text.find("\nf ") != std::string::npos);
         auto mesh = geo::meshOf(pm, 10, 1.0);
         CHECK(mesh && mesh->triangles() > 20);
+    });
+    test("Path mappings: a separate frame-server worker sees the same plate as the editor", [tmp] {
+        namespace fs = std::filesystem;
+        const auto dir = tmp / "worker-path-mapping";
+        fs::create_directories(dir);
+        auto c = comp(json::array({
+            {{"name", "P"}, {"type", "Constant"}, {"params", {{"color", {.25, .5, .75, 1.}}}}},
+        }), 4, 4);
+        writeImage((dir / "plate.exr").string(), *render(*c, "P"), c->format);
+        netpath::setSubstitutions({{"/foreign/show/", dir.generic_string() + "/"}});
+        auto mapped = comp(json::array({
+            {{"name", "Read1"}, {"type", "Read"}, {"params", {{"file", "/foreign/show/plate.exr"}, {"raw", true}}}},
+            {{"name", "Write1"}, {"type", "Write"}, {"inputs", {"Read1"}},
+             {"params", {{"file", "/foreign/show/worker.exr"}, {"raw_data", true}}}},
+        }), 4, 4);
+        const auto absolutePlate = mapped->resolvePath("/foreign/show/plate.exr");
+        mapped->project.projectDir = "/foreign/show";
+        mapped->find("Read1")->params.data["file"] = "plate.exr";
+        mapped->find("Write1")->params.data["file"] = "worker.exr";
+        CHECK(fs::path(mapped->resolvePath("plate.exr")) == fs::path(absolutePlate));
+        const auto viewer = render(*mapped, "Read1");
+        const auto compFile = dir / "comp.weld", mappingFile = dir / "path-mappings.json";
+        { std::ofstream file(compFile); file << mapped->toJson(); }
+        { std::ofstream file(mappingFile); file << json(netpath::getSubstitutions()); }
+        netpath::setSubstitutions({}); // The child has no editor globals or preferences.
+        const auto output = dir / "worker.exr";
+        fs::remove(output);
+        auto cli = fs::path(g_self).parent_path() / "welder";
+#ifdef _WIN32
+        cli += ".exe";
+#endif
+        std::string error;
+        auto worker = Process::start({cli.string(), "render", compFile.string(), "-f", "1", "-w", "Write1", "-t", "1",
+                                      "--no-gpu", "--path-mappings", mappingFile.string()}, (dir / "worker.log").string(), &error);
+        CHECK(worker != nullptr);
+        if (!worker) return;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (worker->running() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if (worker->running()) worker->kill();
+        CHECK(worker->exitCode() == 0);
+        CHECK(fs::exists(output));
+        if (fs::exists(output)) {
+            auto image = readImage(output.string()).image;
+            for (const char* ch : {"R", "G", "B", "A"}) CHECK_NEAR(px(image, 1, 1, ch), px(viewer, 1, 1, ch), 1e-5);
+        }
     });
     test("Network drives: mapped drive letters to UNC paths", [] {
         auto saved = netpath::resolver();

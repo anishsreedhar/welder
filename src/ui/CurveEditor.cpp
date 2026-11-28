@@ -10,6 +10,7 @@
 #include <map>
 
 #include "Panels.h"
+#include "nodes/NodeUtils.h"
 #include "nodes/Track.h"
 #include "imgui_internal.h"
 
@@ -199,6 +200,68 @@ void edit(App& app, std::function<void(Comp&)> fn) {
     });
 }
 
+bool isDopeTimeNode(const Node& node) {
+    return node.type == "AppendClip" || node.type == "FrameRange" || node.type == "Retime" ||
+           node.type == "TimeOffset" || node.type == "TimeWarp" || node.type == "TimeClip";
+}
+
+std::map<CurveRef, json> snapshotKeys(const Comp& comp, const std::set<KeySel>& selection) {
+    std::map<CurveRef, json> curves;
+    for (const auto& key : selection)
+        if (!curves.count(key.curve))
+            if (const auto* curve = curveJson(comp, key.curve)) curves.emplace(key.curve, *curve);
+    return curves;
+}
+
+// Clamp the whole selection as one block so keys keep their spacing and can't pass unselected keys.
+double limitKeyOffset(const std::map<CurveRef, json>& curves, const std::set<KeySel>& selection, double offset) {
+    for (const auto& [ref, curve] : curves) {
+        std::optional<double> previous;
+        bool previousSelected = false;
+        for (const auto& key : curve["keys"]) {
+            const double frame = key[0].get<double>();
+            const bool selected = selection.count({ref, frame}) != 0;
+            if (previous && selected != previousSelected) {
+                const double limit = std::max(0.0, std::floor(frame - *previous - 1e-6));
+                offset = selected ? std::max(offset, -limit) : std::min(offset, limit);
+            }
+            previous = frame;
+            previousSelected = selected;
+        }
+    }
+    return offset;
+}
+
+void applyDopeKeyTimes(App& app, DopeSheetState& state, const std::map<CurveRef, json>& curves,
+                       const std::set<KeySel>& original, const std::function<double(double)>& time, bool checkpoint) {
+    std::set<KeySel> next;
+    std::map<CurveRef, json> edited;
+    for (const auto& [ref, curve] : curves) {
+        auto copy = curve;
+        std::optional<double> previous;
+        for (auto& key : copy["keys"]) {
+            const double frame = key[0].get<double>();
+            double target = frame;
+            if (original.count({ref, frame})) {
+                target = time(frame);
+                key[0] = target;
+                next.insert({ref, target});
+            }
+            if (previous && target - *previous <= 1e-6) return;
+            previous = target;
+        }
+        edited.emplace(ref, std::move(copy));
+    }
+    if (next.size() == state.sel.size() &&
+        std::all_of(next.begin(), next.end(), [&](const KeySel& key) { return state.sel.count(key); })) return;
+    if (checkpoint) app.checkpoint();
+    edit(app, [edited = std::move(edited)](Comp& comp) {
+        for (const auto& [ref, curve] : edited)
+            if (auto* current = curveJsonMut(comp, ref)) *current = curve;
+    });
+    state.sel = std::move(next);
+}
+
 }  // namespace
 
 // =================================================================== Curve Editor
@@ -206,7 +269,7 @@ void drawCurveEditor(App& app, UiState& ui) {
     CurveEditorState& st = ui.curves;
     if (ImGuiWindow* g = ImGui::FindWindowByName("Node Graph"))
         if (g->DockId) ImGui::SetNextWindowDockID(g->DockId, ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin(ui.win("Curve Editor").c_str(), nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+    if (!ui.beginPanel("Curve Editor", ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
         ImGui::End();
         return;
     }
@@ -225,6 +288,7 @@ void drawCurveEditor(App& app, UiState& ui) {
         if (cs.empty()) continue;
         groups.push_back({n, cs});
         all.insert(all.end(), cs.begin(), cs.end());
+        if(all.size()>=(size_t)app.preferences.value("curves_visible",100))break;
     }
     // drop selections of keys that no longer exist
     for (auto it = st.sel.begin(); it != st.sel.end();) {
@@ -234,8 +298,9 @@ void drawCurveEditor(App& app, UiState& ui) {
     }
 
     // ---- left: the list
-    const float listW = 190;
-    ImGui::BeginChild("##curves", ImVec2(listW, 0), ImGuiChildFlags_Borders);
+    const float listW = std::clamp(ImGui::GetContentRegionAvail().x * 0.24f, 120.0f, 310.0f);
+    const float footerH = ImGui::GetFrameHeightWithSpacing();
+    ImGui::BeginChild("##curves", ImVec2(listW, -footerH), ImGuiChildFlags_Borders);
     if (groups.empty()) {
         ImGui::PushTextWrapPos(0);
         ImGui::TextDisabled("Open a node's properties (or select it) to see its animation here. Set keys with the key "
@@ -245,34 +310,28 @@ void drawCurveEditor(App& app, UiState& ui) {
     int ci = 0;
     std::map<CurveRef, ImU32> colors;
     for (auto& [node, cs] : groups) {
-        ImGui::TextUnformatted(node.c_str());
+        const bool expanded = ImGui::TreeNodeEx(node.c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth);
         for (auto& c : cs) {
             ImU32 col = curveColor(c, ci++);
             colors[c] = col;
+            if (!expanded) continue;
             bool vis = !st.hidden.count(c);
             ImGui::PushID((c.node + "/" + curveName(c)).c_str());
-            ImGui::Indent(8);
             ImGui::PushStyleColor(ImGuiCol_CheckMark, col);
             if (ImGui::Checkbox(curveName(c).c_str(), &vis)) {
                 if (vis) st.hidden.erase(c);
                 else st.hidden.insert(c);
             }
             ImGui::PopStyleColor();
-            ImGui::Unindent(8);
             ImGui::PopID();
         }
+        if (expanded) ImGui::TreePop();
     }
     ImGui::EndChild();
     ImGui::SameLine();
 
     // ---- right: the graph
-    ImGui::BeginChild("##graph", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    // toolbar
-    ImGui::Checkbox("snap frames", &st.snap);
-    ImGui::SameLine();
-    if (ImGui::SmallButton("frame all (F)")) st.fitPending = true;
-    ImGui::SameLine();
-    ImGui::TextDisabled("%zu key%s selected", st.sel.size(), st.sel.size() == 1 ? "" : "s");
+    ImGui::BeginChild("##graph", ImVec2(0, -footerH), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImVec2 sz = ImGui::GetContentRegionAvail();
     sz.x = std::max(sz.x, 50.0f);
@@ -283,6 +342,7 @@ void drawCurveEditor(App& app, UiState& ui) {
     const bool hovered = ImGui::IsItemHovered();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float rulerH = 18;
+    const float graphBottom = p1.y - rulerH;
 
     // fit
     auto visibleCurves = [&] {
@@ -344,30 +404,41 @@ void drawCurveEditor(App& app, UiState& ui) {
         st.v0 = va - vm;
         st.v1 = vb + vm;
     }
+    if (ui.dope.linkRange) {
+        st.f0 = ui.dope.f0;
+        st.f1 = ui.dope.f1;
+    }
     auto X = [&](double f) { return (float)(p0.x + (f - st.f0) / (st.f1 - st.f0) * sz.x); };
-    auto Y = [&](double v) { return (float)(p1.y - (v - st.v0) / (st.v1 - st.v0) * (sz.y - rulerH)); };
+    auto Y = [&](double v) { return (float)(graphBottom - (v - st.v0) / (st.v1 - st.v0) * (sz.y - rulerH)); };
     auto F = [&](float x) { return st.f0 + (x - p0.x) / sz.x * (st.f1 - st.f0); };
-    auto V = [&](float y) { return st.v0 + (p1.y - y) / (sz.y - rulerH) * (st.v1 - st.v0); };
+    auto V = [&](float y) { return st.v0 + (graphBottom - y) / (sz.y - rulerH) * (st.v1 - st.v0); };
 
     dl->PushClipRect(p0, p1, true);
-    dl->AddRectFilled(p0, p1, IM_COL32(32, 32, 32, 255));
-    dl->AddRectFilled(p0, ImVec2(p1.x, p0.y + rulerH), IM_COL32(40, 40, 40, 255));
+    dl->AddRectFilled(p0, p1, preferenceColor("curve_background",IM_COL32(21,24,27,255)));
+    dl->AddRectFilled(ImVec2(p0.x, graphBottom), p1, IM_COL32(34, 37, 41, 255));
     // grid
     double fs = niceStep(st.f1 - st.f0, sz.x, 70), vs = niceStep(st.v1 - st.v0, sz.y, 40);
+    const double minor = fs / 5;
+    for (double f = std::ceil(st.f0 / minor) * minor; f <= st.f1; f += minor)
+        dl->AddLine(ImVec2(X(f), p0.y), ImVec2(X(f), graphBottom), IM_COL32(31, 37, 43, 255));
     for (double f = std::ceil(st.f0 / fs) * fs; f <= st.f1; f += fs) {
-        dl->AddLine(ImVec2(X(f), p0.y + rulerH), ImVec2(X(f), p1.y), IM_COL32(48, 48, 48, 255));
+        dl->AddLine(ImVec2(X(f), p0.y), ImVec2(X(f), graphBottom), IM_COL32(57, 69, 81, 255));
         char b[32];
         std::snprintf(b, sizeof(b), "%g", f);
-        dl->AddText(ImVec2(X(f) + 3, p0.y + 2), IM_COL32(140, 140, 140, 255), b);
+        dl->AddText(ImVec2(X(f) + 3, graphBottom + 2), IM_COL32(165, 177, 189, 255), b);
     }
     for (double v = std::ceil(st.v0 / vs) * vs; v <= st.v1; v += vs) {
-        dl->AddLine(ImVec2(p0.x, Y(v)), ImVec2(p1.x, Y(v)), std::fabs(v) < vs * 1e-6 ? IM_COL32(70, 70, 70, 255) : IM_COL32(48, 48, 48, 255));
+        dl->AddLine(ImVec2(p0.x, Y(v)), ImVec2(p1.x, Y(v)), std::fabs(v) < vs * 1e-6 ? IM_COL32(103, 132, 157, 255) : IM_COL32(57, 69, 81, 255));
         char b[32];
         std::snprintf(b, sizeof(b), "%g", std::fabs(v) < vs * 1e-6 ? 0.0 : v);
         dl->AddText(ImVec2(p0.x + 3, Y(v) - 14), IM_COL32(120, 120, 120, 255), b);
     }
     // ruler (click / drag to change frame)
-    dl->AddLine(ImVec2(X(app.frame), p0.y), ImVec2(X(app.frame), p1.y), IM_COL32(230, 160, 40, 200));
+    const float playhead = X(app.frame);
+    const ImU32 playheadColor = preferenceColor("curve_current",IM_COL32(245,159,49,255));
+    dl->AddLine(ImVec2(playhead, p0.y), ImVec2(playhead, p1.y), playheadColor);
+    dl->AddTriangleFilled(ImVec2(playhead, graphBottom), ImVec2(playhead - 4, graphBottom + 7),
+                          ImVec2(playhead + 4, graphBottom + 7), playheadColor);
 
     // curves and keys
     const ImVec2 mouse = ImGui::GetIO().MousePos;
@@ -385,6 +456,7 @@ void drawCurveEditor(App& app, UiState& ui) {
         double s = (side ? 45.0 : -45.0) / len;
         return ImVec2((float)(kp.x + dx * s), (float)(kp.y + dy * s));
     };
+    dl->PushClipRect(p0, ImVec2(p1.x, graphBottom), true);
     for (auto& c : visibleCurves()) {
         const json* cvp = curveJson(comp, c);
         if (!cvp) continue;
@@ -423,7 +495,7 @@ void drawCurveEditor(App& app, UiState& ui) {
 
     // ---- interaction
     ImGuiIO& io = ImGui::GetIO();
-    const bool inRuler = mouse.y < p0.y + rulerH;
+    const bool inRuler = mouse.y >= graphBottom;
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyAlt) {
         if (inRuler) {
             st.drag = 5;  // scrub
@@ -673,6 +745,7 @@ void drawCurveEditor(App& app, UiState& ui) {
         ImGui::OpenPopup("##curvemenu");
     }
     dl->PopClipRect();
+    dl->PopClipRect();
     if (ImGui::BeginPopup("##curvemenu")) {
         ImGui::BeginDisabled(st.sel.empty());
         ImGui::TextDisabled("interpolation");
@@ -694,7 +767,19 @@ void drawCurveEditor(App& app, UiState& ui) {
             ImGui::SetTooltip("%s %s\nframe %g  value %.5g  (%s)", hit.key.curve.node.c_str(), curveName(hit.key.curve).c_str(),
                               hit.key.frame, (*cv)["keys"][i][1].get<double>(), params::keyInterp(*cv, i).c_str());
     }
+    if (ui.dope.linkRange) {
+        ui.dope.f0 = st.f0;
+        ui.dope.f1 = st.f1;
+    }
     ImGui::EndChild();
+    ImGui::Checkbox("Snap frames", &st.snap);
+    ImGui::SameLine();
+    if (ImGui::Button("Frame all")) st.fitPending = true;
+    ImGui::SetItemTooltip("Frame all visible curves (F)");
+    ImGui::SameLine();
+    ImGui::Checkbox("Link range", &ui.dope.linkRange);
+    ImGui::SameLine();
+    ImGui::TextDisabled("%zu key%s selected", st.sel.size(), st.sel.size() == 1 ? "" : "s");
     ImGui::End();
 }
 
@@ -703,7 +788,7 @@ void drawDopeSheet(App& app, UiState& ui) {
     DopeSheetState& st = ui.dope;
     if (ImGuiWindow* g = ImGui::FindWindowByName("Node Graph"))
         if (g->DockId) ImGui::SetNextWindowDockID(g->DockId, ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin(ui.win("Dope Sheet").c_str(), nullptr, ImGuiWindowFlags_NoScrollWithMouse)) {
+    if (!ui.beginPanel("Dope Sheet", ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
         ImGui::End();
         return;
     }
@@ -718,41 +803,107 @@ void drawDopeSheet(App& app, UiState& ui) {
         st.f0 = comp.firstFrame - 2;
         st.f1 = comp.lastFrame + 2;
     }
-    // rows: a node, then one row per param (vector components share the row)
     struct Row {
-        std::string node, param;  // param "" = the node row
+        std::string node, param, label;
+        int depth = 0;
         std::vector<CurveRef> curves;
         std::set<double> frames;
+        std::optional<std::pair<double, double>> span;
+        bool timeNode = false;
+        bool expandable = false;
     };
     std::vector<Row> rows;
-    for (auto& n : shownNodes(app)) {
-        auto cs = curvesOf(app, n);
-        if (cs.empty()) continue;
-        Row nr{n, "", cs, {}};
-        std::map<std::string, Row> prm;
-        for (auto& c : cs)
-            if (const json* cv = curveJson(comp, c))
-                for (auto& k : (*cv)["keys"]) {
-                    double f = k[0].get<double>();
-                    nr.frames.insert(f);
-                    auto& r = prm[c.param];
-                    r.node = n;
-                    r.param = c.param;
-                    if (std::find(r.curves.begin(), r.curves.end(), c) == r.curves.end()) r.curves.push_back(c);
-                    r.frames.insert(f);
-                }
-        rows.push_back(nr);
-        if (!st.collapsed.count({n, ""}))
-            for (auto& [k, r] : prm) rows.push_back(r);
+    auto names = shownNodes(app);
+    if (st.showAllClips) {
+        std::set<std::string> listed(names.begin(), names.end());
+        for (const auto& node : comp.nodes)
+            if ((node->type == "Read" || node->type == "TimeClip") && listed.insert(node->name).second)
+                names.push_back(node->name);
     }
+    const std::set<std::string> openPanels(app.panels.begin(), app.panels.end());
+    auto makeRow = [&](const std::string& node, const std::string& param, const std::string& label,
+                       int depth, const std::vector<CurveRef>& curves) {
+        Row row;
+        row.node = node;
+        row.param = param;
+        row.label = label;
+        row.depth = depth;
+        row.curves = curves;
+        for (const auto& ref : curves)
+            if (const auto* curve = curveJson(comp, ref))
+                for (const auto& key : (*curve)["keys"]) row.frames.insert(key[0].get<double>());
+        return row;
+    };
+    std::map<std::string, bool> showSpans;
+    std::map<std::string, std::vector<CurveRef>> nodeCurves;
+    for (const auto& name : names) {
+        Node* node = app.node(name);
+        const bool showSpan = ((node->type == "Read" || isDopeTimeNode(*node)) && openPanels.count(name)) ||
+                              (st.showAllClips && (node->type == "Read" || node->type == "TimeClip"));
+        auto curves = curvesOf(app, name);
+        if (curves.empty() && !showSpan) continue;
+        showSpans.emplace(name, showSpan);
+        nodeCurves.emplace(name, std::move(curves));
+    }
+    std::map<std::string, std::string> parents;
+    std::map<std::string, std::vector<std::string>> children;
+    for (const auto& name : names) {
+        Node* node = app.node(name);
+        if (!showSpans.count(name) || !isDopeTimeNode(*node)) continue;
+        for (const Node* input : node->inputs) {
+            if (!input || !showSpans.count(input->name) || parents.count(input->name)) continue;
+            std::string ancestor = name;
+            while (ancestor != input->name && parents.count(ancestor)) ancestor = parents.at(ancestor);
+            if (ancestor == input->name) continue;
+            parents.emplace(input->name, name);
+            children[name].push_back(input->name);
+        }
+    }
+    std::function<void(const std::string&, int)> appendNode = [&](const std::string& name, int depth) {
+        Node* node = app.node(name);
+        const auto& curves = nodeCurves.at(name);
+        std::string label = name;
+        if (node->type == "Read") {
+            const auto file = node->params.str("file", "");
+            if (!file.empty()) label += "  " + file.substr(file.find_last_of("/\\") + 1);
+        }
+        Row nodeRow = makeRow(name, "", label, depth, curves);
+        nodeRow.timeNode = isDopeTimeNode(*node);
+        nodeRow.expandable = !curves.empty() || children.count(name);
+        if (showSpans.at(name)) {
+            nodeRow.span = nodeFrameRange(node);
+            if (!nodeRow.span) nodeRow.span = {comp.firstFrame, comp.lastFrame};
+        }
+        rows.push_back(std::move(nodeRow));
+        if (st.collapsed.count({name, ""})) return;
+        std::map<std::string, std::vector<CurveRef>> controls;
+        for (const auto& curve : curves) controls[curve.param].push_back(curve);
+        for (const auto& [param, channels] : controls) {
+            const bool vectorControl = channels.front().comp >= 0;
+            Row control = makeRow(name, param, vectorControl ? param : curveName(channels.front()), depth + 1, channels);
+            control.expandable = vectorControl;
+            rows.push_back(std::move(control));
+            if (vectorControl && !st.collapsed.count({name, param}))
+                for (const auto& channel : channels)
+                    rows.push_back(makeRow(name, param, curveName(channel), depth + 2, {channel}));
+        }
+        if (auto nested = children.find(name); nested != children.end())
+            for (const auto& child : nested->second) appendNode(child, depth + 1);
+    };
+    for (const auto& name : names)
+        if (showSpans.count(name) && !parents.count(name)) appendNode(name, 0);
     for (auto it = st.sel.begin(); it != st.sel.end();) {
         const json* cv = curveJson(comp, it->curve);
-        if (!cv || keyIndex(*cv, it->frame) < 0) it = st.sel.erase(it);
+        if (!app.editsPending() && (!cv || keyIndex(*cv, it->frame) < 0)) it = st.sel.erase(it);
         else ++it;
     }
-    const float nameW = 170, rowH = ImGui::GetTextLineHeight() + 6, rulerH = 18;
+    const float rowH = ImGui::GetTextLineHeight() + 6, rulerH = 18;
+    const float footerH = ImGui::GetFrameHeightWithSpacing();
+    ImGui::BeginChild("##dopeViewport", ImVec2(0, -footerH), 0, ImGuiWindowFlags_NoScrollWithMouse);
     ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImVec2 sz = ImGui::GetContentRegionAvail();
+    sz.x = std::max(1.0f, sz.x);
+    const float nameW = std::min(190.0f, sz.x * 0.40f);
     sz.y = std::max(sz.y, rulerH + rowH * std::max<size_t>(1, rows.size()) + 4);
     ImVec2 p1(p0.x + sz.x, p0.y + sz.y);
     const float gx0 = p0.x + nameW, gx1 = p1.x;
@@ -772,7 +923,6 @@ void drawDopeSheet(App& app, UiState& ui) {
         std::snprintf(b, sizeof(b), "%g", f);
         dl->AddText(ImVec2(X(f) + 3, p0.y + 2), IM_COL32(140, 140, 140, 255), b);
     }
-    // the comp's range
     dl->AddRectFilled(ImVec2(X(comp.firstFrame), p0.y + rulerH), ImVec2(X(comp.lastFrame), p1.y), IM_COL32(255, 255, 255, 8));
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     struct Hit {
@@ -783,28 +933,49 @@ void drawDopeSheet(App& app, UiState& ui) {
     int hoverRow = -1;
     for (size_t r = 0; r < rows.size(); ++r) {
         float y = p0.y + rulerH + 2 + r * rowH;
-        bool nodeRow = rows[r].param.empty();
+        const Row& row = rows[r];
+        const bool nodeRow = row.param.empty();
         if (nodeRow) dl->AddRectFilled(ImVec2(p0.x, y), ImVec2(p1.x, y + rowH), IM_COL32(44, 44, 48, 255));
         if (mouse.y >= y && mouse.y < y + rowH) hoverRow = (int)r;
-        std::string label = nodeRow ? ((st.collapsed.count({rows[r].node, ""}) ? "+ " : "- ") + rows[r].node) : "    " + rows[r].param;
-        dl->AddText(ImVec2(p0.x + 6, y + 3), nodeRow ? IM_COL32(230, 230, 230, 255) : IM_COL32(170, 170, 170, 255), label.c_str());
-        for (double f : rows[r].frames) {
-            float x = X(f), cy = y + rowH * 0.5f, s = nodeRow ? 5.5f : 4.5f;
+        const float indent = p0.x + 6 + row.depth * 14.0f;
+        dl->PushClipRect(p0, ImVec2(gx0 - 2, p1.y), true);
+        if (row.expandable)
+            ImGui::RenderArrow(dl, ImVec2(indent, y + 4), ImGui::GetColorU32(ImGuiCol_TextDisabled),
+                               st.collapsed.count({row.node, row.param}) ? ImGuiDir_Right : ImGuiDir_Down, 0.65f);
+        dl->AddText(ImVec2(indent + 14, y + 3), ImGui::GetColorU32(nodeRow ? ImGuiCol_Text : ImGuiCol_TextDisabled),
+                    row.label.c_str());
+        dl->PopClipRect();
+        dl->PushClipRect(ImVec2(gx0, p0.y), p1, true);
+        if (row.span) {
+            const auto [first, last] = *row.span;
+            const float left = X(std::min(first, last));
+            const float right = std::max(left + 3, X(std::max(first, last)));
+            const auto fill = row.timeNode ? IM_COL32(55, 91, 72, 255) : IM_COL32(87, 91, 101, 255);
+            dl->AddRectFilled(ImVec2(left, y + 3), ImVec2(right, y + rowH - 3), fill, 3.0f);
+        }
+        for (double f : row.frames) {
+            const float x = X(f), cy = y + rowH * 0.5f;
+            const float halfHeight = nodeRow ? 6.0f : 5.0f;
             bool sel = true;
-            for (auto& c : rows[r].curves)
+            for (auto& c : row.curves)
                 if (const json* cv = curveJson(comp, c))
                     if (keyIndex(*cv, f) >= 0 && !st.sel.count({c, f})) sel = false;
-            ImU32 col = sel ? IM_COL32(255, 220, 110, 255) : nodeRow ? IM_COL32(170, 170, 200, 255) : IM_COL32(150, 190, 150, 255);
-            ImVec2 dpts[4] = {ImVec2(x, cy - s), ImVec2(x + s, cy), ImVec2(x, cy + s), ImVec2(x - s, cy)};
-            dl->AddConvexPolyFilled(dpts, 4, col);
+            const ImU32 color = sel ? IM_COL32(255, 174, 66, 255) : IM_COL32(174, 177, 184, 255);
+            const float tick = std::floor(x);
+            dl->AddRectFilled(ImVec2(tick - 1, cy - halfHeight), ImVec2(tick + 2, cy + halfHeight), color);
             float d = std::fabs(mouse.x - x) + std::fabs(mouse.y - cy) * 0.5f;
-            if (d < 8 && d < hit.d) hit = {(int)r, f, d};
+            if (mouse.x >= gx0 && x >= gx0 && x <= gx1 && d < 8 && d < hit.d) hit = {(int)r, f, d};
         }
+        dl->PopClipRect();
     }
     if (rows.empty())
         dl->AddText(ImVec2(p0.x + 8, p0.y + rulerH + 6), IM_COL32(140, 140, 140, 255),
                     "Open a node's properties (or select it) to see its keys here.");
-    dl->AddLine(ImVec2(X(app.frame), p0.y), ImVec2(X(app.frame), p1.y), IM_COL32(230, 160, 40, 200));
+    dl->PushClipRect(ImVec2(gx0, p0.y), p1, true);
+    for (double frame : {double(comp.firstFrame), double(comp.lastFrame)})
+        dl->AddLine(ImVec2(X(frame), p0.y), ImVec2(X(frame), p1.y), IM_COL32(145, 149, 157, 210));
+    dl->AddLine(ImVec2(X(app.frame), p0.y), ImVec2(X(app.frame), p1.y), IM_COL32(245, 159, 49, 255));
+    dl->PopClipRect();
     dl->AddLine(ImVec2(gx0, p0.y), ImVec2(gx0, p1.y), IM_COL32(60, 60, 60, 255));
 
     // keys of a row at a frame
@@ -829,21 +1000,26 @@ void drawDopeSheet(App& app, UiState& ui) {
     }
     ImGuiIO& io = ImGui::GetIO();
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        if (mouse.y < p0.y + rulerH) {
+        if (mouse.x >= gx0 && mouse.y < p0.y + rulerH) {
             st.drag = 4;  // scrub
         } else if (mouse.x < gx0) {
-            if (hoverRow >= 0 && rows[hoverRow].param.empty()) {
-                auto key = std::make_pair(rows[hoverRow].node, std::string());
-                if (st.collapsed.count(key)) st.collapsed.erase(key);
-                else st.collapsed.insert(key);
+            if (hoverRow >= 0) {
+                const Row& row = rows[hoverRow];
+                const bool arrow = mouse.x < p0.x + 20 + row.depth * 14.0f;
+                if (arrow && row.expandable) {
+                    if (!st.collapsed.erase({row.node, row.param})) st.collapsed.insert({row.node, row.param});
+                } else if (row.param.empty()) {
+                    ui.closedPanels.erase("Properties");
+                    app.openPanel(row.node);
+                }
             }
         } else if (scalable && (std::fabs(mouse.x - (X(sa) - 9.5f)) < 4 || std::fabs(mouse.x - (X(sb) + 9.5f)) < 4)) {
             app.checkpoint();
             st.drag = 3;
             st.scaleEnd = std::fabs(mouse.x - (X(sb) + 9.5f)) < 4 ? 1 : 0;
             st.dragStart = mouse;
-            st.dragOrig.clear();
-            for (auto& k : st.sel) st.dragOrig[k] = k.frame;
+            st.dragOrig = st.sel;
+            st.dragCurves = snapshotKeys(comp, st.sel);
         } else if (hit.row >= 0) {
             auto ks = rowKeys(hit.row, hit.frame);
             bool allSel = !ks.empty() && std::all_of(ks.begin(), ks.end(), [&](const KeySel& k) { return st.sel.count(k) > 0; });
@@ -859,16 +1035,19 @@ void drawDopeSheet(App& app, UiState& ui) {
             app.checkpoint();
             st.drag = 1;
             st.dragStart = mouse;
-            st.dragOrig.clear();
-            for (auto& k : st.sel) st.dragOrig[k] = k.frame;
+            st.dragOrig = st.sel;
+            st.dragCurves = snapshotKeys(comp, st.sel);
         } else {
             st.drag = 2;
             st.dragStart = mouse;
             if (!io.KeyShift) st.sel.clear();
         }
     }
-    if (hovered && io.MouseWheel != 0) {
+    if (hovered && io.MouseWheel != 0 && (mouse.x < gx0 || io.KeyShift)) {
+        ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseWheel * rowH * 3);
+    } else if (hovered && io.MouseWheel != 0) {
         double z = std::pow(0.85, io.MouseWheel), fm = F(mouse.x);
+        z = std::clamp(z, 1.0 / (st.f1 - st.f0), 1e9 / (st.f1 - st.f0));
         st.f0 = fm + (st.f0 - fm) * z;
         st.f1 = fm + (st.f1 - fm) * z;
     }
@@ -877,44 +1056,23 @@ void drawDopeSheet(App& app, UiState& ui) {
         st.f0 += df;
         st.f1 += df;
     }
-    // move / scale: rebuild from the keys' frames at the drag start
-    auto applyRetime = [&](std::function<double(double)> map) {
-        auto orig = st.dragOrig;
-        static std::map<CurveRef, json> snap;
-        if (snap.empty())
-            for (auto& [k, f] : orig)
-                if (!snap.count(k.curve))
-                    if (const json* cv = curveJson(comp, k.curve)) snap[k.curve] = *cv;
-        auto snapCopy = snap;
-        edit(app, [snapCopy, orig, map](Comp& c) {
-            for (auto& [cr, base] : snapCopy) {
-                json* cv = curveJsonMut(c, cr);
-                if (!cv) continue;
-                json nv = base;
-                for (auto& k : nv["keys"]) {
-                    double f = k[0].get<double>();
-                    if (orig.count({cr, f})) k[0] = map(f);
-                }
-                sortKeys(nv);
-                *cv = nv;
-            }
-        });
-        std::set<KeySel> ns;
-        for (auto& [k, f] : orig) ns.insert({k.curve, map(f)});
-        st.sel = ns;
+    auto applyRetime = [&](const std::function<double(double)>& map) {
+        applyDopeKeyTimes(app, st, st.dragCurves, st.dragOrig, map, false);
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            snap.clear();
+            st.dragCurves.clear();
+            st.dragOrig.clear();
             st.drag = 0;
         }
     };
     if (st.drag == 1) {
         double df = std::round((mouse.x - st.dragStart.x) / (gx1 - gx0) * (st.f1 - st.f0));
+        df = limitKeyOffset(st.dragCurves, st.dragOrig, df);
         applyRetime([df](double f) { return f + df; });
     } else if (st.drag == 3) {
         double a0 = 1e300, b0 = -1e300;
-        for (auto& [k, f] : st.dragOrig) {
-            a0 = std::min(a0, f);
-            b0 = std::max(b0, f);
+        for (const auto& key : st.dragOrig) {
+            a0 = std::min(a0, key.frame);
+            b0 = std::max(b0, key.frame);
         }
         double target = F(mouse.x);
         int end = st.scaleEnd;
@@ -975,6 +1133,40 @@ void drawDopeSheet(App& app, UiState& ui) {
     if (hovered && hit.row >= 0 && st.drag == 0)
         ImGui::SetTooltip("%s  frame %g", rows[hit.row].param.empty() ? rows[hit.row].node.c_str() : rows[hit.row].param.c_str(), hit.frame);
     dl->PopClipRect();
+    ImGui::EndChild();
+    ImGui::Checkbox("Link range", &st.linkRange);
+    ImGui::SetItemTooltip("Share the visible frame range with the Curve Editor");
+    ImGui::SameLine();
+    ImGui::Checkbox("All Read / TimeClip", &st.showAllClips);
+    ImGui::SameLine();
+    ImGui::BeginDisabled(st.sel.empty() || st.drag != 0);
+    const bool move = ImGui::Button("Move");
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(58);
+    const bool enter = ImGui::InputInt("##moveFrames", &st.moveFrames, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SetItemTooltip("Frame offset for selected keys. Use a negative number to move earlier.");
+    if ((move || enter) && !st.sel.empty() && st.drag == 0) {
+        const auto curves = snapshotKeys(comp, st.sel);
+        const double offset = limitKeyOffset(curves, st.sel, st.moveFrames);
+        applyDopeKeyTimes(app, st, curves, st.sel, [offset](double frame) { return frame + offset; }, true);
+    }
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Range");
+    ImGui::SameLine();
+    double first = st.f0, last = st.f1;
+    ImGui::SetNextItemWidth(65);
+    const bool firstEdited = ImGui::InputDouble("##rangeFirst", &first, 0, 0, "%.3g", ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    ImGui::TextUnformatted("to");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(65);
+    const bool lastEdited = ImGui::InputDouble("##rangeLast", &last, 0, 0, "%.3g", ImGuiInputTextFlags_EnterReturnsTrue);
+    if ((firstEdited || lastEdited) && std::isfinite(first) && std::isfinite(last) &&
+        std::abs(first) <= 1e9 && std::abs(last) <= 1e9 && last - first >= 1 && last - first <= 1e9) {
+        st.f0 = first;
+        st.f1 = last;
+    }
     ImGui::End();
 }
 

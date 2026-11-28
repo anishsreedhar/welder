@@ -16,6 +16,7 @@
 
 #include "core/Crash.h"
 #include "App.h"
+#include "PreferenceSettings.h"
 #include "GL.h"
 #include "PanelKit.h"
 #include "Panels.h"
@@ -463,6 +464,7 @@ void openFileDialog(UiState& ui, const std::string& title, bool saving, std::vec
     d.error.clear();
     d.filename.clear();
     std::error_code ec;
+    if(!prefs::runtime().value("browser_recent_dir",true))d.dir.clear();
     if (!startDir.empty() && fs::is_directory(P(startDir), ec)) d.dir = startDir;
     if (d.dir.empty() || !fs::is_directory(P(d.dir), ec)) d.dir = u8(fs::current_path(ec));
     // the filter: the file types asked for
@@ -967,7 +969,12 @@ void drawFileDialog(App& app, UiState& ui) {
         }
         ImGui::EndPopup();
         if (cb)
-            for (auto& p : paths) cb(netpath::maybeUnc(p));  // S:\... -> \\server\share\... (the preference)
+            for (auto p : paths) {
+                if(prefs::runtime().value("frame_number_style",std::string("Hashes (#)"))=="Printf (%04d)") {
+                    size_t a=p.find('#');if(a!=std::string::npos){size_t b=p.find_first_not_of('#',a);if(b==std::string::npos)b=p.size();p.replace(a,b-a,"%0"+std::to_string(b-a)+"d");}
+                }
+                cb(netpath::maybeUnc(p));
+            }  // S:\... -> \\server\share\... (the preference)
     };
     if (next && !gB.selected.empty()) {
         std::vector<std::string> ps(gB.selected.begin(), gB.selected.end());

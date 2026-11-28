@@ -9,6 +9,8 @@
 
 #include <functional>
 #include <string>
+#include <vector>
+#include <utility>
 
 namespace strata {
 class Comp;
@@ -32,5 +34,9 @@ inline std::string maybeUnc(const std::string& path) { return enabled() ? toUnc(
 // Rewrites every drive-letter path in the comp's node knobs (and the project directory)
 // that's on a mapped drive. Returns how many it changed.
 int convertComp(Comp& c);
+void setSubstitutions(std::vector<std::pair<std::string,std::string>> mappings);
+// A thread-safe snapshot for frame-server invocation context.
+std::vector<std::pair<std::string,std::string>> getSubstitutions();
+std::string substitute(const std::string& path);
 
 }  // namespace strata::netpath

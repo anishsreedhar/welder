@@ -74,6 +74,7 @@ public:
     std::vector<Node*> outputsOf(const Node* n) const;  // nodes that use n as an input
     bool dependsOn(const Node* n, const Node* upstream) const;
     std::vector<Node*> nodesOfType(const std::string& type) const;
+    std::filesystem::path projectBaseDir() const;
     std::string resolvePath(const std::string& p) const;
     // The file a new Write starts with: the comp's own name as an EXR sequence
     // (TGU_001_0069_comp_CAD_v006.weld -> "TGU_001_0069_comp_CAD_v006.####.exr",

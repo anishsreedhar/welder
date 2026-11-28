@@ -419,12 +419,16 @@ struct CurveEditorState {
 struct DopeSheetState {
     double f0 = 0, f1 = 100;
     bool fitPending = true;
-    std::set<std::pair<std::string, std::string>> collapsed;  // (node, "") collapsed nodes
+    bool linkRange = false;
+    bool showAllClips = false;
+    int moveFrames = 0;
+    std::set<std::pair<std::string, std::string>> collapsed;  // (node, "") for a node, (node, param) for a control
     std::set<KeySel> sel;  // per component key
     int drag = 0;          // 0 none, 1 move, 2 marquee, 3 scale (left / right end)
     int scaleEnd = 0;
     ImVec2 dragStart;
-    std::map<KeySel, double> dragOrig;
+    std::set<KeySel> dragOrig;
+    std::map<CurveRef, json> dragCurves;
 };
 
 // UiState::dropOpenComp for File > New / Close Comp (asks about unsaved changes like an open does)
@@ -463,6 +467,7 @@ struct ViewerCaptureState {
 
 struct UiState {
     std::vector<FloatPanel> floatPanels;
+    std::map<std::string, json> keyerPanelDefaults;
     // ImageGen's contact sheet: Space over it toggles the 1:1 view of the selected take (not maximize)
     struct ImageGenUi {
         int sheetHoverFrame = -10;  // the last frame the mouse was over a contact sheet
@@ -514,6 +519,10 @@ struct UiState {
     int splitViewers = 0;
     std::string pendingTheme;     // Preferences > Theme: applied before the next frame         // Viewer menu: 1 lay the viewer panels side by side, 2 stacked
     std::string maximized;        // currently maximized panel
+    bool soloTab = false;         // pane-menu solo hides even the Viewer's companion timeline
+    std::set<std::string> closedPanels;  // panels closed from the pane menu
+    std::set<std::string> closedViewerTabs;  // additional Viewer tabs, keyed by Viewer node name
+    std::string focusPanel;       // focus after a closed or moved panel has been drawn
     bool showShortcuts = false;
     bool showAbout = false;
     // is there a newer Welder (#85): main.cpp turns the startup check on for interactive runs only
@@ -567,6 +576,12 @@ struct UiState {
         if (maximized == "Viewer" && std::string_view(panel) == "Timeline") return "Timeline###maxTimeline";
         return panel;
     }
+    bool beginPanel(const char* panel, ImGuiWindowFlags flags = 0) {
+        bool open = true;
+        const bool visible = ImGui::Begin(win(panel).c_str(), &open, flags);
+        if (!open) closedPanels.insert(panel);
+        return visible && open;
+    }
     void noteHover(const char* panel) {
         if (ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
             hoverNext = panel;
@@ -576,6 +591,10 @@ struct UiState {
 };
 
 void drawMenuBar(App& app, UiState& ui);
+void drawPreferences(App& app, UiState& ui);
+ImFont* preferenceFont(const std::string& family,int style=0);
+void applyPreferenceTheme(const App& app);
+ImU32 preferenceColor(const char* key,ImU32 fallback);
 // Saved workspaces (#103): six slots, switched with Shift+F1-F6. Slot 1 is "Compositing", the default
 // layout until a layout is saved over it. Each is a layout .ini in <config>/workspaces.
 constexpr int kWorkspaceSlots = 6;

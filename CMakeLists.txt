@@ -369,6 +369,9 @@ target_link_libraries(welder PRIVATE strata_core)
 
 # ---------------------------------------------------------------- tests
 enable_testing()
+add_executable(welder_preferences_tests tests/preferences_tests.cpp)
+target_link_libraries(welder_preferences_tests PRIVATE strata_core)
+add_test(NAME preferences COMMAND welder_preferences_tests)
 add_executable(welder_font_tests tests/font_tests.cpp src/ui/SystemFonts.cpp)
 target_include_directories(welder_font_tests PRIVATE src)
 if(WIN32)
@@ -381,6 +384,7 @@ add_test(NAME blur COMMAND welder_blur_tests)
 add_executable(welder_tests tests/engine_tests.cpp)
 target_include_directories(welder_tests PRIVATE tests)
 target_link_libraries(welder_tests PRIVATE strata_core)
+add_dependencies(welder_tests welder)  # frame-server path-mapping regression uses the real CLI worker
 add_test(NAME engine COMMAND welder_tests)
 add_executable(welder_exr_tests tests/exr_tests.cpp)
 target_link_libraries(welder_exr_tests PRIVATE strata_core)
@@ -478,6 +482,8 @@ if(STRATA_BUILD_UI)
     src/ui/NodeGraph.cpp
     src/ui/Properties.cpp
     src/ui/Shell.cpp
+    src/ui/Preferences.cpp
+    src/ui/FontRendering.cpp
     src/ui/ScriptRunner.cpp
     src/ui/McpService.cpp
     src/ui/ScriptEditor.cpp
@@ -508,6 +514,13 @@ if(STRATA_BUILD_UI)
   src/ui/Splash.cpp
   ${WELDER_EMBEDDED}
   ${WELDER_RC})
+  add_executable(welder_font_render_tests tests/font_render_tests.cpp src/ui/FontRendering.cpp)
+  target_include_directories(welder_font_render_tests PRIVATE src)
+  target_link_libraries(welder_font_render_tests PRIVATE strata_imgui)
+  if(WIN32)
+    target_link_libraries(welder_font_render_tests PRIVATE dwrite)
+  endif()
+  add_test(NAME font_render COMMAND welder_font_render_tests)
   target_link_libraries(welder_ui PRIVATE strata_core strata_imgui)
   if(WIN32)
     target_link_libraries(welder_ui PRIVATE dwrite)

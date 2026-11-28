@@ -6,8 +6,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <limits>
 #include <sstream>
+#include <limits>
 
 #include "Panels.h"
 #include "core/NetPath.h"
@@ -2192,13 +2192,212 @@ void knobBody(Ctx& c, const KnobDef& k) {
             if((c.node->type!="Merge" && c.node->type!="Grade") || (k.name!="mask_channel" && k.name!="unpremult"))return value;
             return value=="R"?std::string("rgba.red"):value=="G"?std::string("rgba.green"):value=="B"?std::string("rgba.blue"):value=="A"?std::string("rgba.alpha"):value;
         };
-        if (kit::beginCombo("##c", optionLabel(cur).c_str(), k.width > 0 ? k.width : std::min(avail, 220.0f))) {
-            for (auto& o : opts)
-                if (ImGui::Selectable(optionLabel(o).c_str(), o == cur)) {
-                    c.app.checkpoint();
-                    change(c, k.name, [o](json& j) { j = o; });
+        if (c.node->type == "Keyer" && (k.name == "input" || k.name == "output")) {
+            if (Node* src = c.node->input(0)) {
+                for (const auto& channel : c.app.nodeInfo(src->name).channels) {
+                    const auto dot = channel.rfind('.');
+                    if (k.name == "input" && dot == std::string::npos) continue;
+                    const std::string option = k.name == "input" ? channel.substr(0, dot) : channel;
+                    if (std::find(opts.begin(), opts.end(), option) == opts.end()) opts.push_back(option);
                 }
+            }
+        }
+        const bool keyerOutput = c.node->type == "Keyer" && k.name == "output";
+        const bool keyerInput = c.node->type == "Keyer" && k.name == "input";
+        const bool keyerCombine = c.node->type == "Keyer" && k.name == "combine";
+        const char* linkKey = keyerInput ? "input_link" : "output_link";
+        const std::string linkedTo = (keyerInput || keyerOutput) ? c.node->params.str(linkKey) : "";
+        if (keyerInput || keyerOutput) cur = keyer::channelSetting(*c.node, k.name, cur);
+        auto linkMenu = [&] {
+            if (ImGui::BeginMenu("Set link")) {
+                bool found = false;
+                for (Node* target : c.node->comp->nodesOfType("Keyer")) {
+                    const Node* next = target;
+                    size_t steps = 0;
+                    while (next && next != c.node && steps++ < c.node->comp->nodes.size())
+                        next = c.node->comp->find(next->params.str(linkKey));
+                    if (next) continue;
+                    found = true;
+                    if (ImGui::MenuItem(target->name.c_str(), nullptr, linkedTo == target->name)) {
+                        c.app.checkpoint();
+                        change(c, linkKey, [name = target->name](json& value) { value = name; });
+                    }
+                }
+                if (!found) ImGui::TextDisabled("No other Keyers available");
+                ImGui::EndMenu();
+            }
+            if (ImGui::MenuItem("Remove link", nullptr, false, !linkedTo.empty())) {
+                const std::string rgb = keyer::channelSetting(*c.node, "input_rgb", "RGB");
+                c.app.checkpoint();
+                c.app.edit([name = c.node->name, key = k.name, link = std::string(linkKey), cur, rgb, keyerInput](Comp& comp) {
+                    if (Node* node = comp.find(name)) {
+                        node->params.data.erase(link);
+                        node->params.data[key] = cur;
+                        if (keyerInput) node->params.data["input_rgb"] = rgb;
+                        node->paramsChanged();
+                    }
+                });
+            }
+        };
+        auto choiceLabel = [keyerOutput, &optionLabel](const std::string& value) {
+            if (keyerOutput && value.size() == 1) {
+                if (value == "R") return std::string("rgba.red");
+                if (value == "G") return std::string("rgba.green");
+                if (value == "B") return std::string("rgba.blue");
+                if (value == "A") return std::string("rgba.alpha");
+            }
+            return optionLabel(value);
+        };
+        float width = k.width > 0 ? k.width : std::min(avail, 220.0f);
+        const float rgbRoom = ImGui::GetFontSize() * 16;
+        const bool rgbInline = avail >= rgbRoom + ImGui::GetFontSize() * 5;
+        if (keyerInput && rgbInline) width = avail - rgbRoom;
+        if (keyerOutput) {
+            const float reserve = 100 + 2 * ImGui::GetFrameHeight() + ImGui::CalcTextSize("invert").x
+                                  + 6 * ImGui::GetStyle().ItemSpacing.x;
+            width = avail >= reserve + 84 ? avail - reserve : std::max(1.0f, std::min(avail, 130.0f));
+        }
+        auto selectOutput = [&](const std::string& value) {
+            c.app.checkpoint();
+            c.app.edit([name = c.node->name, value, cur](Comp& comp) {
+                if (Node* node = comp.find(name)) {
+                    if (value == "none" && !cur.empty() && cur != "none")
+                        node->params.data["previous_output"] = cur;
+                    node->params.data["output"] = value;
+                    node->paramsChanged();
+                }
+            });
+        };
+        if (!linkedTo.empty()) ImGui::BeginDisabled();
+        if (keyerOutput) {
+            const bool enabled = !cur.empty() && cur != "none";
+            if (channelBox("Enable matte output", enabled, theme().frame, false))
+                selectOutput(enabled ? "none" : c.node->params.str("previous_output", "A"));
+            ImGui::SameLine();
+            width = std::max(1.0f, width - std::round(ImGui::GetFrameHeight() * 0.72f) - ImGui::GetStyle().ItemSpacing.x);
+        }
+        if (kit::beginCombo("##c", choiceLabel(cur).c_str(), width)) {
+            auto choose = [&](const std::string& value) {
+                if (keyerOutput) {
+                    selectOutput(value);
+                    return;
+                }
+                c.app.checkpoint();
+                change(c, k.name, [value](json& j) { j = value; });
+            };
+            if (keyerInput) {
+                const std::set<std::string> standard = {"none", "rgb", "rgba", "alpha"};
+                for (const char* layer : {"none", "rgb", "rgba", "alpha"})
+                    if (ImGui::Selectable(layer, cur == layer)) choose(layer);
+                if (ImGui::BeginMenu("Other layers")) {
+                    std::set<std::string> layers;
+                    for (const auto& layer : opts)
+                        if (!standard.count(layer)) layers.insert(layer);
+                    if (!cur.empty() && !standard.count(cur)) layers.insert(cur);
+                    for (const char* layer : {"depth", "motion", "forward", "backward", "disparity", "disparityL",
+                                              "disparityR", "mask", "rotopaint_mask", "mask_planartrack", "mask_splinewarp",
+                                              "sample", "cutout", "deep"}) {
+                        if (ImGui::Selectable(layer, cur == layer)) choose(layer);
+                        layers.erase(layer);
+                    }
+                    if (!layers.empty()) ImGui::Separator();
+                    for (const auto& layer : layers)
+                        if (ImGui::Selectable(layer.c_str(), cur == layer)) choose(layer);
+                    ImGui::EndMenu();
+                }
+                if (ImGui::BeginMenu("Enter layer name")) {
+                    static char layerName[128] = {};
+                    ImGui::SetNextItemWidth(170);
+                    if (ImGui::InputText("##layerName", layerName, sizeof layerName, ImGuiInputTextFlags_EnterReturnsTrue) &&
+                        layerName[0] != '\0') {
+                        choose(layerName);
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndMenu();
+                }
+            } else if (keyerOutput) {
+                std::set<std::string> listed;
+                auto outputItem = [&](const std::string& channel) {
+                    if (listed.insert(channel).second &&
+                        ImGui::Selectable((choiceLabel(channel) + "###" + channel).c_str(), channel == cur)) choose(channel);
+                };
+                for (const char* channel : {"none", "R", "G", "B", "A", "depth.Z", "forward.u", "forward.v",
+                                            "backward.u", "backward.v", "deep.front", "deep.back", "mask.a", "rotopaint_mask.a",
+                                            "mask_planartrack.a", "mask_splinewarp.a", "sample.coverage", "cutout.alpha", "cutout.depth"})
+                    outputItem(channel);
+                for (const auto& channel : opts) outputItem(channel);
+                if (!cur.empty()) outputItem(cur);
+                if (ImGui::BeginMenu("New output channel")) {
+                    static char channelName[128] = {};
+                    ImGui::SetNextItemWidth(180);
+                    if (ImGui::InputText("##newOutput", channelName, sizeof channelName, ImGuiInputTextFlags_EnterReturnsTrue) &&
+                        channelName[0] != '\0') {
+                        choose(resolveChannelName(channelName));
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndMenu();
+                }
+            } else if (keyerCombine) {
+                for (const auto& mode : opts)
+                    if (ImGui::MenuItem(mode.c_str(), nullptr, mode == cur)) choose(mode);
+            } else {
+                for (const auto& o : opts)
+                    if (ImGui::Selectable(optionLabel(o).c_str(), o == cur)) choose(o);
+            }
             ImGui::EndCombo();
+        }
+        if (!linkedTo.empty()) ImGui::EndDisabled();
+        if (keyerInput) {
+            const std::string enabled = keyer::channelSetting(*c.node, "input_rgb", "RGB");
+            const char* names[] = {"red", "green", "blue"};
+            const ImU32 colors[] = {IM_COL32(200, 64, 64, 255), IM_COL32(70, 170, 80, 255), IM_COL32(80, 90, 210, 255)};
+            auto store = [&](const std::string& value) {
+                c.app.checkpoint();
+                change(c, "input_rgb", [value](json& j) { j = value; });
+            };
+            if (!linkedTo.empty()) ImGui::BeginDisabled();
+            for (int i = 0; i < 3; ++i) {
+                if (i || rgbInline) ImGui::SameLine();
+                else kit::skipLabel();
+                const char channel = "RGB"[i];
+                const bool on = enabled.find(channel) != std::string::npos;
+                if (channelBox(names[i], on, colors[i], avail >= rgbRoom)) {
+                    std::string next = enabled;
+                    if (on) std::erase(next, channel);
+                    else next += channel;
+                    store(next);
+                }
+            }
+            if (!linkedTo.empty()) ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::SmallButton("...##rgb")) ImGui::OpenPopup("##rgbOptions");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("RGB input options");
+            if (ImGui::BeginPopup("##rgbOptions")) {
+                linkMenu();
+                ImGui::Separator();
+                ImGui::BeginDisabled(!linkedTo.empty());
+                if (ImGui::MenuItem("Enable all RGB")) store("RGB");
+                if (ImGui::MenuItem("Disable all RGB")) store("");
+                ImGui::EndDisabled();
+                ImGui::EndPopup();
+            }
+        }
+        if (keyerOutput) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("...##output")) ImGui::OpenPopup("##outputOptions");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Output channel options");
+            if (ImGui::BeginPopup("##outputOptions")) {
+                linkMenu();
+                ImGui::Separator();
+                ImGui::BeginDisabled(!linkedTo.empty());
+                for (const char* channel : {"A", "none"}) {
+                    if (ImGui::MenuItem(choiceLabel(channel).c_str(), nullptr, cur == channel)) {
+                        selectOutput(channel);
+                    }
+                }
+                ImGui::EndDisabled();
+                ImGui::EndPopup();
+            }
         }
         if((c.node->type=="Grade" || c.node->type=="ColorCorrect" || c.node->type=="Merge") && (k.name=="mask_channel" || k.name=="unpremult")) {
             ImGui::SameLine(0,c.node->type=="Merge"?6.f:3.f);
@@ -2210,6 +2409,8 @@ void knobBody(Ctx& c, const KnobDef& k) {
                 ImGui::EndPopup();
             }
         }
+        if (keyerCombine && ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", k.tip.c_str());
     } else if (k.type == Knob::Format) {
         // the classic format menu: the project's (root.format), the named formats, or a size of its own
         const json* fv = findParam(c.node, k.name);
@@ -2576,16 +2777,9 @@ void retimeInfo(Ctx& c) {
 }
 
 // A group's own knobs (params["knobs"]), and adding / removing them.
-void groupPanel(Ctx& c, std::set<std::string>& shown) {
+void drawUserKnobs(Ctx& c, std::set<std::string>& shown) {
     Node* n = c.node;
     shown.insert("knobs");
-    shown.insert("gizmo");
-    std::string gz = n->params.str("gizmo", "");
-    if (!gz.empty()) {
-        ImGui::TextDisabled("gizmo");
-        ImGui::SameLine(kit::labelWidth());
-        ImGui::TextUnformatted(gz.c_str());
-    }
     json defs = n->params.has("knobs") && n->params.data["knobs"].is_array() ? n->params.data["knobs"] : json::array();
     for (auto& d : defs) {
         KnobDef k;
@@ -2623,20 +2817,11 @@ void groupPanel(Ctx& c, std::set<std::string>& shown) {
         shown.insert(k.name);
         knob(c, k);
     }
-    // ---- buttons
-    ImGui::Spacing();
-    if (ImGui::Button("open group")) {
-        c.app.selection = {n->name};
-        graphEnter(c.app, c.ui);
-    }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show the nodes inside (Ctrl+Enter in the node graph)");
-    ImGui::SameLine();
-    if (ImGui::Button("save as gizmo")) {
-        std::string err;
-        if (!saveGizmo(c.app, n->name, &err)) c.app.message(err);
-    }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Save the group to your gizmo folder; it shows up under Gizmos in the node menu");
-    ImGui::SameLine();
+}
+
+void userKnobManager(Ctx& c) {
+    Node* n = c.node;
+    const json defs = n->params.has("knobs") && n->params.data["knobs"].is_array() ? n->params.data["knobs"] : json::array();
     if (ImGui::Button("add knob...")) ImGui::OpenPopup("add_knob");
     if (ImGui::BeginPopup("add_knob")) {
         static char name[64] = "amount", lbl[64] = "";
@@ -2651,10 +2836,13 @@ void groupPanel(Ctx& c, std::set<std::string>& shown) {
             ImGui::InputFloat("slider from", &lo);
             ImGui::InputFloat("slider to", &hi);
         }
-        ImGui::TextDisabled("inside the group, read it as parent.%s", name);
+        if (n->type == "Group") ImGui::TextDisabled("inside the group, read it as parent.%s", name);
         if (ImGui::Button("add")) {
             std::string nm = name, lb = *lbl ? lbl : name, ty = types[type];
             bool clash = n->params.has(nm) || nm.empty() || !(std::isalpha((unsigned char)nm[0]) || nm[0] == '_');
+            if (const NodeDef* schema = nodeDef(n->type))
+                for (const auto& k : schema->knobs)
+                    if (k.name == nm) clash = true;
             for (auto& d : defs)
                 if (d.value("name", "") == nm) clash = true;
             if (clash) c.app.message("pick another knob name (a letter first, not in use)");
@@ -2700,6 +2888,34 @@ void groupPanel(Ctx& c, std::set<std::string>& shown) {
             ImGui::EndPopup();
         }
     }
+}
+
+void groupPanel(Ctx& c, std::set<std::string>& shown) {
+    Node* n = c.node;
+    shown.insert("knobs");
+    shown.insert("gizmo");
+    std::string gz = n->params.str("gizmo", "");
+    if (!gz.empty()) {
+        ImGui::TextDisabled("gizmo");
+        ImGui::SameLine(kit::labelWidth());
+        ImGui::TextUnformatted(gz.c_str());
+    }
+    drawUserKnobs(c, shown);
+    // ---- buttons
+    ImGui::Spacing();
+    if (ImGui::Button("open group")) {
+        c.app.selection = {n->name};
+        graphEnter(c.app, c.ui);
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show the nodes inside (Ctrl+Enter in the node graph)");
+    ImGui::SameLine();
+    if (ImGui::Button("save as gizmo")) {
+        std::string err;
+        if (!saveGizmo(c.app, n->name, &err)) c.app.message(err);
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Save the group to your gizmo folder; it shows up under Gizmos in the node menu");
+    ImGui::SameLine();
+    userKnobManager(c);
 }
 
 // ------------------------------------------------------------------ info rows and actions
@@ -2797,13 +3013,15 @@ const std::vector<float>& keyerHistogram(App& app, Node* n) {
         return h.bins;
     }
     const std::string op = n->params.str("operation", "luminance key");
+    const std::string layer = keyer::channelSetting(*n, "input", "rgb");
+    const std::string enabled = keyer::channelSetting(*n, "input_rgb", "RGB");
     Engine& ue = app.uiEngine();
     const double f = app.frame;
-    const std::string key = op + "|" + std::to_string(ue.hash(in, f)) + "|" + std::to_string(f);
+    const std::string key = op + "|" + layer + "|" + enabled + "|" + std::to_string(ue.hash(in, f)) + "|" + std::to_string(f);
     if (key != h.key && !h.job.valid()) {
         h.pending = key;
         const std::string name = n->name;
-        h.job = std::async(std::launch::async, [&app, name, op, f]() {
+        h.job = std::async(std::launch::async, [&app, name, op, layer, enabled, f]() {
             std::vector<float> bins(kHistN, 0.0f);
             static Engine e([] {
                 EngineOptions o;
@@ -2823,11 +3041,13 @@ const std::vector<float>& keyerHistogram(App& app, Node* n) {
                 const double s = std::min(1.0, 320.0 / std::max(1, std::max(fm.width, fm.height)));
                 e.setScale(s);
                 ImagePtr im = e.renderRegion(src, f, Box(0, 0, std::max(1, (int)std::ceil(fm.width * s)), std::max(1, (int)std::ceil(fm.height * s))));
-                const int R = im->ch("R"), G = im->ch("G"), B = im->ch("B"), A = im->ch("A");
+                auto channels = keyer::layerChannels(*im, layer);
+                for (int i = 0; i < 3; ++i)
+                    if (enabled.find("RGB"[i]) == std::string::npos) channels[i] = -1;
                 for (int y = im->bounds.y1; y < im->bounds.y2; ++y)
                     for (int x = im->bounds.x1; x < im->bounds.x2; ++x) {
-                        const float p[4] = {R >= 0 ? im->at(x, y, R) : 0.f, G >= 0 ? im->at(x, y, G) : 0.f, B >= 0 ? im->at(x, y, B) : 0.f,
-                                            A >= 0 ? im->at(x, y, A) : 1.f};
+                        const float p[4] = {im->at(x, y, channels[0]), im->at(x, y, channels[1]),
+                                            im->at(x, y, channels[2]), im->at(x, y, channels[3])};
                         const float v = keyer::measure(op, p);
                         const int b = (int)std::floor((v - kHistLo) / (kHistHi - kHistLo) * kHistN);
                         if (b >= 0 && b < kHistN) bins[b] += 1;
@@ -2840,6 +3060,59 @@ const std::vector<float>& keyerHistogram(App& app, Node* n) {
     return h.bins;
 }
 
+void keyerKnobMenu(App& app, UiState& ui, Node* n, const json& original) {
+    if (ImGui::BeginMenu("Manage user knobs")) {
+        Ctx c{app, ui, n, app.frame, app.comp->format};
+        userKnobManager(c);
+        ImGui::EndMenu();
+    }
+    const char* reset = "Reset knobs to defaults";
+    const char* key = "Set key on range";
+    const char* bake = "Remove range animation";
+    const std::vector<double> defaults = {0, 1, 1, 1};
+    const double frame = app.frame;
+    const auto values = n->params.vec<4>("range", frame, {0, 1, 1, 1});
+    const json* range = findParam(n, "range");
+    const bool hasAnimation = range && range->is_array() &&
+        std::any_of(range->begin(), range->end(), [](const json& value) { return animated(value); });
+    const bool setKeys = ImGui::MenuItem(key);
+    const bool resetKnobs = ImGui::MenuItem(reset);
+    const bool revert = ImGui::MenuItem("Revert knobs to panel opening", nullptr, false, original != n->params.data);
+    const bool removeAnimation = ImGui::MenuItem(bake, nullptr, false, hasAnimation);
+    if (ImGui::BeginMenu("Edit node help")) {
+        const auto* def = nodeDef(n->type);
+        const std::string help = n->ui.value("help", def ? def->help : std::string{});
+        char buffer[2048];
+        std::snprintf(buffer, sizeof buffer, "%s", help.c_str());
+        ImGui::SetNextItemWidth(300);
+        if (ImGui::InputText("##help", buffer, sizeof buffer, ImGuiInputTextFlags_EnterReturnsTrue)) {
+            app.checkpoint();
+            app.edit([name = n->name, text = std::string(buffer)](Comp& comp) {
+                if (Node* node = comp.find(name)) node->ui["help"] = text;
+            });
+        }
+        ImGui::EndMenu();
+    }
+    if (!setKeys && !resetKnobs && !revert && !removeAnimation) return;
+    app.checkpoint();
+    app.edit([name = n->name, frame, values, defaults, setKeys, resetKnobs, revert, original](Comp& comp) {
+        Node* node = comp.find(name);
+        if (!node) return;
+        if (revert) {
+            node->params.data = original;
+        } else if (resetKnobs) {
+            for (const char* param : {"input", "input_rgb", "input_link", "output", "output_link", "previous_output", "combine", "operation", "invert", "range"})
+                eraseParam(node, param);
+        } else if (setKeys) {
+            json& range = expand(node->params.data["range"], 4, defaults);
+            for (int i = 0; i < 4; ++i) setKey(range[i], frame, values[i]);
+        } else {
+            node->params.data["range"] = values;
+        }
+        node->paramsChanged();
+    });
+}
+
 void keyerRangeGraph(Ctx& c) {
     Node* n = c.node;
     const double frame = c.frame;
@@ -2847,23 +3120,37 @@ void keyerRangeGraph(Ctx& c) {
     float v[4] = {(float)rg[0], (float)rg[1], (float)rg[2], (float)rg[3]};
     static std::string dragKey;   // "<node>:<what>" while dragging
     static float dom0 = 0, dom1 = 1, startV[4], startX = 0;
-    static int what = -1;  // 0..3 a corner, 4 top (B+C), 5 left side (A+B), 6 right side (C+D)
+    static int what = -1;
     const bool dragging = dragKey.rfind(n->name + ":", 0) == 0;
+    ImGuiStorage* view = ImGui::GetStateStorage();
+    const ImGuiID zoomId = ImGui::GetID("##rangeZoom");
+    const float zoom = view->GetFloat(zoomId, 1.0f);
     float x0 = dom0, x1 = dom1;
     if (!dragging) {
-        x0 = std::min(0.0f, v[0]);
-        x1 = std::max(1.0f, v[3]);
-        const float pad = (x1 - x0) * 0.04f;
-        x0 -= pad, x1 += pad;
+        x0 = std::min({0.0f, v[0], v[1], v[2], v[3]});
+        x1 = std::max({1.0f, v[0], v[1], v[2], v[3]});
+        if (zoom != 1.0f) {
+            const float center = x0 + (x1 - x0) * 0.5f;
+            const float halfWidth = (x1 - x0) * 0.5f / zoom;
+            x0 = center - halfWidth;
+            x1 = center + halfWidth;
+        }
     }
-    const float W = ImGui::GetContentRegionAvail().x, H = 104;
+    kit::rowLabel("matte range", "Drag the A–D handles to shape the output matte.");
+    const float toolsWidth = ImGui::CalcTextSize("Fit").x + 2 * ImGui::GetStyle().FramePadding.x;
+    const float W = std::max(1.0f, ImGui::GetContentRegionAvail().x - toolsWidth - ImGui::GetStyle().ItemSpacing.x);
+    const float H = ImGui::GetFrameHeight() * 9;
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("##keyrange", ImVec2(W, H));
     const bool hovered = ImGui::IsItemHovered(), active = ImGui::IsItemActive();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     auto X = [&](float val) { return p.x + (val - x0) / (x1 - x0) * W; };
-    const float yb = p.y + H - 6, yt = p.y + 10;
-    dl->AddRectFilled(p, ImVec2(p.x + W, p.y + H), IM_COL32(18, 20, 20, 255), 3);
+    const float yb = p.y + H - ImGui::GetFontSize() - 5, yt = p.y + 10;
+    dl->AddRectFilled(p, ImVec2(p.x + W, p.y + H), IM_COL32(18, 20, 20, 255), 4);
+    for (int i = 0; i <= 4; ++i) {
+        const float y = yt + (yb - yt) * i / 4;
+        dl->AddLine(ImVec2(p.x, y), ImVec2(p.x + W, y), IM_COL32(47, 51, 51, 255));
+    }
     // the histogram (square root, so small populations show)
     const auto& bins = keyerHistogram(c.app, n);
     if (!bins.empty()) {
@@ -2878,46 +3165,65 @@ void keyerRangeGraph(Ctx& c) {
             }
     }
     // 0 and 1
-    for (float g : {0.0f, 1.0f})
-        if (g > x0 && g < x1) dl->AddLine(ImVec2(X(g), p.y), ImVec2(X(g), p.y + H), IM_COL32(70, 70, 70, 255));
+    for (float g : {0.0f, 1.0f}) {
+        if (g < x0 || g > x1) continue;
+        const char* label = g == 0 ? "0" : "1";
+        const float x = X(g);
+        const float labelWidth = ImGui::CalcTextSize(label).x;
+        dl->AddLine(ImVec2(x, yt), ImVec2(x, yb), IM_COL32(75, 81, 81, 255));
+        dl->AddText(ImVec2(std::clamp(x - labelWidth * 0.5f, p.x, p.x + std::max(0.0f, W - labelWidth)), yb + 3),
+                    theme().muted, label);
+    }
     // the key curve (as the keyer applies it), filled
     std::vector<ImVec2> pts;
-    for (int i = 0; i <= 160; ++i) {
-        const float val = x0 + (x1 - x0) * i / 160;
-        pts.push_back(ImVec2(p.x + W * i / 160, yb - keyer::curve(val, v[0], v[1], v[2], v[3]) * (yb - yt)));
+    float knots[] = {x0, v[0], v[1], v[2], v[3], x1};
+    std::sort(std::begin(knots), std::end(knots));
+    for (float val : knots) {
+        if (val < x0 || val > x1) continue;
+        for (float sample : {std::nextafter(val, x0), val, std::nextafter(val, x1)})
+            pts.emplace_back(X(val), yb - keyer::matte(sample, v[0], v[1], v[2], v[3], n->params.str("response", "legacy") != "nuke") * (yb - yt));
     }
     for (size_t i = 1; i < pts.size(); ++i)
         dl->AddQuadFilled(ImVec2(pts[i - 1].x, yb), pts[i - 1], pts[i], ImVec2(pts[i].x, yb), IM_COL32(98, 179, 94, 45));
     dl->AddPolyline(pts.data(), (int)pts.size(), IM_COL32(120, 220, 110, 255), 0, 1.6f);
     const ImVec2 hp[4] = {{X(v[0]), yb}, {X(v[1]), yt}, {X(v[2]), yt}, {X(v[3]), yb}};
+    const float middle = (yt + yb) * 0.5f;
+    const float halfLabel = ImGui::GetTextLineHeight() * 0.65f;
+    const float handleEnd[4] = {middle + halfLabel, middle - halfLabel, middle - halfLabel, middle + halfLabel};
     const char* hn[4] = {"A", "B", "C", "D"};
     // what the mouse would grab
     const ImVec2 m = ImGui::GetIO().MousePos;
     int hot = -1;
     if (hovered || active) {
-        float best = 9;
+        float best = ImGui::GetFontSize() * 1.7f;
         for (int i = 0; i < 4; ++i) {
-            const float d = std::hypot(m.x - hp[i].x, m.y - hp[i].y);
+            if (v[i] < x0 || v[i] > x1) continue;
+            // At an edge, use the upper and lower halves to pick coincident handles.
+            const bool plateauEdge = v[1] == x0 || v[1] == x1;
+            const bool pickC = plateauEdge ? m.y >= (yt + handleEnd[1]) * 0.5f : m.x > hp[1].x;
+            if (v[1] == v[2] && ((i == 1 && pickC) || (i == 2 && !pickC))) continue;
+            const float nearestY = std::clamp(m.y, std::min(hp[i].y, handleEnd[i]),
+                                              std::max(hp[i].y, handleEnd[i]));
+            const float d = std::hypot(m.x - hp[i].x, m.y - nearestY);
             if (d < best) best = d, hot = i;
-        }
-        if (hot < 0) {
-            const float mv = x0 + (m.x - p.x) / W * (x1 - x0);
-            if (mv >= v[1] && mv <= v[2] && m.y < p.y + H * 0.5f) hot = 4;
-            else if (mv >= v[0] && mv < v[1]) hot = 5;
-            else if (mv > v[2] && mv <= v[3]) hot = 6;
-            else hot = std::fabs(mv - v[0]) < std::fabs(mv - v[3]) ? (std::fabs(mv - v[0]) < std::fabs(mv - v[1]) ? 0 : 1)
-                                                                    : (std::fabs(mv - v[3]) < std::fabs(mv - v[2]) ? 3 : 2);
         }
     }
     if (dragging) hot = what;
     for (int i = 0; i < 4; ++i) {
-        const bool lit = hot == i || (hot == 4 && (i == 1 || i == 2)) || (hot == 5 && i < 2) || (hot == 6 && i > 1);
-        const float r = lit ? 4.5f : 3.5f;
-        dl->AddRectFilled(ImVec2(hp[i].x - r, hp[i].y - r), ImVec2(hp[i].x + r, hp[i].y + r), lit ? themeAccent(255) : IM_COL32(200, 230, 200, 255));
-        dl->AddText(ImVec2(hp[i].x - 3, i == 0 || i == 3 ? hp[i].y - 20 : hp[i].y - 9 - ImGui::GetFontSize() * 0.9f + 8),
-                    IM_COL32(170, 170, 170, 200), hn[i]);
+        if (v[i] < x0 || v[i] > x1) continue;
+        const bool lit = hot == i;
+        const ImU32 color = lit ? themeAccent(255) : IM_COL32(135, 197, 224, 255);
+        dl->AddLine(hp[i], ImVec2(hp[i].x, handleEnd[i]), color, lit ? 5.0f : 4.0f);
+        const float labelWidth = ImGui::CalcTextSize(hn[i]).x;
+        const bool labelLeft = v[i] == x1 || (i == 1 && v[i] != x0);
+        const float labelX = std::clamp(hp[i].x + (labelLeft ? -labelWidth - 7 : 7),
+                                        p.x, p.x + std::max(0.0f, W - labelWidth));
+        const bool sharedEdge = v[1] == v[2] && (v[1] == x0 || v[1] == x1);
+        const float anchorY = i == 1 && sharedEdge ? (yt + handleEnd[1]) * 0.5f : handleEnd[i];
+        const float labelY = anchorY - ImGui::GetFontSize() * 0.5f;
+        dl->AddText(ImVec2(labelX, labelY), ImGui::GetColorU32(ImGuiCol_Text), hn[i]);
     }
-    if (ImGui::IsItemActivated()) {
+    if (ImGui::IsItemActivated() && hot >= 0) {
         c.app.checkpoint();
         dragKey = n->name + ":" + std::to_string(hot);
         what = hot;
@@ -2927,26 +3233,32 @@ void keyerRangeGraph(Ctx& c) {
     }
     if (active && dragging && ImGui::GetIO().MouseDelta.x != 0) {
         const float dv = (m.x - startX) / W * (dom1 - dom0);
-        float nv[4] = {startV[0], startV[1], startV[2], startV[3]};
-        auto move = [&](int i) { nv[i] = startV[i] + dv; };
-        if (what < 4) move(what);
-        else if (what == 4) move(1), move(2);
-        else if (what == 5) move(0), move(1);
-        else move(2), move(3);
-        // keep A <= B <= C <= D, pushing the neighbours of what moved
-        for (int i = 1; i < 4; ++i) nv[i] = std::max(nv[i], nv[i - 1]);
-        for (int i = 2; i >= 0; --i) nv[i] = std::min(nv[i], nv[i + 1]);
-        auto r4 = [](float x) { return std::round(x * 10000) / 10000.0; };
-        const std::vector<double> defs = {0, 0, 1, 1};
-        const double fr = frame;
-        change(c, "range", [nv, r4, fr, defs](json& j) {
-            for (int i = 0; i < 4; ++i) setComp(j, 4, i, r4(nv[i]), fr, defs);
-        });
+        const int handle = what;
+        const float lower = handle == 0 ? 0.0f : std::max(0.0f, startV[handle - 1]);
+        const float upper = handle == 3 ? 1.0f : std::min(1.0f, startV[handle + 1]);
+        if (lower <= upper) {
+            const float value = std::clamp(startV[handle] + dv, lower, upper);
+            if (value != v[handle])
+                change(c, "range", [handle, value, frame](json& j) {
+                    setComp(j, 4, handle, value, frame, {0, 1, 1, 1});
+                });
+        }
     }
     if (!active && dragging) dragKey.clear();
-    if (hovered && !active)
-        ImGui::SetTooltip("Drag a corner (A, B, C, D), the top (B and C together) or a side (A + B, C + D).\n"
+    if (hovered && !active && hot >= 0 && hot < 4)
+        ImGui::SetTooltip("%s  %.8g", hn[hot], rg[hot]);
+    else if (hovered && !active)
+        ImGui::SetTooltip("Drag one range handle at a time. Adjacent handles limit its movement.\n"
                           "Grey: how much of the frame measures each value.");
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    if (ImGui::Button("+##range", ImVec2(toolsWidth, 0))) view->SetFloat(zoomId, std::min(zoom * 1.25f, 4.0f));
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Zoom in on the graph");
+    if (ImGui::Button("-##range", ImVec2(toolsWidth, 0))) view->SetFloat(zoomId, std::max(zoom / 1.25f, 0.25f));
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Zoom out on the graph");
+    if (ImGui::Button("Fit##range", ImVec2(toolsWidth, 0))) view->SetFloat(zoomId, 1.0f);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fit the graph to all range handles");
+    ImGui::EndGroup();
 }
 
 // A Precomp's frames: the range of what it holds, the project's, or its own.
@@ -3839,14 +4151,6 @@ void buttonAction(Ctx& c, const std::string& action) {
 // holds the knobs up to the next divider; "@card" opens one with no title; an
 // untitled divider is a line.
 void drawKnobs(Ctx& c, const NodeDef& def, const std::string& tab) {
-    if (c.node->type == "Blur") {
-        for (auto k : def.knobs) {
-            if (k.tab != tab || !whenOk(c.node, def, k)) continue;
-            if (k.name == "mask_channel") k.width = std::max(85.f, ImGui::GetContentRegionAvail().x - kit::labelWidth() - 205);
-            knob(c, k);
-        }
-        return;
-    }
     if(c.node->type=="Write"){
         auto extension=[&]{std::string ext=std::filesystem::path(c.node->params.str("file")).extension().string();if(!ext.empty())ext.erase(ext.begin());if(ext.empty())ext=c.node->params.str("file_type");for(char& ch:ext)ch=(char)std::tolower((unsigned char)ch);return ext=="jpg"?std::string("jpeg"):ext=="tif"?std::string("tiff"):ext=="tga"?std::string("targa"):ext;};
         const std::string ext=extension();
@@ -3992,6 +4296,14 @@ void drawKnobs(Ctx& c, const NodeDef& def, const std::string& tab) {
         draw("create_directories");draw("render_order",nullptr,72);draw("write_render",nullptr,80,true);draw("first","frame range",72);draw("last","",72,true);draw("use_limit",nullptr,0,true);draw("read_file");
         ImGui::BeginDisabled(!c.node->params.flag("read_file",false));draw("missing_frames",nullptr,105);draw("write_reload",nullptr,80,true);draw("read_all_lines",nullptr,0,true);ImGui::EndDisabled();return;
     }
+    if (c.node->type == "Blur") {
+        for (auto k : def.knobs) {
+            if (k.tab != tab || !whenOk(c.node, def, k)) continue;
+            if (k.name == "mask_channel") k.width = std::max(85.f, ImGui::GetContentRegionAvail().x - kit::labelWidth() - 205);
+            knob(c, k);
+        }
+        return;
+    }
     if(c.node->type=="Transform" || c.node->type=="TransformMasked") {
         for(const char* name:{"translate","rotate","scale","skewX","skewY","skew_order","center","invert","filter","clamp","black_outside","motionblur","shutter","shutteroffset","shuttercustomoffset","mask_channel","invert_mask"}) {
             auto it=std::find_if(def.knobs.begin(),def.knobs.end(),[&](const KnobDef& k){return k.name==name;});
@@ -4081,7 +4393,107 @@ void drawKnobs(Ctx& c, const NodeDef& def, const std::string& tab) {
     if (card) kit::endCard();
 }
 
-static void mergeNodeTab(Ctx& c) {
+static void backdropControls(Ctx& c) {
+    Node* node = c.node;
+    auto setParam = [&](const char* key, json value, bool checkpoint = true) {
+        if (checkpoint) c.app.checkpoint();
+        change(c, key, [value = std::move(value)](json& current) { current = value; });
+    };
+    auto setUi = [&](const char* key, json value, bool checkpoint = true) {
+        if (checkpoint) c.app.checkpoint();
+        c.app.edit([name = node->name, key, value = std::move(value)](Comp& comp) {
+            if (Node* backdrop = comp.find(name)) backdrop->ui[key] = value;
+        });
+    };
+    kit::rowLabel("Label");
+    const KnobDef label{"label", "Label", Knob::Text, "", 0, 1, {}, ""};
+    textEdit(c, label, node->params.str("label", ""), ImGui::GetContentRegionAvail().x);
+
+    kit::rowLabel("Font");
+    const auto& families = nodeLabelFamilies();
+    const std::string family = node->ui.value("note_font", families.empty() ? std::string("Roboto") : families.front());
+    if (kit::beginCombo("##backdropFont", family.c_str(), std::min(150.0f, ImGui::GetContentRegionAvail().x))) {
+        for (const auto& option : families)
+            if (ImGui::Selectable(option.c_str(), option == family)) setUi("note_font", option);
+        ImGui::EndCombo();
+    }
+    auto styleToggle = [&](const char* label, const char* key) {
+        ImGui::SameLine();
+        const bool on = node->ui.value(key, false);
+        if (on) ImGui::PushStyleColor(ImGuiCol_Button, theme().segmentOn);
+        if (ImGui::Button(label, ImVec2(24, 0))) setUi(key, !on);
+        if (on) ImGui::PopStyleColor();
+    };
+    styleToggle("B", "note_bold");
+    ImGui::SetItemTooltip("Bold label");
+    styleToggle("I", "note_italic");
+    ImGui::SetItemTooltip("Italic label");
+    ImGui::SameLine();
+    int fontSize = std::clamp((int)node->params.num("note_font_size", 0, 14), 6, 80);
+    ImGui::SetNextItemWidth(46);
+    if (ImGui::InputInt("##backdropFontSize", &fontSize, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue))
+        setParam("note_font_size", std::clamp(fontSize, 6, 80));
+    ImGui::SetItemTooltip("Label font size");
+    ImGui::SameLine();
+    float textColor[] = {0.92f, 0.92f, 0.92f};
+    const auto savedColor = node->ui.value("note_font_color", json::array());
+    if (savedColor.is_array() && savedColor.size() >= 3)
+        for (int i = 0; i < 3; ++i)
+            if (savedColor[i].is_number()) textColor[i] = savedColor[i].get<float>();
+    const float buttonHeight = ImGui::GetFrameHeight();
+    if (ImGui::Button("    Color##backdropLabelColor", ImVec2(64, buttonHeight)))
+        ImGui::OpenPopup("##backdropLabelPicker");
+    const ImVec2 buttonMin = ImGui::GetItemRectMin(), buttonMax = ImGui::GetItemRectMax();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->AddLine(ImVec2(buttonMin.x + 2, buttonMin.y + 1), ImVec2(buttonMax.x - 2, buttonMin.y + 1),
+                      IM_COL32(255, 255, 255, 45));
+    drawList->AddLine(ImVec2(buttonMin.x + 2, buttonMax.y - 1), ImVec2(buttonMax.x - 2, buttonMax.y - 1),
+                      IM_COL32(0, 0, 0, 100));
+    const ImVec2 chipMin(buttonMin.x + 6, buttonMin.y + (buttonHeight - 10) * 0.5f);
+    const ImVec2 chipMax(chipMin.x + 10, chipMin.y + 10);
+    drawList->AddRectFilled(chipMin, chipMax, ImGui::ColorConvertFloat4ToU32(ImVec4(textColor[0], textColor[1], textColor[2], 1)));
+    drawList->AddRect(chipMin, chipMax, IM_COL32(0, 0, 0, 180));
+    ImGui::SetItemTooltip("Label color");
+    if (ImGui::BeginPopup("##backdropLabelPicker")) {
+        ImGui::SetNextItemWidth(180);
+        if (ImGui::ColorPicker3("##labelColor", textColor))
+            setUi("note_font_color", json::array({textColor[0], textColor[1], textColor[2]}));
+        ImGui::EndPopup();
+    }
+
+    kit::rowLabel("Appearance");
+    const bool outline = node->params.str("appearance", "fill") == "outline";
+    if (kit::beginCombo("##backdropAppearance", outline ? "Outline" : "Fill", 100)) {
+        if (ImGui::Selectable("Fill", !outline)) setParam("appearance", "fill");
+        if (ImGui::Selectable("Outline", outline)) setParam("appearance", "outline");
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!outline);
+    float width = (float)node->params.num("border_width", 0, 2);
+    ImGui::SetNextItemWidth(105);
+    const bool widthChanged = ImGui::SliderFloat("Width", &width, 0, 10, "%.1f");
+    if (ImGui::IsItemActivated()) c.app.checkpoint();
+    if (widthChanged) setParam("border_width", width, false);
+    ImGui::EndDisabled();
+
+    kit::rowLabel("Backdrop color");
+    const auto color = node->params.vec<4>("color", 0, {0.42, 0.43, 0.46, 1});
+    float fill[] = {(float)color[0], (float)color[1], (float)color[2]};
+    const bool fillChanged = ImGui::ColorEdit3("##backdropColor", fill, ImGuiColorEditFlags_NoInputs);
+    if (fillChanged) setParam("color", json::array({fill[0], fill[1], fill[2], color[3]}));
+    kit::skipLabel();
+    bool bookmark = node->ui.value("bookmark", false);
+    if (kit::checkbox("Bookmark", &bookmark, "Show this backdrop in the Node Graph Bookmarks menu"))
+        setUi("bookmark", bookmark);
+    kit::rowLabel("Z Order");
+    int order = (int)node->params.num("z_order", 0, 0);
+    ImGui::SetNextItemWidth(80);
+    if (ImGui::InputInt("##backdropOrder", &order, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue))
+        setParam("z_order", order);
+}
+
+static void detailedNodeTab(Ctx& c) {
     struct LabelColumn {
         float previous=kit::setLabelWidth(104);
         ~LabelColumn(){kit::setLabelWidth(previous);}
@@ -4132,13 +4544,21 @@ static void mergeNodeTab(Ctx& c) {
         if(ImGui::IsItemActivated())c.app.checkpoint();ImGui::EndPopup();
     }
     kit::skipLabel();
+    auto nextCheckbox = [](const char* label) {
+        ImGui::SameLine();
+        const float width = ImGui::CalcTextSize(label).x + ImGui::GetFrameHeight() + 8;
+        if (ImGui::GetContentRegionAvail().x < width) {
+            ImGui::NewLine();
+            kit::skipLabel();
+        }
+    };
     auto check=[&](const char* text,const char* key,const char* tip){bool on=n->ui.value(key,false);if(kit::checkbox(text,&on,tip)){setUi(key,on);if(std::string(key)=="cached")c.app.clearCaches();}};
-    check("Hide Input","hide_input","Hide the B input pipe without changing its connection");
-    ImGui::SameLine();check("Cached","cached","Prioritize this node's tiles in memory, within the cache budget");
-    ImGui::SameLine();bool disabled=n->params.flag("disable",false);
+    check("Hide Input","hide_input","Hide the primary input pipe without changing its connection");
+    nextCheckbox("Cached");check("Cached","cached","Prioritize this node's tiles in memory, within the cache budget");
+    nextCheckbox("Disable");bool disabled=n->params.flag("disable",false);
     if(kit::checkbox("Disable",&disabled)){c.app.checkpoint();change(c,"disable",[disabled](json& j){j=disabled;});}
-    ImGui::SameLine();check("Dope Sheet","dope_sheet","Keep this node's animation keys visible on the timeline when its panel is closed");
-    ImGui::SameLine();check("Bookmark","bookmark","Add this node to the node graph's Bookmarks menu");
+    nextCheckbox("Dope Sheet");check("Dope Sheet","dope_sheet","Keep this node's animation keys visible on the timeline when its panel is closed");
+    nextCheckbox("Bookmark");check("Bookmark","bookmark","Add this node to the node graph's Bookmarks menu");
     kit::skipLabel();check("Postage Stamp","postage_stamp","Show this node's thumbnail on the node graph");
     ImGui::SameLine();int frame=(int)n->ui.value("postage_stamp_frame",1.0);
     ImGui::SetNextItemWidth(52);if(ImGui::InputInt("##stampFrame",&frame,0,0))setUi("postage_stamp_frame",frame);
@@ -4149,7 +4569,7 @@ static void mergeNodeTab(Ctx& c) {
     ImGui::SetNextItemWidth(70);if(ImGui::InputInt("##lifeStart",&first,0,0)){c.app.checkpoint();change(c,"lifetimeStart",[first](json& j){j=first;});}
     ImGui::SameLine();ImGui::SetNextItemWidth(70);if(ImGui::InputInt("##lifeEnd",&last,0,0)){c.app.checkpoint();change(c,"lifetimeEnd",[last](json& j){j=last;});}
     ImGui::EndDisabled();ImGui::SameLine();
-    if(kit::checkbox("Use Lifetime",&use,"Outside this range, pass the B input through")){
+    if(kit::checkbox("Use Lifetime",&use,"Outside this range, pass the primary input through")){
         c.app.checkpoint();
         if(use){change(c,"lifetimeStart",[first](json& j){j=first;});change(c,"lifetimeEnd",[last](json& j){j=last;});}
         change(c,"useLifetime",[use](json& j){j=use;});
@@ -4158,7 +4578,7 @@ static void mergeNodeTab(Ctx& c) {
 
 // The Node tab every node has (the classic): label, colours, hide input, disable, lifetime.
 void nodeTab(Ctx& c) {
-    if(c.node->type=="Blur" || c.node->type=="Write" || c.node->type=="Merge" || c.node->type=="Grade"){mergeNodeTab(c);return;}
+    if(c.node->type=="Keyer" || c.node->type=="Blur" || c.node->type=="Write" || c.node->type=="Merge" || c.node->type=="Grade"){detailedNodeTab(c);return;}
     Node* n = c.node;
     // ui-only fields (no re-render): label, font size, tile colour, hide input
     auto setUi = [&](const std::string& key, json v, bool undoStep = true) {
@@ -4242,13 +4662,31 @@ void nodeTab(Ctx& c) {
 
 static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
     ImGui::PushID(n->name.c_str());
-    const bool referencePanel = n->type=="Merge" || n->type=="Grade" || n->type=="Blur" || n->type=="Write" ||
-                                n->type=="ColorCorrect" || n->type=="Transform" || n->type=="TransformMasked";
+    struct KeyerTypography {
+        bool enabled;
+        ImU32 muted = 0, value = 0;
+        explicit KeyerTypography(bool on) : enabled(on) {
+            if (!enabled) return;
+            muted = theme().muted;
+            value = theme().value;
+            theme().muted = IM_COL32(191, 191, 191, 255);
+            theme().value = IM_COL32(224, 224, 224, 255);
+            ImGui::PushFont(theme().regular, ImGui::GetFontSize());
+            ImGui::PushStyleColor(ImGuiCol_Text, theme().value);
+        }
+        ~KeyerTypography() {
+            if (!enabled) return;
+            ImGui::PopStyleColor();
+            ImGui::PopFont();
+            theme().muted = muted;
+            theme().value = value;
+        }
+    } keyerTypography(n->type == "Keyer");
     struct CompactMerge {
         bool enabled, reference=false, previousReference=false;
         float label=0;ImU32 muted=0;
-        CompactMerge(bool on,bool ref,bool merge,bool blur,bool write):enabled(on),reference(ref){if(on){
-            label=kit::setLabelWidth(write?124:blur?66:merge?88:108);
+        CompactMerge(bool on,bool ref,bool merge,bool write,bool blur):enabled(on),reference(ref){if(on){
+            label=kit::setLabelWidth(blur?66:merge?88:108);
             previousReference=kit::setReferenceFields(ref);
             muted=theme().muted;if(ref)theme().muted=IM_COL32(220,220,220,255);
             ImGui::PushFont(write?timelineReferenceFont():theme().regular,write?12.f:blur?13.f:ref?15.f:14.f);
@@ -4259,7 +4697,8 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
             ImGui::PushStyleColor(ImGuiCol_FrameBg,IM_COL32(58,58,58,255));
         }}
         ~CompactMerge(){if(enabled){theme().muted=muted;kit::setReferenceFields(previousReference);kit::setLabelWidth(label);ImGui::PopStyleColor();ImGui::PopStyleVar(4);ImGui::PopFont();}}
-    } compactMerge(referencePanel, referencePanel, n->type=="Merge", n->type=="Blur", n->type=="Write");
+    } compactMerge(n->type=="Blur" || n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || (n->type=="TransformMasked" || n->type=="Write")),n->type=="Blur" || n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || (n->type=="TransformMasked" || n->type=="Write")),n->type=="Merge",n->type=="Write",n->type=="Blur");
+    if(n->type=="Write")kit::setLabelWidth(124);
     // the header: a card with the category colour as a strip down its left side, the name in
     // the medium weight, the type muted after it
     const ImU32 cc = categoryColor(categoryOf(n->type));
@@ -4275,8 +4714,8 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
     }
     ImGui::PopFont();
     ImGui::PopStyleColor(2);
-    if (keepOpen && ImGui::BeginPopupContextItem("panel_menu")) {  // (not on a floating panel itself)
-        if (ImGui::MenuItem("Float this panel (OK / Cancel)")) openFloatPanel(app, ui, n->name);
+    if (keepOpen && n->type != "Keyer" && ImGui::BeginPopupContextItem("panel_menu")) {
+        if (keepOpen && ImGui::MenuItem("Float this panel (OK / Cancel)")) openFloatPanel(app, ui, n->name);
         if (const NodeDef* d = nodeDef(n->type); d && ImGui::MenuItem("Reset all knobs to default")) {  // (#76)
             std::vector<std::string> keys;
             for (auto& k : d->knobs)  // its knobs only: a Read keeps its file, shapes and tracks stay
@@ -4296,7 +4735,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
     }
     if (keepOpen && ImGui::IsItemHovered() && !ImGui::IsPopupOpen("panel_menu"))
         ImGui::SetTooltip("Right-click: float this panel in a window of its own, or reset all its knobs to default");
-    if(!referencePanel) {
+    if((n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && (n->type!="TransformMasked" && n->type!="Blur" && n->type!="Write")))) {
         const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(mn, ImVec2(mn.x + 3, mx.y), cc, 2.0f, ImDrawFlags_RoundCornersLeft);
@@ -4315,17 +4754,17 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
 
     // Name (rename on Enter). Merge keeps its name field in the panel header.
     const ImVec2 bodyCursor=ImGui::GetCursorScreenPos();
-    if(referencePanel)ImGui::SetCursorScreenPos(ImVec2(headerMin.x+22,headerMin.y+1));
-    {
+    if((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || (n->type=="TransformMasked" || n->type=="Blur" || n->type=="Write"))))ImGui::SetCursorScreenPos(ImVec2(headerMin.x+22,headerMin.y+1));
+    if (n->type != "Keyer") {
         static std::string nameBuf;
-        if(!referencePanel){
+        if((n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && (n->type!="TransformMasked" && n->type!="Blur" && n->type!="Write")))){
             kit::rowLabel("name");
         }
         if (ImGui::GetActiveID() != ImGui::GetID("##name")) nameBuf = n->name;
         char tmp[128];
         std::strncpy(tmp, nameBuf.c_str(), sizeof(tmp) - 1);
         tmp[sizeof(tmp) - 1] = 0;
-        ImGui::SetNextItemWidth(referencePanel?headerMax.x-headerMin.x-50:std::min(220.0f, ImGui::GetContentRegionAvail().x));
+        ImGui::SetNextItemWidth((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || (n->type=="TransformMasked" || n->type=="Blur" || n->type=="Write")))?headerMax.x-headerMin.x-50:std::min(220.0f, ImGui::GetContentRegionAvail().x));
         bool enter = ImGui::InputText("##name", tmp, sizeof(tmp), ImGuiInputTextFlags_EnterReturnsTrue);
         if (ImGui::GetActiveID() == ImGui::GetID("##name")) nameBuf = tmp;
         if ((enter || ImGui::IsItemDeactivatedAfterEdit()) && std::string(tmp) != n->name) {
@@ -4339,7 +4778,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
         }
     }
 
-    if(referencePanel)ImGui::SetCursorScreenPos(bodyCursor);
+    if((n->type=="Merge" || n->type=="Grade" || (n->type=="ColorCorrect" || n->type=="Transform" || (n->type=="TransformMasked" || n->type=="Blur" || n->type=="Write"))))ImGui::SetCursorScreenPos(bodyCursor);
     const NodeDef* def = nodeDef(n->type);
     gDef = def;
     // Tabs, as is standard: the node's own (named after it), any others its knobs
@@ -4360,6 +4799,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
     const bool mainTab = tabBar && ImGui::BeginTabItem((mainTabName + "###main").c_str());
     if (mainTab) {
     std::set<std::string> shown = {"disable", "useLifetime", "lifetimeStart", "lifetimeEnd"};  // on the Node tab
+    if (n->type == "Keyer") shown.insert({"input_rgb", "input_link", "output_link", "previous_output"});
     if (n->type == "Copy") shown.insert({"from", "to"});                                       // the Copy rows
     if (n->type == "Read") shown.insert({"format", "frame_offset"});                           // shown as Format / Frame
     if (n->type == "WarpStabilize") shown.insert({"motion", "motion_id"});    // the analysis (data, not knobs)
@@ -4473,6 +4913,9 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
         });
         for (auto& k : def->knobs) shown.insert(k.name);
         for (const char* k : {"ml", "history", "promoted"}) shown.insert(k);
+    } else if (n->type == "Backdrop") {
+        backdropControls(c);
+        shown.insert({"label", "color", "note_font_size", "appearance", "border_width", "z_order"});
     } else if (n->type == "Shuffle") {
         drawShufflePanel(app, ui, n);
         for (const char* k : {"mapping", "in1", "in2", "in1_input", "in2_input", "out1", "out2", "new_layers"}) shown.insert(k);
@@ -4488,6 +4931,7 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
         }
         drawKnobs(c, *def, mainTabKey);
         if (n->type == "Group") groupPanel(c, shown);
+        if (n->type == "Keyer") drawUserKnobs(c, shown);
         if (mlnodes::isML(n)) {
             drawMLPanel(app, ui, n);
             shown.insert("ml");
@@ -4616,17 +5060,18 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
                 ImGui::EndTabItem();
             }
         const bool nodeOpen = ImGui::BeginTabItem("Node", nullptr, tabFlags("Node"));
-        if (def && !def->help.empty() && !referencePanel) {  // the node's help on the tab row, cut to fit (all of it on hover)
+        if (n->type!="Keyer" && def && !def->help.empty() && (n->type!="Merge" && n->type!="Grade" && (n->type!="ColorCorrect" && n->type!="Transform" && (n->type!="TransformMasked" && n->type!="Blur" && n->type!="Write")))) {  // the node's help on the tab row, cut to fit (all of it on hover)
+            const std::string& help = def->help;
             ImVec2 r0 = ImGui::GetItemRectMin(), r1 = ImGui::GetItemRectMax();
             ImGuiWindow* w = ImGui::GetCurrentWindow();
             const float x0 = r1.x + 12, x1 = w->WorkRect.Max.x - 4;
             if (x1 - x0 > 40) {
                 ImVec2 tp(x0, r0.y + (r1.y - r0.y - ImGui::GetFontSize()) * 0.5f);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-                ImGui::RenderTextEllipsis(w->DrawList, tp, ImVec2(x1, r1.y), x1, def->help.c_str(), nullptr, nullptr);
+                ImGui::RenderTextEllipsis(w->DrawList, tp, ImVec2(x1, r1.y), x1, help.c_str(), nullptr, nullptr);
                 ImGui::PopStyleColor();
                 if (ImGui::IsMouseHoveringRect(ImVec2(x0, r0.y), ImVec2(x1, r1.y)) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
-                    ImGui::SetTooltip("%s", def->help.c_str());
+                    ImGui::SetTooltip("%s", help.c_str());
             }
         }
         if (nodeOpen) {
@@ -4664,7 +5109,15 @@ void nodePanel(App& app, UiState& ui, Node* n, bool* keepOpen) {
                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
     const float top=ImGui::GetCursorPosY();
+    const bool keyer = n->type == "Keyer";
+    if (keyer && (app.panelsToExpand.count(name) || !ui.keyerPanelDefaults.count(name)))
+        ui.keyerPanelDefaults[name] = n->params.data;
     nodePanelBody(app, ui, n, keepOpen);
+    if (keyer && ImGui::BeginPopupContextWindow("##keyerPanelMenu", ImGuiPopupFlags_MouseButtonRight)) {
+        keyerKnobMenu(app, ui, n, ui.keyerPanelDefaults.at(name));
+        if (keepOpen && ImGui::MenuItem("Float this panel (OK / Cancel)")) openFloatPanel(app, ui, name);
+        ImGui::EndPopup();
+    }
     const float natural=ImGui::GetCursorPosY()-top+ImGui::GetCurrentWindow()->WindowPadding.y*2;
     size.natural=natural;
     ImGui::EndChild();
@@ -4702,7 +5155,7 @@ void setParamComp(json& v, int n, int k, double val, double frame, const std::ve
 void drawFloatPanels(App& app, UiState& ui);
 
 void drawProperties(App& app, UiState& ui) {
-    ImGui::Begin(ui.win("Properties").c_str());
+    ui.beginPanel("Properties");
     if (!app.panelsToExpand.empty()) {  // a node was just opened: the bin's tab to the front (focus stays where it is)
         ImGuiWindow* w = ImGui::GetCurrentWindow();
         if (w->DockNode && w->DockNode->TabBar) w->DockNode->TabBar->NextSelectedTabId = w->TabId;

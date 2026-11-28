@@ -4568,6 +4568,8 @@ ImGuiContext::ImGuiContext(ImFontAtlas* shared_font_atlas)
     PlatformImeDataPrev.InputPos = ImVec2(-1.0f, -1.0f); // Different to ensure initial submission
 
     DockNodeWindowMenuHandler = NULL;
+    DockNodeWindowMenuIcon = NULL;
+    DockNodeAllowHiddenMultiTabBar = false;
 
     SettingsLoaded = false;
     SettingsDirtyTimer = 0.0f;
@@ -19300,7 +19302,7 @@ static void ImGui::DockNodeUpdateFlagsAndCollapse(ImGuiDockNode* node)
 
     // Apply toggles at a single point of the frame (here!)
     const ImGuiDockNodeFlags prev_local_flags = node->LocalFlags;
-    if (node->Windows.Size > 1)
+    if (node->Windows.Size > 1 && !g.DockNodeAllowHiddenMultiTabBar)
         node->SetLocalFlags(node->LocalFlags & ~ImGuiDockNodeFlags_HiddenTabBar);
     else if (node->WantHiddenTabBarToggle)
         node->SetLocalFlags(node->LocalFlags ^ ImGuiDockNodeFlags_HiddenTabBar);
@@ -19915,7 +19917,7 @@ static void ImGui::DockNodeUpdateTabBar(ImGuiDockNode* node, ImGuiWindow* host_w
         if (IsItemActive())
             focus_tab_id = tab_bar->SelectedTabId;
         if (IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_DelayNormal) && g.HoveredIdTimer > 0.5f)
-            SetTooltip("%s", LocalizeGetMsg(ImGuiLocKey_DockingDragToUndockOrMoveNode));
+            SetTooltip("%s", g.DockNodeWindowMenuIcon ? "Pane menu" : LocalizeGetMsg(ImGuiLocKey_DockingDragToUndockOrMoveNode));
     }
 
     // If multiple tabs are appearing on the same frame, sort them based on their persistent DockOrder value

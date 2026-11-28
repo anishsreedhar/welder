@@ -1,5 +1,6 @@
 #include "core/Crash.h"
 #include "App.h"
+#include "PreferenceSettings.h"
 
 #include <cstring>
 #include "core/Brand.h"
@@ -17,6 +18,7 @@
 #include "nodes/CamSolve.h"
 #include "nodes/CameraTrackerNode.h"
 #include "core/NetPath.h"
+#include "core/FileSave.h"
 #include "nodes/CamTrack.h"
 #include "nodes/Retime.h"
 #include "nodes/Track.h"
@@ -35,44 +37,8 @@ namespace fs = std::filesystem;
 
 namespace strata::ui {
 
-// Write a file so that a crash (or a full disk) part-way through never leaves it half written:
-// into a temporary file next to it, then swapped in. If the swap can't be done (a file locked
-// on a network share), the file is written in place as before.
 bool writeFileAtomic(const std::string& path, const std::string& text, std::string* err) {
-    const std::string tmp = path + ".saving";
-    {
-        std::ofstream f(tmp, std::ios::binary);
-        if (f) {
-            f << text;
-            f.flush();
-        }
-        if (!f) {
-            std::error_code ec;
-            fs::remove(tmp, ec);
-            std::ofstream g(path, std::ios::binary);  // (a folder that can't take a new file)
-            g << text;
-            g.flush();
-            if (!g && err) *err = "cannot write " + path;
-            return (bool)g;
-        }
-    }
-    std::error_code ec;
-    fs::rename(tmp, path, ec);
-    if (ec) {  // (on some systems a rename won't replace a file)
-        std::error_code ec2;
-        fs::remove(path, ec2);
-        fs::rename(tmp, path, ec);
-    }
-    if (ec) {
-        std::error_code ec2;
-        fs::remove(tmp, ec2);
-        std::ofstream g(path, std::ios::binary);
-        g << text;
-        g.flush();
-        if (!g && err) *err = "cannot write " + path + ": " + ec.message();
-        return (bool)g;
-    }
-    return true;
+    return savefile::writeAtomic(path, text, err);
 }
 
 App::App() {
@@ -386,11 +352,15 @@ ImagePtr App::renderCached(Engine& e, Node* n, double f, const Box& show, bool* 
     return img;
 }
 
+static void applyPathSubstitutions(const json& p);
 void App::loadSettings() {
+    preferences=prefs::defaults();
     try {
         std::ifstream in(settingsPath);
         if (in) {
             json j = json::parse(in);
+            preferences=prefs::normalize(j.value("preferences",json::object()));
+            maxPanels=preferences.value("max_panels",10);
             diskCacheGB = j.value("disk_cache_gb", diskCacheGB);
             pythonInterpreter = j.value("python_interpreter", pythonInterpreter);
             runInitScript = j.value("python_run_init", runInitScript);
@@ -438,6 +408,8 @@ void App::loadSettings() {
     if (const char* e = std::getenv("STRATA_DISK_CACHE_GB")) gb = std::atof(e);
     setDiskCacheGB(gb);
     setPlaybackCacheGB(playbackCacheGB);
+    prefs::runtime()=preferenceSnapshot();
+    applyPathSubstitutions(prefs::runtime());
 }
 
 void App::setPlaybackCacheGB(double gb) {
@@ -454,6 +426,7 @@ void App::saveSettings() {
         if (in) j = json::parse(in);
     } catch (...) {
     }
+    j["preferences"] = preferenceSnapshot();
     j["disk_cache_gb"] = diskCacheGB;
     j["python_interpreter"] = pythonInterpreter;
     j["python_run_init"] = runInitScript;
@@ -485,6 +458,51 @@ void App::saveSettings() {
     if (cacheDirSetting.empty()) j.erase("cache_dir");
     else j["cache_dir"] = cacheDirSetting;
     writeFileAtomic(settingsPath, j.dump(2), nullptr);
+}
+
+static void applyPathSubstitutions(const json& p) {
+#ifdef _WIN32
+    const char* target="windows";
+#elif defined(__APPLE__)
+    const char* target="osx";
+#else
+    const char* target="linux";
+#endif
+    std::vector<std::pair<std::string,std::string>> mappings;
+    for(const auto& row:p["path_substitutions"]) {
+        const std::string dest=row.value(target,std::string());if(dest.empty())continue;
+        for(const char* source:{"windows","osx","linux"})if(std::string(source)!=target) {
+            const std::string from=row.value(source,std::string());if(!from.empty())mappings.emplace_back(from,dest);
+        }
+    }
+    netpath::setSubstitutions(std::move(mappings));
+}
+
+json App::preferenceSnapshot() const {
+    json p=prefs::normalize(preferences);
+    p["autosave_force"]=autosaveSecs;p["disk_cache_gb"]=diskCacheGB;p["playback_cache_gb"]=playbackCacheGB;
+    p["cache_dir"]=cacheDirSetting;p["max_panels"]=maxPanels;p["theme"]=themeName;
+    p["ui_scale"]=uiScaleSetting;p["scale_mode"]=uiScaleSetting>0?"manual":"auto";
+    p["python_interpreter"]=pythonInterpreter;p["python_run_init"]=runInitScript;
+    p["mcp_enabled"]=mcpEnabled;p["mcp_port"]=mcpPort;p["mcp_remote"]=mcpAllowRemote;
+    p["gpu_enabled"]=gpu::enabled();p["check_updates"]=checkUpdates;p["unc_paths"]=uncPaths;
+    p["ask_match_project"]=askMatchProject;p["right_angle_pipes"]=rightAnglePipes;p["alt_drag_cuts"]=altDragCuts;
+    p["middle_drag_zooms"]=middleDragZooms;p["roto_show_points"]=rotoShowPoints;return p;
+}
+void App::applyPreferences(const json& values) {
+    preferences=prefs::normalize(values);prefs::runtime()=preferences;const auto& p=preferences;
+    applyPathSubstitutions(p);
+    autosaveSecs=p["autosave_force"];maxPanels=p["max_panels"];
+    themeName=p["theme"];themeChosen=true;uiScaleSetting=p["scale_mode"]=="manual"?std::clamp(p["ui_scale"].get<float>(),.5f,3.f):0;
+    pythonInterpreter=p["python_interpreter"];runInitScript=p["python_run_init"];
+    mcpEnabled=p["mcp_enabled"];mcpPort=p["mcp_port"];mcpAllowRemote=p["mcp_remote"];
+    checkUpdates=p["check_updates"];uncPaths=p["unc_paths"];netpath::enabled()=uncPaths;
+    askMatchProject=p["ask_match_project"];rightAnglePipes=p["right_angle_pipes"];altDragCuts=p["alt_drag_cuts"];middleDragZooms=p["middle_drag_zooms"];
+    rotoShowPoints=p["roto_show_points"];
+    gpu::setEnabled(p["gpu_enabled"].get<bool>()&&p["input_gpu"].get<bool>());
+    diskCacheGB=p["disk_cache_gb"];setDiskCacheGB(diskCacheGB);setPlaybackCacheGB(p["playback_cache_gb"]);
+    if(cacheDirSetting!=p["cache_dir"].get<std::string>())setCacheDir(p["cache_dir"]);
+    while((int)panels.size()>maxPanels)panels.pop_back();saveSettings();clearCaches();
 }
 
 void App::setCacheDir(const std::string& dir) {
@@ -586,14 +604,14 @@ void App::restore(const std::string& snap) {
 
 void App::checkpoint() {
     undo_.push_back(snapshot());
-    if (undo_.size() > 100) undo_.erase(undo_.begin());
+    if (undo_.size() > (size_t)preferences.value("undo_size",100)) undo_.erase(undo_.begin());
     redo_.clear();
     dirty = true;
 }
 
 void App::pushUndoState(const std::string& before) {
     undo_.push_back(before);
-    if (undo_.size() > 100) undo_.erase(undo_.begin());
+    if (undo_.size() > (size_t)preferences.value("undo_size",100)) undo_.erase(undo_.begin());
     redo_.clear();
     dirty = true;
 }
@@ -3254,17 +3272,17 @@ void App::frameServerLoop(const RenderRequest& r, const std::vector<Node*>& writ
     fs::path tmp = fs::path(cacheDir("tmp")) / ("render_" + tag);
     fs::create_directories(tmp, ec);
     fs::path compFile = tmp / "comp.weld";
+    // Invocation context, kept outside the comp: every worker receives the editor's mappings.
+    const fs::path mappingFile = tmp / "path-mappings.json";
+    if (!writeFileAtomic(mappingFile.string(), json(netpath::getSubstitutions()).dump(), nullptr))
+        return fail("frame server: can't write path mappings");
     std::vector<std::string> movies, seqs;
     {
         std::shared_lock<std::shared_timed_mutex> cl(compM);
         json j = comp->toJson();
-        fs::path base = comp->baseDir;
-        if (!comp->project.projectDir.empty()) {
-            fs::path pd(comp->project.projectDir);
-            base = isAbsolutePath(comp->project.projectDir) || base.empty() ? pd : base / pd;
-        }
-        if (base.empty()) base = fs::current_path(ec);
-        j["project"]["project_directory"] = absolutePath(base.string());
+        const auto base = comp->projectBaseDir().string();
+        j["project"]["project_directory"] = base.empty() ? fs::current_path(ec).string()
+            : base.front() == '/' ? base : absolutePath(base);
         std::ofstream f(compFile, std::ios::binary);
         f << j.dump(1);
         if (!f) return fail("frame server: can't write " + compFile.string());
@@ -3286,9 +3304,11 @@ void App::frameServerLoop(const RenderRequest& r, const std::vector<Node*>& writ
         return t;
     };
     const int cores = (int)std::max(1u, std::thread::hardware_concurrency());
-    const int seqWorkers = seqs.empty() ? 0 : std::clamp(cores / 8, 2, 4);
+    const int requested=preferences.value("frame_server_processes",std::clamp(cores/8,2,4));
+    const int seqWorkers = seqs.empty() ? 0 : std::clamp(requested,1,cores);
     const int nWorkers = seqWorkers + (int)movies.size();
-    const int threadsEach = std::max(1, cores / std::max(1, nWorkers));
+    const int budget=preferences.value("render_limits",std::string()).find("no renderer limits")==0?cores:std::max(1,cores-2);
+    const int threadsEach = std::max(1, budget / std::max(1, nWorkers));
     struct Worker {
         std::unique_ptr<Process> p;
         fs::path log;
@@ -3301,7 +3321,7 @@ void App::frameServerLoop(const RenderRequest& r, const std::vector<Node*>& writ
         w.log = tmp / ("worker" + std::to_string(ws.size()) + ".log");
         std::vector<std::string> args = {cli.string(), "render", compFile.string(), "-f", listText(fr), "-w", join(names),
                                           "-t", std::to_string(threadsEach), "--cache-mb",
-                                          std::to_string(platform::renderCacheMB(nWorkers))};
+                                          std::to_string(platform::renderCacheMB(nWorkers)), "--path-mappings", mappingFile.string()};
         if (r.continueOnError) args.push_back("-c");
         if (r.allowWritePython) args.push_back("--allow-write-python");
         if (r.proxy && comp->project.proxyScale > 0 && comp->project.proxyScale < 1) {
@@ -3379,8 +3399,14 @@ void App::frameServerLoop(const RenderRequest& r, const std::vector<Node*>& writ
 bool App::newComp() {
     json j = {{"strata", 1}, {"format", {{"width", 1920}, {"height", 1080}}}, {"frame_range", {1, 100}}, {"fps", 24},
               {"nodes", json::array()}};
+    if(!preferences.empty()) {
+        const bool ocio=preferences.value("color_mode",std::string("Welder"))=="OCIO";
+        std::string config=preferences.value("ocio_config",std::string());if(config.empty())config=ocio?color::kDefaultConfig:"";
+        j["project"]={{"color",{{"config",config},{"working",preferences.value("working_space",std::string("linear"))},
+            {"integer",preferences.value("integer_transform",std::string("sRGB"))},{"view",preferences.value("viewer_transform",std::string("sRGB"))}}}};
+    }
     // New comps are ACES: ACEScg working space, the ACES 2.0 SDR viewer.
-    if (color::haveOCIO())
+    if (preferences.empty() && color::haveOCIO())
         j["project"] = {{"color", {{"config", color::kDefaultConfig}, {"working", "ACEScg"},
                                    {"integer", color::kSrgbTexture}, {"display", ""}, {"view", ""}}}};
     edit([this, j](Comp&) {
@@ -3510,19 +3536,18 @@ App::PerfSnapshot App::perfSnapshot() {
 
 bool App::save(const std::string& path, std::string* err) {
     json j = comp->toJson();
-    if (!writeFileAtomic(path, j.dump(2) + "\n", err)) {
+    // Finish an in-flight autosave before writing: Save As may target that very file.
+    if (autosaveThread_.joinable()) autosaveThread_.join();
+    const std::string destination = absolutePath(path);
+    const savefile::RecoveryFile before{autosavePath(compPath), compPath};
+    const savefile::RecoveryFile after{autosavePath(destination), destination};
+    if (!savefile::saveComp(destination, j.dump(2) + "\n", before, after, err)) {
         if (err && err->empty()) *err = "cannot write " + path;
         return false;
     }
-    const std::string before = compPath;
-    compPath = absolutePath(path);
+    compPath = destination;
     comp->scriptPath = compPath;  // the Slate's filename / version
     dirty = false;
-    // the autosaves are out of date now (the untitled one too, once an untitled comp is saved)
-    std::error_code ec;
-    if (autosaveThread_.joinable()) autosaveThread_.join();
-    fs::remove(autosavePath(before), ec);
-    fs::remove(autosavePath(compPath), ec);
     lastAutosave_ = steadySeconds();
     addRecent(compPath);
     ++compSaves;
@@ -3534,39 +3559,54 @@ bool App::save(const std::string& path, std::string* err) {
 
 std::string App::autosavePath(const std::string& forComp) const {
     const fs::path dir = (settingsPath.empty() ? fs::path(brand::configDir()) : fs::path(settingsPath).parent_path()) / "autosave";
-    if (forComp.empty()) return (dir / "untitled.weld").string();
+
     uint64_t h = 1469598103934665603ull;  // FNV-1a of the path: the same name on every run and platform
     for (unsigned char ch : forComp) h = (h ^ ch) * 1099511628211ull;
     char hex[20];
     std::snprintf(hex, sizeof hex, "%012llx", (unsigned long long)(h & 0xffffffffffffull));
-    return (dir / (fs::path(forComp).stem().string() + "-" + hex + ".weld")).string();
+    std::string pattern=preferences.value("autosave_filename",std::string("${settings}/autosave/${project}-${hash}.weld"));
+    if(pattern.empty())pattern="${settings}/autosave/${project}-${hash}.weld";
+    if (forComp.empty() && pattern == "${settings}/autosave/${project}-${hash}.weld") pattern = "untitled.weld";
+    auto replace=[&](const std::string& token,const std::string& value){size_t at=0;while((at=pattern.find(token,at))!=std::string::npos){pattern.replace(at,token.size(),value);at+=value.size();}};
+    replace("${settings}",dir.parent_path().string());replace("${cache}",cacheRoot());replace("${project}",forComp.empty()?"untitled":fs::path(forComp).stem().string());replace("${hash}",hex);
+    const fs::path path(pattern);const fs::path resolved=path.is_absolute()?path:dir/path;
+    const auto legacyFallback = dir / (fs::path(forComp).stem().string() + "-" + hex + ".weld");
+    const auto fallback = savefile::samePath(resolved.string(), legacyFallback.string())
+        ? dir / (std::string("recovery-") + hex + ".weld") : legacyFallback;
+    return savefile::recoveryPath(resolved.string(), fallback.string(), forComp);
 }
 
 void App::tickAutosave(bool userBusy) {
-    if (!dirty || autosaveSecs <= 0 || userBusy || autosaveBusy_) return;
     const double now = steadySeconds();
+    if(userBusy){lastUserBusy_=now;return;}
+    if (!dirty || autosaveSecs <= 0 || autosaveBusy_) return;
     if (lastAutosave_ == 0) lastAutosave_ = now;
-    if (now - lastAutosave_ < autosaveSecs) return;
+    const double idle=preferences.value("autosave_idle",5.0);
+    if (now - lastAutosave_ < autosaveSecs && (idle<=0 || now-lastUserBusy_<idle || now-lastAutosave_<idle)) return;
     lastAutosave_ = now;
     // Serialise here (the UI thread owns the comp; this is quick), write on a thread (the disk may not be).
     json j = comp->toJson();
     j["autosave_of"] = compPath;
-    std::string text = j.dump(1) + "\n", path = autosavePath(compPath);
+    const std::string path = autosavePath(compPath);
+    if (path.empty()) {
+        message("Autosave skipped: both recovery filenames are occupied");
+        return;
+    }
+    std::string text = j.dump(1) + "\n";
     if (autosaveThread_.joinable()) autosaveThread_.join();
     autosaveBusy_ = true;
-    autosaveThread_ = std::thread([this, text = std::move(text), path] {
+    autosaveThread_ = std::thread([this, text = std::move(text), path, owner = compPath] {
         std::error_code ec;
         fs::create_directories(fs::path(path).parent_path(), ec);
         std::string err;
-        if (!writeFileAtomic(path, text, &err)) crash::crumb("autosave failed: " + err);
+        if (!savefile::writeRecovery({path, owner}, text, &err)) crash::crumb("autosave failed: " + err);
         autosaveBusy_ = false;
     });
 }
 
 void App::discardAutosave() {
     if (autosaveThread_.joinable()) autosaveThread_.join();
-    std::error_code ec;
-    fs::remove(autosavePath(compPath), ec);
+    savefile::removeRecovery({autosavePath(compPath), compPath});
     if (recovery.original == compPath) recovery = {};
 }
 
@@ -3574,7 +3614,7 @@ void App::checkAutosave() {
     recovery = {};
     const std::string a = autosavePath(compPath);
     std::error_code ec;
-    if (!fs::exists(a, ec)) return;
+    if (!savefile::ownedRecovery({a, compPath})) return;
     const auto ta = fs::last_write_time(a, ec);
     if (ec) return;
     if (!compPath.empty()) {
@@ -3597,6 +3637,10 @@ bool App::recoverAutosave(std::string* err) {
     try {
         std::ifstream f(r.autosave);
         json j = json::parse(f);
+        if (!savefile::matchesOwner(j, r.original)) {
+            if (err) *err = "this file is no longer an autosave of the open comp";
+            return false;
+        }
         // relative paths are relative to the script's folder, not the autosave's
         const fs::path base = r.original.empty() ? fs::current_path() : fs::path(r.original).parent_path();
         loaded = Comp::fromJson(j, base);
@@ -3808,6 +3852,7 @@ void App::openPanel(const std::string& name) {
         panelFocus = name;
         return;
     }
+    if(!preferences.value("reopen_new_panel",true) && std::find(panels.begin(),panels.end(),name)!=panels.end()){panelsToExpand.insert(name);panelFocus=name;return;}
     panelsToExpand.insert(name);
     closePanel(name);
     panels.push_front(name);

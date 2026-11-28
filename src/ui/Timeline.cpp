@@ -365,7 +365,7 @@ void drawTimeline(App& app, UiState& ui) {
     ImGui::PushStyleColor(ImGuiCol_Text,IM_COL32(190,190,190,255));
     ImGui::PushStyleColor(ImGuiCol_Border,IM_COL32(31,31,31,255));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
-    ImGui::Begin(ui.win("Timeline").c_str(), nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ui.beginPanel("Timeline", ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
     ui.noteHover("Timeline");
     Comp& c = *app.comp;
@@ -503,10 +503,10 @@ void drawTimeline(App& app, UiState& ui) {
     }
     // the cache line: frames in the RAM playback cache (green), on the disk cache (amber, under it)
     for (int cf : app.diskCachedFrames(first, last))
-        dl->AddRectFilled(ImVec2(xOf(cf) - ppf * 0.5f, tickTop - 2), ImVec2(xOf(cf) + ppf * 0.5f + 0.5f, tickTop), IM_COL32(220, 150, 40, 220));
+        dl->AddRectFilled(ImVec2(xOf(cf) - ppf * 0.5f, tickTop - 2), ImVec2(xOf(cf) + ppf * 0.5f + 0.5f, tickTop), preferenceColor("disk_color",IM_COL32(220,150,40,220)));
     for (int cf : app.cachedFrames())
         if (cf >= first && cf <= last)
-            dl->AddRectFilled(ImVec2(xOf(cf) - ppf * 0.5f, tickTop - 4), ImVec2(xOf(cf) + ppf * 0.5f + 0.5f, tickTop - 2), kCache);
+            dl->AddRectFilled(ImVec2(xOf(cf) - ppf * 0.5f, tickTop - 4), ImVec2(xOf(cf) + ppf * 0.5f + 0.5f, tickTop - 2), preferenceColor("ram_color",kCache));
     // ticks: one per frame when they fit, else every 2 / 5 / 10...; labels
     // where they don't crowd
     const int minor = niceStep(4.0 / std::max(1e-6f, ppf));
@@ -599,7 +599,7 @@ void drawTimeline(App& app, UiState& ui) {
     if (hov && !active) {  // where a click would go
         int hf = std::clamp(frameAt(ImGui::GetIO().MousePos.x), first, last);
         const float x = std::round(xOf(hf)) + 0.5f;
-        dl->AddLine(ImVec2(x, markTop), ImVec2(x, tickBase), IM_COL32(255, 255, 255, 70), 1);
+        dl->AddLine(ImVec2(x, markTop), ImVec2(x, tickBase), preferenceColor("keyframe_color",IM_COL32(255,255,255,70)), 1);
         if (hf != f) ImGui::SetTooltip("%s", label(hf).c_str());
     }
     // the current frame: a marker above the ruler with its number, and a line through the ticks

@@ -926,6 +926,20 @@ class GizmoNativeImport(unittest.TestCase):
 
 
 class KeyerImport(unittest.TestCase):
+    def test_keyer_channel_controls(self):
+        _, _, nodes = convert(
+            'Keyer { inputs 0 input diffuse output matte.alpha combine union invert true operation redscreen name K }\n'
+            'Keyer { inputs 0 output -rgba.alpha name Disabled }\n'
+        )
+        knobs = nodes["K"]["params"]
+        self.assertEqual(knobs["response"], "nuke")
+        self.assertEqual(knobs["input"], "diffuse")
+        self.assertEqual(knobs["output"], "matte.A")
+        self.assertEqual(knobs["combine"], "union")
+        self.assertIs(knobs["invert"], True)
+        self.assertEqual(knobs["operation"], "redscreen keyer")
+        self.assertEqual(nodes["Disabled"]["params"]["output"], "none")
+
     def test_keylight_ibk_keyer(self):
         text = ("Constant { inputs 0 color {0.1 0.6 0.15 1} name Plate }\n"
                 "OFXuk.co.thefoundry.keylight.keylight_v201 { show \"Final Result\" screenColour {0.1 0.6 0.15} "

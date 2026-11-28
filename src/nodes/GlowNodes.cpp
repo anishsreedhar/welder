@@ -37,7 +37,7 @@ ChannelSet withRGBA(ChannelSet c) {
 // The Keyer's range curve; a range whose top doesn't fall off (C = D) keeps everything above it.
 float keyRange(float v, const std::array<double, 4>& r) {
     if (r[2] >= r[3] && v >= r[2]) return 1.0f;
-    return keyer::curve(v, (float)r[0], (float)r[1], (float)r[2], (float)r[3]);
+    return keyer::curve(v, (float)r[0], (float)r[1], (float)r[2], (float)r[3], true);
 }
 
 float luma(float r, float g, float b) { return 0.2126f * r + 0.7152f * g + 0.0722f * b; }

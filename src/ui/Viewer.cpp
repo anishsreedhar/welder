@@ -807,10 +807,22 @@ static void drawReferenceToolbar(App& app, UiState& ui, ViewerState& v, Node* vn
 
 // One viewer panel: `vn` is its Viewer node (may be null: nothing to look through yet); `active`:
 // it is the active viewer (main renderer, overlays, tools).
-static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, bool active, const std::string& winName) {
+static bool drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, bool active, const std::string& winName) {
+    bool open = true;
+    if (ui.maximized.empty()) {
+        ImGuiWindowClass windowClass;
+        windowClass.DockingAlwaysTabBar = true;
+        windowClass.DockNodeFlagsOverrideSet = ImGuiDockNodeFlags_NoCloseButton;
+        ImGui::SetNextWindowClass(&windowClass);
+    }
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::Begin(((vn?vn->name:std::string("Viewer1"))+"###"+winName).c_str(), nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::Begin(((vn?vn->name:std::string("Viewer1"))+"###"+winName).c_str(), &open, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
+    if (!open) {
+        if(vn && app.preferences.value("viewer_delete_on_close",false)){const std::string name=vn->name;app.checkpoint();app.edit([name](Comp& c){if(auto* node=c.find(name))c.removeNode(node);});}
+        ImGui::End();
+        return false;
+    }
     ui.noteHover("Viewer");
     const std::string vname = vn ? vn->name : "";
     if (ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
@@ -861,8 +873,8 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
         // plate and comp can be flipped at the same spot; only the very first image fits, or one
         // that would land entirely off screen (checked once the viewport size is known).
         if (firstOfNode && r.image) {
-            if (!hadImage) v.fitPending = true;
-            else v.checkOnScreen = true;
+            if (!hadImage) v.fitPending = !app.preferences.value("viewer_prevent_autozoom",false);
+            else v.checkOnScreen = !app.preferences.value("viewer_prevent_autozoom",false);
             if (std::getenv("STRATA_DEBUG_AHEAD"))
                 std::fprintf(stderr, "refit: %s %dx%d -> %s %dx%d (frame %g)\n", v.res.node.c_str(), v.res.format.width,
                              v.res.format.height, r.node.c_str(), r.format.width, r.format.height, r.frame);
@@ -892,7 +904,7 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
         queueViewerCapture(app, ui, draw);
         draw->PopClipRect();
         ImGui::End();
-        return;
+        return true;
     }
 
     drawReferenceToolbar(app, ui, v, vn, aPipe, bPipe, active);
@@ -1653,6 +1665,7 @@ static void drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
         ImGui::EndPopup();
     }
     ImGui::End();
+    return true;
 }
 
 void openViewerCapture(App& app, UiState& ui) {
@@ -1807,7 +1820,7 @@ static void startFlipbook(App& app, UiState& ui, int first, int last) {
     fb.gamma = ui.viewer.gamma;
     fb.matte = ui.viewer.matte;
     fb.display.alphaChannel = ui.viewer.alphaChannel;
-    fb.display.checkerboard = ui.viewer.checkerboard;
+    fb.display.checkerboard = app.preferences.value("flipbook_background",std::string("black"))=="checkerboard";
     fb.display.clippingWarning = ui.viewer.clippingWarning;
     fb.scale = ui.viewer.reqScale > 0 ? ui.viewer.reqScale : 1.0;
     const auto& image = ui.viewer.res;
@@ -1973,6 +1986,7 @@ void activateViewer(App& app, UiState& ui, const std::string& name) {
 void drawViewer(App& app, UiState& ui) {
     if (ui.timelineComp != app.comp.get()) {
         ui.timelineComp = app.comp.get();
+        ui.closedViewerTabs.clear();
         app.pinRange(std::nullopt);
         auto reset = [](ViewerState& v) {
             v.timelineFrame.reset();
@@ -1990,6 +2004,17 @@ void drawViewer(App& app, UiState& ui) {
     }
     app.syncViewer();
     auto viewers = app.viewerNodes();
+    Node* primary = viewers.empty() ? nullptr : viewers.front();
+    auto tabClosed = [&](const Node* viewer) {
+        return viewer == primary ? ui.closedPanels.count("Viewer") : ui.closedViewerTabs.count(viewer->name);
+    };
+    if (ui.activateNext.empty() && ui.maximized != "Viewer") {
+        Node* active = app.viewerNode();
+        if (active && tabClosed(active)) {
+            auto visible = std::find_if(viewers.begin(), viewers.end(), [&](Node* viewer) { return !tabClosed(viewer); });
+            if (visible != viewers.end()) ui.activateNext = (*visible)->name;
+        }
+    }
     if (!ui.activateNext.empty()) {
         activateViewer(app, ui, ui.activateNext);
         ui.activateNext.clear();
@@ -2006,39 +2031,55 @@ void drawViewer(App& app, UiState& ui) {
     ui.hoverViewer.clear();
     const bool maxed = ui.maximized == "Viewer";
     // the main panel (maximized: the active viewer takes the screen)
-    Node* primary = viewers.empty() ? nullptr : viewers.front();
     Node* mainNode = maxed && app.viewerNode() ? app.viewerNode() : primary;
     const bool mainActive = !mainNode || mainNode->name == app.activeViewer;
-    drawViewerPanel(app, ui, mainActive ? ui.viewer : ui.otherViewers[mainNode->name], mainNode, mainActive, ui.win("Viewer"));
+    if (maxed || !tabClosed(primary)) {
+        if (!drawViewerPanel(app, ui, mainActive ? ui.viewer : ui.otherViewers[mainNode->name], mainNode, mainActive, ui.win("Viewer"))) {
+            if (mainNode == primary) ui.closedPanels.insert("Viewer");
+            else ui.closedViewerTabs.insert(mainNode->name);
+            ui.maximized.clear();
+        }
+    }
     if (maxed) return;
     ImGuiWindow* mainWin = ImGui::FindWindowByName("Viewer");
     // Viewer menu > Split: the viewer area divided evenly between the viewers, side by side or stacked
-    if (ui.splitViewers && mainWin && mainWin->DockId && viewers.size() > 1) {
+    std::vector<std::string> visibleTitles;
+    if (ui.splitViewers) {
+        if (!tabClosed(primary)) visibleTitles.emplace_back("Viewer");
+        for (size_t i = 1; i < viewers.size(); ++i)
+            if (!tabClosed(viewers[i])) visibleTitles.emplace_back("viewer_" + viewers[i]->name);
+    }
+    ImGuiWindow* anchor = visibleTitles.empty() ? nullptr : ImGui::FindWindowByName(visibleTitles.front().c_str());
+    if (anchor && anchor->DockId && visibleTitles.size() > 1) {
         const ImGuiDir dir = ui.splitViewers == 1 ? ImGuiDir_Right : ImGuiDir_Down;
-        const size_t n = viewers.size();
-        ImGuiID cur = mainWin->DockId;
+        const size_t n = visibleTitles.size();
+        const ImGuiID root = anchor->DockId;
+        ImGuiID cur = root;
         for (size_t i = 1; i < n; ++i) {
             ImGuiID at = 0, rest = 0;  // `at`: the side the rest of the viewers go; `rest`: this slot
             ImGui::DockBuilderSplitNode(cur, dir, (float)(n - i) / (float)(n - i + 1), &at, &rest);
-            ImGui::DockBuilderDockWindow(i == 1 ? "Viewer" : (viewers[i - 1]->name + "###viewer_" + viewers[i - 1]->name).c_str(), rest);
+            ImGui::DockBuilderDockWindow(visibleTitles[i - 1].c_str(), rest);
             cur = at;
         }
-        ImGui::DockBuilderDockWindow((viewers[n - 1]->name + "###viewer_" + viewers[n - 1]->name).c_str(), cur);
-        ImGui::DockBuilderFinish(mainWin->DockId);
+        ImGui::DockBuilderDockWindow(visibleTitles.back().c_str(), cur);
+        ImGui::DockBuilderFinish(root);
         ui.viewer.fitPending = true;
         for (auto& [k, st] : ui.otherViewers) st.fitPending = true;
     }
     ui.splitViewers = 0;
     for (size_t i = 1; i < viewers.size(); ++i) {
         Node* vn = viewers[i];
+        if (tabClosed(vn)) continue;
         const std::string title = vn->name + "###viewer_" + vn->name;
         if (!ImGui::FindWindowByName(title.c_str()) || ui.newViewer == vn->name) {  // first time: a tab beside the main viewer
-            if (mainWin && mainWin->DockId) ImGui::SetNextWindowDockID(mainWin->DockId, ImGuiCond_Always);
+            if(app.preferences.value("viewer_own_window",false))ImGui::SetNextWindowDockID(0,ImGuiCond_Always);
+            else if (mainWin && mainWin->DockId) ImGui::SetNextWindowDockID(mainWin->DockId, ImGuiCond_Always);
             ImGui::SetNextWindowFocus();
             if (ui.newViewer == vn->name) ui.newViewer.clear();
         }
         const bool act = vn->name == app.activeViewer;
-        drawViewerPanel(app, ui, act ? ui.viewer : ui.otherViewers[vn->name], vn, act, title);
+        if (!drawViewerPanel(app, ui, act ? ui.viewer : ui.otherViewers[vn->name], vn, act, title))
+            ui.closedViewerTabs.insert(vn->name);
     }
 }
 
