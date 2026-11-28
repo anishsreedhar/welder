@@ -1378,7 +1378,7 @@ void graphConvertBox(App& app, Node* box) {
         if (!b) return;
         json uij = b->ui;
         json params = json::object();
-        for (const char* k : {"label", "color", "note_font_size", "z_order"})
+        for (const char* k : {"label", "color", "note_font_size", "z_order", "appearance", "border_width"})
             if (b->params.has(k)) params[k] = b->params.data[k];
         std::string label = params.value("label", std::string());
         Node* result = toPrecomp ? nullptr : b->input(0);
@@ -1811,7 +1811,7 @@ static void frameNodes(App& app, UiState& ui, ImVec2 winSize) {
 void drawNodeGraph(App& app, UiState& ui) {
     GraphState& g = ui.graph;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::Begin(ui.win("Node Graph").c_str(), nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ui.beginPanel("Node Graph", ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
     ui.noteHover("Node Graph");
     Comp& comp = *app.comp;
@@ -1882,33 +1882,42 @@ void drawNodeGraph(App& app, UiState& ui) {
 
     // Hit tests in graph space.
     const float bdTitle = 24;  // a backdrop is picked by its title bar (its body belongs to the canvas)
+    std::vector<Node*> backdrops;
+    for (auto& node : comp.nodes)
+        if (vis(node.get()) && isBackdrop(node.get())) backdrops.push_back(node.get());
+    std::stable_sort(backdrops.begin(), backdrops.end(), [](Node* a, Node* b) {
+        const double za = a->params.num("z_order", 0, 0), zb = b->params.num("z_order", 0, 0);
+        if (za != zb) return za < zb;
+        return size(a).x * size(a).y > size(b).x * size(b).y;
+    });
     auto nodeAt = [&](ImVec2 gp) -> Node* {
         for (auto it = comp.nodes.rbegin(); it != comp.nodes.rend(); ++it) {
             if (!vis(it->get()) || isBackdrop(it->get())) continue;
             ImVec2 p = pos(it->get()), s = size(it->get());
             if (gp.x >= p.x && gp.x <= p.x + s.x && gp.y >= p.y && gp.y <= p.y + s.y) return it->get();
         }
-        for (auto it = comp.nodes.rbegin(); it != comp.nodes.rend(); ++it) {
-            if (!vis(it->get()) || !isBackdrop(it->get())) continue;
-            ImVec2 p = pos(it->get()), s = size(it->get());
-            const float hit = it->get()->ui.value("collapsed", false) ? s.y : bdTitle;  // collapsed: all of it
-            if (gp.x >= p.x && gp.x <= p.x + s.x && gp.y >= p.y && gp.y <= p.y + hit) return it->get();
-            if (precompOpen(it->get())) {  // its tabs
+        for (auto it = backdrops.rbegin(); it != backdrops.rend(); ++it) {
+            Node* backdrop = *it;
+            ImVec2 p = pos(backdrop), s = size(backdrop);
+            const float hit = backdrop->ui.value("collapsed", false) ? s.y : bdTitle;
+            if (gp.x >= p.x && gp.x <= p.x + s.x && gp.y >= p.y && gp.y <= p.y + hit) return backdrop;
+            if (precompOpen(backdrop)) {
                 ImVec2 t0, t1, q0, q1;
-                precompTabs(it->get(), t0, t1, q0, q1);
+                precompTabs(backdrop, t0, t1, q0, q1);
                 if ((gp.x >= t0.x && gp.x <= t1.x && gp.y >= t0.y && gp.y <= t1.y) || (gp.x >= q0.x && gp.x <= q1.x && gp.y >= q0.y && gp.y <= q1.y))
-                    return it->get();
+                    return backdrop;
             }
         }
         return nullptr;
     };
     // the resize corner of a backdrop under the mouse
     auto cornerAt = [&](ImVec2 gp) -> Node* {
-        for (auto it = comp.nodes.rbegin(); it != comp.nodes.rend(); ++it) {
-            if (!vis(it->get()) || !isBackdrop(it->get()) || it->get()->ui.value("collapsed", false)) continue;
-            ImVec2 p = pos(it->get()), s = size(it->get());
+        for (auto it = backdrops.rbegin(); it != backdrops.rend(); ++it) {
+            Node* backdrop = *it;
+            if (backdrop->ui.value("collapsed", false)) continue;
+            ImVec2 p = pos(backdrop), s = size(backdrop);
             float c = 14 / std::max(0.3f, g.zoom);
-            if (gp.x >= p.x + s.x - c && gp.x <= p.x + s.x && gp.y >= p.y + s.y - c && gp.y <= p.y + s.y) return it->get();
+            if (gp.x >= p.x + s.x - c && gp.x <= p.x + s.x && gp.y >= p.y + s.y - c && gp.y <= p.y + s.y) return backdrop;
         }
         return nullptr;
     };
@@ -2012,24 +2021,20 @@ void drawNodeGraph(App& app, UiState& ui) {
 
     // ---- backdrops (behind everything; larger ones further back)
     {
-        std::vector<Node*> bds;
-        for (auto& up : comp.nodes)
-            if (vis(up.get()) && isBackdrop(up.get())) bds.push_back(up.get());
-        std::sort(bds.begin(), bds.end(), [](Node* a, Node* b) {
-            double za = a->params.num("z_order", 0, 0), zb = b->params.num("z_order", 0, 0);
-            if (za != zb) return za < zb;
-            return size(a).x * size(a).y > size(b).x * size(b).y;
-        });
-        for (Node* n : bds) {
+        for (Node* n : backdrops) {
             ImVec2 p0 = S(pos(n)), s = size(n);
             ImVec2 p1(p0.x + s.x * g.zoom, p0.y + s.y * g.zoom);
-            auto c = n->params.vec<4>("color", 0, isPrecomp(n) ? std::array<double, 4>{0.93, 0.86, 0.05, 1} : std::array<double, 4>{0.33, 0.33, 0.42, 1});
+            auto c = n->params.vec<4>("color", 0, isPrecomp(n) ? std::array<double, 4>{0.93, 0.86, 0.05, 1} : std::array<double, 4>{0.42, 0.43, 0.46, 1});
             ImU32 body = ImGui::ColorConvertFloat4ToU32(ImVec4((float)c[0], (float)c[1], (float)c[2], 0.55f));
             ImU32 head = ImGui::ColorConvertFloat4ToU32(ImVec4((float)c[0] * 1.15f, (float)c[1] * 1.15f, (float)c[2] * 1.15f, 0.9f));
             bool sel = app.selection.count(n->name) > 0;
-            dl->AddRectFilled(p0, p1, body, 3);
+            const bool outline = !isPrecomp(n) && n->params.str("appearance", "fill") == "outline";
+            const float border = std::clamp((float)n->params.num("border_width", 0, 2), 0.0f, 10.0f) * g.zoom;
+            if (!outline) dl->AddRectFilled(p0, p1, body, 3);
             dl->AddRectFilled(p0, ImVec2(p1.x, p0.y + bdTitle * g.zoom), head, 3, ImDrawFlags_RoundCornersTop);
-            dl->AddRect(p0, p1, sel ? theme().accent : IM_COL32(20, 20, 20, 160), 3, 0, sel ? 2.0f : 1.0f);
+            if (outline && border > 0) dl->AddRect(p0, p1, head, 3, 0, border);
+            if (sel || !outline)
+                dl->AddRect(p0, p1, sel ? theme().accent : IM_COL32(20, 20, 20, 160), 3, 0, sel ? 2.0f : 1.0f);
             const bool collapsed = n->ui.value("collapsed", false);
             if (collapsed) {  // a node-sized box: opaque, with how many nodes it holds
                 dl->AddRectFilled(p0, p1, head, 3);
@@ -2041,7 +2046,8 @@ void drawNodeGraph(App& app, UiState& ui) {
                 }
             } else {  // resize grip
                 float gc = 12 * g.zoom;
-                dl->AddTriangleFilled(ImVec2(p1.x - gc, p1.y), p1, ImVec2(p1.x, p1.y - gc), IM_COL32(220, 220, 220, 90));
+                dl->AddTriangleFilled(ImVec2(p1.x - gc, p1.y), p1, ImVec2(p1.x, p1.y - gc),
+                                      sel && !isPrecomp(n) ? theme().accent : IM_COL32(220, 220, 220, 90));
             }
             if (drawText && isPrecomp(n)) {  // the title bar: cached or live, and from where
                 std::string which;
@@ -2055,13 +2061,27 @@ void drawNodeGraph(App& app, UiState& ui) {
                 dl->AddText(font, fs * 0.9f, ImVec2(tp.x + 12 * g.zoom, tp.y), IM_COL32(15, 15, 15, 255), st.c_str());
                 dl->PopClipRect();
             } else if (drawText) {
-                std::string label = n->params.str("label", "");
-                if (label.empty()) label = n->name;
-                float lfs = fs * std::clamp((float)n->params.num("note_font_size", 0, 20) / 16.0f, 0.8f, 3.0f);
-                if (collapsed) lfs = std::min(lfs, fs);
-                dl->PushClipRect(p0, ImVec2(p1.x - 22 * g.zoom, p1.y), true);
-                dl->AddText(font, lfs, ImVec2(p0.x + 6 * g.zoom, p0.y + 3 * g.zoom), IM_COL32(15, 15, 15, 255), label.c_str());
+                const ImVec2 textPos(p0.x + 8 * g.zoom, p0.y + 4 * g.zoom);
+                const ImU32 titleColor = c[0] * .2126 + c[1] * .7152 + c[2] * .0722 > .56 ?
+                    IM_COL32(20, 20, 20, 255) : IM_COL32(245, 245, 245, 255);
+                dl->PushClipRect(p0, ImVec2(p1.x - 22 * g.zoom, p0.y + bdTitle * g.zoom), true);
+                dl->AddText(font, fs, textPos, titleColor, n->name.c_str());
                 dl->PopClipRect();
+                if (!collapsed) {
+                    const std::string label = n->params.str("label", "");
+                    ImFont* labelFont = nodeLabelFont(n);
+                    if (!labelFont) labelFont = font;
+                    const float lfs = (float)std::clamp(n->params.num("note_font_size", 0, 14), 6.0, 80.0) * g.zoom;
+                    ImU32 labelColor = IM_COL32(235, 235, 235, 255);
+                    if (auto color = n->ui.find("note_font_color"); color != n->ui.end() && color->is_array() && color->size() >= 3 &&
+                        (*color)[0].is_number() && (*color)[1].is_number() && (*color)[2].is_number())
+                        labelColor = ImGui::ColorConvertFloat4ToU32(ImVec4((*color)[0].get<float>(), (*color)[1].get<float>(), (*color)[2].get<float>(), 1));
+                    const ImVec2 labelPos(textPos.x, p0.y + (bdTitle + 5) * g.zoom);
+                    dl->PushClipRect(ImVec2(p0.x, p0.y + bdTitle * g.zoom), p1, true);
+                    dl->AddText(labelFont, lfs, labelPos, labelColor, label.c_str(), nullptr,
+                                std::max(1.0f, p1.x - labelPos.x - 8 * g.zoom));
+                    dl->PopClipRect();
+                }
             }
             {  // the minimise / open button in the title's corner
                 const ImVec2 b0 = S(ImVec2(pos(n).x + s.x - 20, pos(n).y + 4)), b1 = S(ImVec2(pos(n).x + s.x - 4, pos(n).y + 20));
@@ -2467,11 +2487,11 @@ void drawNodeGraph(App& app, UiState& ui) {
 
     if (hovered && !popupOpen && g.drag == GraphState::Drag::None) {
         Node* bdButton = nullptr;  // a backdrop's minimise / open button under the mouse
-        for (auto& up : comp.nodes)
-            if (vis(up.get()) && isBackdrop(up.get())) {
-                const ImVec2 p = pos(up.get()), s = size(up.get());
-                if (mouseG.x >= p.x + s.x - 20 && mouseG.x <= p.x + s.x - 4 && mouseG.y >= p.y + 4 && mouseG.y <= p.y + 20) bdButton = up.get();
-            }
+        for (Node* backdrop : backdrops) {
+            const ImVec2 p = pos(backdrop), s = size(backdrop);
+            if (mouseG.x >= p.x + s.x - 20 && mouseG.x <= p.x + s.x - 4 && mouseG.y >= p.y + 4 && mouseG.y <= p.y + 20)
+                bdButton = backdrop;
+        }
         Node* altHit = io.KeyAlt && !io.KeyCtrl && ImGui::IsMouseClicked(ImGuiMouseButton_Left) ? nodeAt(mouseG) : nullptr;
         if (altHit && isAnnotation(altHit)) altHit = nullptr;
         if (bdButton && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {

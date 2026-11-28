@@ -123,6 +123,7 @@ void applyTheme(const std::string& requested) {
     s.FrameRounding = 0;
     s.GrabRounding = 0;
     s.TabRounding = 2;
+    s.TabCloseButtonMinWidthUnselected = -1.0f;
     s.PopupRounding = 0;
     s.ScrollbarRounding = 0;
     s.WindowBorderSize = 1;

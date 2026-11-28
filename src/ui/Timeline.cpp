@@ -331,7 +331,7 @@ void drawTimeline(App& app, UiState& ui) {
     const float H = timelineHeight() + (ui.maximized == "Viewer" ? ImGui::GetFrameHeight() : 0.0f);
     ImGui::SetNextWindowSizeConstraints(ImVec2(160, H), ImVec2(FLT_MAX, FLT_MAX));  // at least tall enough; taller when dragged
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
-    ImGui::Begin(ui.win("Timeline").c_str(), nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ui.beginPanel("Timeline", ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
     ui.noteHover("Timeline");
     Comp& c = *app.comp;

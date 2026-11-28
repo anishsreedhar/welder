@@ -3766,6 +3766,106 @@ void drawKnobs(Ctx& c, const NodeDef& def, const std::string& tab) {
     if (card) kit::endCard();
 }
 
+static void backdropControls(Ctx& c) {
+    Node* node = c.node;
+    auto setParam = [&](const char* key, json value, bool checkpoint = true) {
+        if (checkpoint) c.app.checkpoint();
+        change(c, key, [value = std::move(value)](json& current) { current = value; });
+    };
+    auto setUi = [&](const char* key, json value, bool checkpoint = true) {
+        if (checkpoint) c.app.checkpoint();
+        c.app.edit([name = node->name, key, value = std::move(value)](Comp& comp) {
+            if (Node* backdrop = comp.find(name)) backdrop->ui[key] = value;
+        });
+    };
+    kit::rowLabel("Label");
+    const KnobDef label{"label", "Label", Knob::Text, "", 0, 1, {}, ""};
+    textEdit(c, label, node->params.str("label", ""), ImGui::GetContentRegionAvail().x);
+
+    kit::rowLabel("Font");
+    const auto& families = nodeLabelFamilies();
+    const std::string family = node->ui.value("note_font", families.empty() ? std::string("Roboto") : families.front());
+    if (kit::beginCombo("##backdropFont", family.c_str(), std::min(150.0f, ImGui::GetContentRegionAvail().x))) {
+        for (const auto& option : families)
+            if (ImGui::Selectable(option.c_str(), option == family)) setUi("note_font", option);
+        ImGui::EndCombo();
+    }
+    auto styleToggle = [&](const char* label, const char* key) {
+        ImGui::SameLine();
+        const bool on = node->ui.value(key, false);
+        if (on) ImGui::PushStyleColor(ImGuiCol_Button, theme().segmentOn);
+        if (ImGui::Button(label, ImVec2(24, 0))) setUi(key, !on);
+        if (on) ImGui::PopStyleColor();
+    };
+    styleToggle("B", "note_bold");
+    ImGui::SetItemTooltip("Bold label");
+    styleToggle("I", "note_italic");
+    ImGui::SetItemTooltip("Italic label");
+    ImGui::SameLine();
+    int fontSize = std::clamp((int)node->params.num("note_font_size", 0, 14), 6, 80);
+    ImGui::SetNextItemWidth(46);
+    if (ImGui::InputInt("##backdropFontSize", &fontSize, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue))
+        setParam("note_font_size", std::clamp(fontSize, 6, 80));
+    ImGui::SetItemTooltip("Label font size");
+    ImGui::SameLine();
+    float textColor[] = {0.92f, 0.92f, 0.92f};
+    const auto savedColor = node->ui.value("note_font_color", json::array());
+    if (savedColor.is_array() && savedColor.size() >= 3)
+        for (int i = 0; i < 3; ++i)
+            if (savedColor[i].is_number()) textColor[i] = savedColor[i].get<float>();
+    const float buttonHeight = ImGui::GetFrameHeight();
+    if (ImGui::Button("    Color##backdropLabelColor", ImVec2(64, buttonHeight)))
+        ImGui::OpenPopup("##backdropLabelPicker");
+    const ImVec2 buttonMin = ImGui::GetItemRectMin(), buttonMax = ImGui::GetItemRectMax();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->AddLine(ImVec2(buttonMin.x + 2, buttonMin.y + 1), ImVec2(buttonMax.x - 2, buttonMin.y + 1),
+                      IM_COL32(255, 255, 255, 45));
+    drawList->AddLine(ImVec2(buttonMin.x + 2, buttonMax.y - 1), ImVec2(buttonMax.x - 2, buttonMax.y - 1),
+                      IM_COL32(0, 0, 0, 100));
+    const ImVec2 chipMin(buttonMin.x + 6, buttonMin.y + (buttonHeight - 10) * 0.5f);
+    const ImVec2 chipMax(chipMin.x + 10, chipMin.y + 10);
+    drawList->AddRectFilled(chipMin, chipMax, ImGui::ColorConvertFloat4ToU32(ImVec4(textColor[0], textColor[1], textColor[2], 1)));
+    drawList->AddRect(chipMin, chipMax, IM_COL32(0, 0, 0, 180));
+    ImGui::SetItemTooltip("Label color");
+    if (ImGui::BeginPopup("##backdropLabelPicker")) {
+        ImGui::SetNextItemWidth(180);
+        if (ImGui::ColorPicker3("##labelColor", textColor))
+            setUi("note_font_color", json::array({textColor[0], textColor[1], textColor[2]}));
+        ImGui::EndPopup();
+    }
+
+    kit::rowLabel("Appearance");
+    const bool outline = node->params.str("appearance", "fill") == "outline";
+    if (kit::beginCombo("##backdropAppearance", outline ? "Outline" : "Fill", 100)) {
+        if (ImGui::Selectable("Fill", !outline)) setParam("appearance", "fill");
+        if (ImGui::Selectable("Outline", outline)) setParam("appearance", "outline");
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!outline);
+    float width = (float)node->params.num("border_width", 0, 2);
+    ImGui::SetNextItemWidth(105);
+    const bool widthChanged = ImGui::SliderFloat("Width", &width, 0, 10, "%.1f");
+    if (ImGui::IsItemActivated()) c.app.checkpoint();
+    if (widthChanged) setParam("border_width", width, false);
+    ImGui::EndDisabled();
+
+    kit::rowLabel("Backdrop color");
+    const auto color = node->params.vec<4>("color", 0, {0.42, 0.43, 0.46, 1});
+    float fill[] = {(float)color[0], (float)color[1], (float)color[2]};
+    const bool fillChanged = ImGui::ColorEdit3("##backdropColor", fill, ImGuiColorEditFlags_NoInputs);
+    if (fillChanged) setParam("color", json::array({fill[0], fill[1], fill[2], color[3]}));
+    kit::skipLabel();
+    bool bookmark = node->ui.value("bookmark", false);
+    if (kit::checkbox("Bookmark", &bookmark, "Show this backdrop in the Node Graph Bookmarks menu"))
+        setUi("bookmark", bookmark);
+    kit::rowLabel("Z Order");
+    int order = (int)node->params.num("z_order", 0, 0);
+    ImGui::SetNextItemWidth(80);
+    if (ImGui::InputInt("##backdropOrder", &order, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue))
+        setParam("z_order", order);
+}
+
 static void mergeNodeTab(Ctx& c) {
     struct LabelColumn {
         float previous=kit::setLabelWidth(104);
@@ -4151,6 +4251,9 @@ static void nodePanelBody(App& app, UiState& ui, Node* n, bool* keepOpen) {
         });
         for (auto& k : def->knobs) shown.insert(k.name);
         for (const char* k : {"ml", "history", "promoted"}) shown.insert(k);
+    } else if (n->type == "Backdrop") {
+        backdropControls(c);
+        shown.insert({"label", "color", "note_font_size", "appearance", "border_width", "z_order"});
     } else if (n->type == "Shuffle") {
         drawShufflePanel(app, ui, n);
         for (const char* k : {"mapping", "in1", "in2", "in1_input", "in2_input", "out1", "out2", "new_layers"}) shown.insert(k);
@@ -4380,7 +4483,7 @@ void setParamComp(json& v, int n, int k, double val, double frame, const std::ve
 void drawFloatPanels(App& app, UiState& ui);
 
 void drawProperties(App& app, UiState& ui) {
-    ImGui::Begin(ui.win("Properties").c_str());
+    ui.beginPanel("Properties");
     if (!app.panelsToExpand.empty()) {  // a node was just opened: the bin's tab to the front (focus stays where it is)
         ImGuiWindow* w = ImGui::GetCurrentWindow();
         if (w->DockNode && w->DockNode->TabBar) w->DockNode->TabBar->NextSelectedTabId = w->TabId;
