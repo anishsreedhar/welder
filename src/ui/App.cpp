@@ -3803,10 +3803,18 @@ json App::nkToNodes(const std::string& nkText, std::string* err) {
 
 void App::openPanel(const std::string& name) {
     if (floatNewPanels && name != kProjectPanel) {  // the bin is locked: a window of its own (#105)
+        panelsToDock.erase(name);
+        panelsToExpand.erase(name);
+        closePanel(name);
         if (std::find(panelsToFloat.begin(), panelsToFloat.end(), name) == panelsToFloat.end()) panelsToFloat.push_back(name);
         panelsFloating.insert(name);  // (shown, for the viewer tools, from now)
         panelFocus = name;
         return;
+    }
+    if (panelsFloating.count(name)) {
+        panelsToDock.insert(name);
+        std::erase(panelsToFloat, name);
+        panelsFloating.erase(name);
     }
     panelsToExpand.insert(name);
     closePanel(name);

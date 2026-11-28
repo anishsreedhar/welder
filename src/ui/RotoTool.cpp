@@ -1682,8 +1682,26 @@ void drawRotoViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec2 p1,
         polyline(dl, roto::flatten(toScreenPts(pts, xf), true, 1.0), kCurveSel, true, 1.5f);
     }
     if (r.drag == Drag::Marquee) {
-        dl->AddRectFilled(r.dragStartScreen, mouse, IM_COL32(255, 196, 80, 30));
-        dl->AddRect(r.dragStartScreen, mouse, IM_COL32(255, 196, 80, 160));
+        const ImVec2 start = r.dragStartScreen;
+        const ImVec2 lo(std::min(start.x, mouse.x), std::min(start.y, mouse.y));
+        const ImVec2 hi(std::max(start.x, mouse.x), std::max(start.y, mouse.y));
+        const ImU32 color = IM_COL32(255, 196, 80, 210);
+        switch (ui.viewer.selectionShape) {
+        case ViewerState::SelectionShape::Rectangle:
+            dl->AddRectFilled(lo, hi, IM_COL32(255, 196, 80, 30));
+            dl->AddRect(lo, hi, color);
+            break;
+        case ViewerState::SelectionShape::Ellipse:
+            dl->AddEllipse(ImVec2((lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f),
+                           ImVec2((hi.x - lo.x) * 0.5f, (hi.y - lo.y) * 0.5f), color);
+            break;
+        case ViewerState::SelectionShape::Lasso:
+            if (r.marqueePath.empty()) r.marqueePath.push_back(start);
+            if (dist(r.marqueePath.back(), mouse) >= 2.0f) r.marqueePath.push_back(mouse);
+            if (r.marqueePath.size() > 1)
+                dl->AddPolyline(r.marqueePath.data(), (int)r.marqueePath.size(), color, 1.5f, ImDrawFlags_Closed);
+            break;
+        }
     }
 
     // ---- paint preview: brush circle, stroke so far, clone source
@@ -1743,6 +1761,7 @@ void drawRotoViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec2 p1,
     if (clicked) {
         r.dragStartImg = mouseImg;
         r.dragStartScreen = mouse;
+        r.marqueePath.clear();
         r.dragChanged = false;
         r.orig.clear();
         r.origStroke.clear();
@@ -1917,18 +1936,12 @@ void drawRotoViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec2 p1,
                             if (!r.orig.count(si) && si < (int)items.size() && !ds[si].stroke) r.orig[si] = roto::pointsAt(items[si], frame);
                     break;
                 }
-                // 2b. a double-click on a shape (a point, its outline or inside it): all its points, with
-                // any of the select tools (Select Points too, which single clicks on a curve pass by)
+                // Double-click selects a whole spline. A subsequent drag moves it.
                 if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !io.KeyCtrl && !io.KeyAlt) {
                     if (const int ds2 = shapeAtScreen(ds, mouse); ds2 >= 0) {
                         if (!io.KeyShift) r.sel.clear();
                         for (int pi = 0; pi < (int)ds[ds2].ctrlS.size(); ++pi) r.sel.insert({ds2, pi});
                         r.curShape = ds2;
-                        r.drag = Drag::Points;
-                        for (auto& [si, pi] : r.sel) {
-                            if (roto::isStroke(items[si])) r.origStroke[si] = items[si].value("points", json::array());
-                            else r.orig[si] = roto::pointsAt(items[si], frame);
-                        }
                         break;
                     }
                 }
@@ -1973,7 +1986,8 @@ void drawRotoViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec2 p1,
                     r.curShape = hs;
                     r.drag = Drag::Points;
                 } else {
-                    // 4. a curve or stroke (Ctrl+Alt on a curve inserts a point), then 5. inside a shape
+                    // A curve can insert a point or move an already selected spline. Only Select Splines
+                    // treats an unselected outline or interior as a whole-shape drag target.
                     int cs = -1, cseg = -1;
                     double ct = 0;
                     for (int si = (int)ds.size() - 1; si >= 0 && cs < 0 && !pointsOnly; --si) {
@@ -1996,10 +2010,17 @@ void drawRotoViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec2 p1,
                         }
                         if (cs < 0 && d.stroke && np == 1 && dist(mouse, iv(d.poly[0])) < tol) cs = si;
                     }
-                    if (cs < 0 && !pointsOnly)
+                    if (cs < 0 && splinesOnly)
                         for (int si = (int)ds.size() - 1; si >= 0; --si)
                             if (!ds[si].stroke && ds[si].alive && !ds[si].locked && ds[si].closed && ds[si].poly.size() >= 3 && insidePoly(ds[si].poly, mouse)) {
                                 cs = si;
+                                break;
+                            }
+                    bool wholeSplineSelected = cs >= 0 && !ds[cs].ctrlS.empty();
+                    if (wholeSplineSelected)
+                        for (int pi = 0; pi < (int)ds[cs].ctrlS.size(); ++pi)
+                            if (!r.sel.count({cs, pi})) {
+                                wholeSplineSelected = false;
                                 break;
                             }
                     if (cs >= 0 && io.KeyCtrl && io.KeyAlt && cseg >= 0) {
@@ -2009,7 +2030,7 @@ void drawRotoViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec2 p1,
                         });
                         r.sel = {{cs, cseg + 1}};
                         r.curShape = cs;
-                    } else if (cs >= 0) {
+                    } else if (cs >= 0 && (splinesOnly || wholeSplineSelected || ds[cs].stroke)) {
                         if (!io.KeyShift) r.sel.clear();
                         for (int pi = 0; pi < (int)ds[cs].ctrlS.size(); ++pi) r.sel.insert({cs, pi});
                         r.curShape = cs;
@@ -2348,12 +2369,36 @@ void drawRotoViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec2 p1,
         } else if (r.drag == Drag::Marquee) {
             ImVec2 a(std::min(r.dragStartScreen.x, mouse.x), std::min(r.dragStartScreen.y, mouse.y));
             ImVec2 b(std::max(r.dragStartScreen.x, mouse.x), std::max(r.dragStartScreen.y, mouse.y));
+            auto inSelection = [&](ImVec2 point) {
+                switch (ui.viewer.selectionShape) {
+                case ViewerState::SelectionShape::Rectangle:
+                    return point.x >= a.x && point.x <= b.x && point.y >= a.y && point.y <= b.y;
+                case ViewerState::SelectionShape::Ellipse: {
+                    const float rx = (b.x - a.x) * 0.5f, ry = (b.y - a.y) * 0.5f;
+                    if (rx <= 0 || ry <= 0) return false;
+                    const float dx = (point.x - a.x - rx) / rx, dy = (point.y - a.y - ry) / ry;
+                    return dx * dx + dy * dy <= 1.0f;
+                }
+                case ViewerState::SelectionShape::Lasso: {
+                    bool inside = false;
+                    if (r.marqueePath.size() < 3) return false;
+                    for (size_t i = 0, j = r.marqueePath.size() - 1; i < r.marqueePath.size(); j = i++) {
+                        const ImVec2 p = r.marqueePath[i], q = r.marqueePath[j];
+                        if ((p.y > point.y) != (q.y > point.y) &&
+                            point.x < (q.x - p.x) * (point.y - p.y) / (q.y - p.y) + p.x)
+                            inside = !inside;
+                    }
+                    return inside;
+                }
+                }
+                return false;
+            };
             for (int si = 0; si < (int)ds.size(); ++si) {
                 if (ds[si].stroke || !ds[si].alive || ds[si].locked) continue;
                 bool any = false;
                 for (int pi = 0; pi < (int)ds[si].ctrlS.size(); ++pi) {
                     ImVec2 c = r.tool == Tool::SelectFeather ? featherHandle(ds[si], pi) : ds[si].ctrlS[pi];
-                    if (c.x >= a.x && c.x <= b.x && c.y >= a.y && c.y <= b.y) {
+                    if (inSelection(c)) {
                         any = true;
                         if (r.tool == Tool::SelectFeather) r.fsel.insert({si, pi});
                         else r.sel.insert({si, pi});
@@ -2363,6 +2408,7 @@ void drawRotoViewer(App& app, UiState& ui, ImDrawList* dl, ImVec2 p0, ImVec2 p1,
                 if (any && r.tool == Tool::SelectSplines)  // whole shapes
                     for (int pi = 0; pi < (int)ds[si].ctrlS.size(); ++pi) r.sel.insert({si, pi});
             }
+            r.marqueePath.clear();
         } else if (r.drag == Drag::Paint && !r.strokePts.empty()) {
             json s = newStrokeJson(r, items, frame);
             r.pendingStroke = s;  // (shown until the render has it)

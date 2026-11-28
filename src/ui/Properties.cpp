@@ -4802,8 +4802,6 @@ void setParamComp(json& v, int n, int k, double val, double frame, const std::ve
     setComp(v, n, k, val, frame, defs);
 }
 
-void drawFloatPanels(App& app, UiState& ui);
-
 void drawProperties(App& app, UiState& ui) {
     ui.beginPanel("Properties");
     if (!app.panelsToExpand.empty()) {  // a node was just opened: the bin's tab to the front (focus stays where it is)
@@ -4814,20 +4812,39 @@ void drawProperties(App& app, UiState& ui) {
     // the classic bin toolbar: how many panels stay open, and clear them all.
     {
         ImGui::AlignTextToFramePadding();
-        ImGui::SetNextItemWidth(24);
+        ImGui::SetNextItemWidth(28);
         int mp=app.maxPanels;
         if(ImGui::InputInt("##maxpanels",&mp,0,0)){app.maxPanels=std::clamp(mp,1,50);while((int)app.panels.size()>app.maxPanels)app.panels.pop_back();}
         if(ImGui::IsItemHovered())ImGui::SetTooltip("Maximum number of open property panels");
+        ImGui::SameLine(0, 5);
+        const ImVec2 lock = ImGui::GetCursorScreenPos();
+        const float controlHeight = ImGui::GetFrameHeight();
+        if (ImGui::InvisibleButton("##lock", ImVec2(20, controlHeight)))
+            app.floatNewPanels = !app.floatNewPanels;
+        const bool locked = app.floatNewPanels;
+        const bool highlighted = ImGui::IsItemHovered() || ImGui::IsItemActive();
+        auto* draw = ImGui::GetWindowDrawList();
+        if (highlighted) draw->AddRectFilled(lock, ImVec2(lock.x + 20, lock.y + controlHeight),
+                                            ImGui::GetColorU32(ImGuiCol_ButtonHovered), 3);
+        const float y = lock.y + (controlHeight - 14) * 0.5f;
+        const ImU32 ink = locked ? theme().accent : ImGui::GetColorU32(ImGuiCol_Text);
+        const float shackle = lock.x + (locked ? 6 : 9);
+        draw->PathLineTo(ImVec2(shackle, y + (locked ? 9 : 6)));
+        draw->PathLineTo(ImVec2(shackle, y + 5));
+        draw->PathArcTo(ImVec2(shackle + 3, y + 5), 3, IM_PI, 2 * IM_PI, 10);
+        draw->PathLineTo(ImVec2(shackle + 6, y + 9));
+        draw->PathStroke(ink, 0, 1.5f);
+        draw->AddRectFilled(ImVec2(lock.x + 4, y + 7), ImVec2(lock.x + 15, y + 14), ink, 2);
+        draw->AddCircleFilled(ImVec2(lock.x + 9.5f, y + 10.5f), 1.2f, ImGui::GetColorU32(ImGuiCol_WindowBg));
+        ImGui::SetItemTooltip(locked ? "Locked: open node properties in floating windows. Click to unlock."
+                                     : "Unlocked: open node properties in this panel. Click to lock.");
         auto glyph=[&](const char* id,int kind){
             ImGui::SameLine(0,4);const auto p=ImGui::GetCursorScreenPos();
-            const bool clicked=ImGui::InvisibleButton(id,ImVec2(16,18));auto* d=ImGui::GetWindowDrawList();const ImU32 c=IM_COL32(155,155,155,255),dark=IM_COL32(24,24,24,255);
-            if(kind==0){d->AddRectFilled(ImVec2(p.x+3,p.y+8),ImVec2(p.x+13,p.y+16),dark);d->AddCircle(ImVec2(p.x+8,p.y+7),4,dark,16,1.5f);}
+            const bool clicked=ImGui::InvisibleButton(id,ImVec2(16,controlHeight));auto* d=ImGui::GetWindowDrawList();const ImU32 c=IM_COL32(155,155,155,255);
             if(kind==1){d->AddLine(ImVec2(p.x+3,p.y+5),ImVec2(p.x+13,p.y+15),c,2);d->AddLine(ImVec2(p.x+13,p.y+5),ImVec2(p.x+3,p.y+15),c,2);}
             if(kind==2){ImVec2 q[]={ImVec2(p.x+2,p.y+13),ImVec2(p.x+11,p.y+3),ImVec2(p.x+14,p.y+6),ImVec2(p.x+5,p.y+16)};d->AddConvexPolyFilled(q,4,c);}
             return clicked;
         };
-        if(glyph("##lock",0))app.floatNewPanels=!app.floatNewPanels;
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Lock the properties bin; open new panels as floating windows");
         if(glyph("##clear",1))app.panels.clear();
         if(ImGui::IsItemHovered())ImGui::SetTooltip("Close all property panels");
         if(glyph("##settings",2))ImGui::OpenPopup("properties_options");
@@ -4855,7 +4872,6 @@ void drawProperties(App& app, UiState& ui) {
     if (!ImGui::GetCurrentWindow()->SkipItems) app.panelsToExpand.clear();  // (shown: done; hidden: next time it shows)
     drawExprEditor(app);
     ImGui::End();
-    drawFloatPanels(app, ui);
 }
 
 void openFloatPanel(App& app, UiState& ui, const std::string& name) {
@@ -4869,16 +4885,21 @@ void openFloatPanel(App& app, UiState& ui, const std::string& name) {
 }
 
 void drawFloatPanels(App& app, UiState& ui) {
+    std::erase_if(ui.floatPanels, [&](const FloatPanel& f) { return app.panelsToDock.count(f.node); });
+    app.panelsToDock.clear();
     for (auto& name : app.panelsToFloat) openFloatPanel(app, ui, name);  // opened while the bin is locked (#105)
     app.panelsToFloat.clear();
     std::vector<std::string> done;
     for (auto& f : ui.floatPanels) {
         Node* n = app.node(f.node);
         if (!n) { done.push_back(f.node); continue; }
-        ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 30, ImGui::GetFontSize() * 26), ImGuiCond_FirstUseEver);
+        const ImVec2 work = ImGui::GetMainViewport()->WorkSize;
+        const float fontSize = ImGui::GetFontSize();
+        ImGui::SetNextWindowSize(ImVec2(std::min(fontSize * 43, work.x * 0.9f),
+                                      std::min(fontSize * 35, work.y * 0.9f)), ImGuiCond_FirstUseEver);
         if (f.focus) { ImGui::SetNextWindowFocus(); f.focus = false; }
         bool open = true;
-        const std::string title = f.node + " (" + n->type + ")###float_" + f.node;
+        const std::string title = f.node + " Properties###float_" + f.node;
         if (ImGui::Begin(title.c_str(), &open, ImGuiWindowFlags_NoDocking)) {
             const float bar = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
             ImGui::BeginChild("knobs", ImVec2(0, -bar));
@@ -4886,10 +4907,15 @@ void drawFloatPanels(App& app, UiState& ui) {
             ImGui::EndChild();
             ImGui::Separator();
             const bool changed = n->params.data != f.params;
-            if (ImGui::Button("OK")) done.push_back(f.node);
-            ImGui::SameLine();
+            constexpr float buttonWidth = 69;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x -
+                                 3 * buttonWidth - 2 * ImGui::GetStyle().ItemSpacing.x));
             ImGui::BeginDisabled(!changed);
-            if (ImGui::Button("Cancel")) {
+            const bool revert = ImGui::Button("Revert", ImVec2(buttonWidth, 0));
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            const bool cancel = ImGui::Button("Cancel", ImVec2(buttonWidth, 0));
+            if (revert || (cancel && changed)) {
                 const std::string name = f.node;
                 const json before = f.params;
                 app.checkpoint();
@@ -4899,13 +4925,12 @@ void drawFloatPanels(App& app, UiState& ui) {
                         m->paramsChanged();
                     }
                 });
-                done.push_back(f.node);
             }
-            ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip(changed ? "Put the knobs back as they were when this window opened" : "Nothing changed yet");
+                ImGui::SetTooltip("Discard changes made since this window opened and close it");
+            if (cancel) done.push_back(f.node);
             ImGui::SameLine();
-            ImGui::TextDisabled(changed ? "changed" : "");
+            if (ImGui::Button("Close", ImVec2(buttonWidth, 0))) done.push_back(f.node);
         }
         ImGui::End();
         if (!open) done.push_back(f.node);  // closing it keeps the changes (like OK)
