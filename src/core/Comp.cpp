@@ -132,6 +132,9 @@ std::unique_ptr<Comp> Comp::fromJson(const json& j, const std::filesystem::path&
         n->name = name;
         n->comp = c.get();
         if (jn.contains("params")) n->params.data = jn["params"];
+        // Missing response identifies a saved Keyer from before the Nuke-style controls.
+        // Persist it explicitly so copying/duplicating cannot silently upgrade its matte.
+        if (type == "Keyer" && !n->params.has("response")) n->params.data["response"] = "legacy";
         if (wasDeepWrite) {
             if (!n->params.data.is_object()) n->params.data = json::object();
             n->params.data["deep"] = true;
@@ -268,6 +271,7 @@ Node* Comp::addNode(const std::string& type0, const std::string& baseName, const
     n->name = uniqueName(baseName.empty() ? type + "1" : baseName);
     n->comp = this;
     n->params.data = params.is_object() ? params : json::object();
+    if (type == "Keyer" && !n->params.has("response")) n->params.data["response"] = "nuke";
     if (wasDeepWrite) {
         n->params.data["deep"] = true;
         n->params.data["file_type"] = "exr";

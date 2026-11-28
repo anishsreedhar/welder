@@ -384,6 +384,7 @@ add_test(NAME blur COMMAND welder_blur_tests)
 add_executable(welder_tests tests/engine_tests.cpp)
 target_include_directories(welder_tests PRIVATE tests)
 target_link_libraries(welder_tests PRIVATE strata_core)
+add_dependencies(welder_tests welder)  # frame-server path-mapping regression uses the real CLI worker
 add_test(NAME engine COMMAND welder_tests)
 add_executable(welder_exr_tests tests/exr_tests.cpp)
 target_link_libraries(welder_exr_tests PRIVATE strata_core)

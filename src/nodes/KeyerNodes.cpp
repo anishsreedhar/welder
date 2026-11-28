@@ -342,6 +342,7 @@ public:
         const std::string op = params.str("operation", "luminance key");
         const std::string combine = params.str("combine", "replace");
         const bool intersect = combine == "intersect", unite = combine == "union";
+        const bool legacy = params.str("response", "legacy") != "nuke";
         auto rg = params.vec<4>("range", f, {0, 1, 1, 1});
         const float A = (float)rg[0], B = (float)rg[1], C = (float)rg[2], D = (float)rg[3];
         const bool inv = params.flag("invert", false);
@@ -352,7 +353,7 @@ public:
                 float p[4] = {};
                 for (size_t i = 0; i < src.size(); ++i)
                     if (src[i] >= 0) p[i] = o[src[i]];
-                float al = keyer::matte(keyer::measure(op, p), A, B, C, D);
+                float al = keyer::matte(keyer::measure(op, p, legacy), A, B, C, D, legacy);
                 if (inv) al = 1 - al;
                 if (intersect) al = std::min(al, o[dst]);
                 if (unite) al = std::max(al, o[dst]);
@@ -761,7 +762,7 @@ std::array<int, 4> layerChannels(const Image& image, const std::string& layer) {
     return channels;
 }
 
-float measure(const std::string& op, const float p[4]) {
+float measure(const std::string& op, const float p[4], bool legacy) {
     const float r = p[0], g = p[1], b = p[2];
     if (op == "red keyer") return r;
     if (op == "green keyer") return g;
@@ -776,6 +777,7 @@ float measure(const std::string& op, const float p[4]) {
     if (op == "redscreen keyer" || op == "redscreen") return r - std::max(g, b);
     if (op == "greenscreen keyer" || op == "greenscreen") return g - std::max(r, b);
     if (op == "bluescreen keyer" || op == "bluescreen") return b - std::max(r, g);
+    if (legacy) return 0.2126f * r + 0.7152f * g + 0.0722f * b;
     // Match the luminance response measured from Nuke 17.1's Keyer.
     return 0.2125f * r + 0.7154f * g + 0.0721f * b;
 }
@@ -791,7 +793,8 @@ float curve(float v, float A, float B, float C, float D, bool smooth) {
     return ramp((D - v) / (D - C));
 }
 
-float matte(float v, float A, float B, float C, float D) {
+float matte(float v, float A, float B, float C, float D, bool legacy) {
+    if (legacy) return curve(v, A, B, C, D, true);
     return curve(C == 1.0f && D == 1.0f ? std::min(v, 1.0f) : v, A, B, C, D);
 }
 

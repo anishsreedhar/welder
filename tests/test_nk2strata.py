@@ -932,6 +932,7 @@ class KeyerImport(unittest.TestCase):
             'Keyer { inputs 0 output -rgba.alpha name Disabled }\n'
         )
         knobs = nodes["K"]["params"]
+        self.assertEqual(knobs["response"], "nuke")
         self.assertEqual(knobs["input"], "diffuse")
         self.assertEqual(knobs["output"], "matte.A")
         self.assertEqual(knobs["combine"], "union")

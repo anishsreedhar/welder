@@ -3224,6 +3224,7 @@ class Translator:
             return self.emit(nk_name, klass, "IBKGimme", main[:3], params, k)
 
         if klass == "Keyer":
+            params["response"] = "nuke"
             op = str(k.get("operation", "luminance key"))
             if op in ("redscreen", "greenscreen", "bluescreen"):
                 op += " keyer"

@@ -3181,7 +3181,7 @@ void keyerRangeGraph(Ctx& c) {
     for (float val : knots) {
         if (val < x0 || val > x1) continue;
         for (float sample : {std::nextafter(val, x0), val, std::nextafter(val, x1)})
-            pts.emplace_back(X(val), yb - keyer::matte(sample, v[0], v[1], v[2], v[3]) * (yb - yt));
+            pts.emplace_back(X(val), yb - keyer::matte(sample, v[0], v[1], v[2], v[3], n->params.str("response", "legacy") != "nuke") * (yb - yt));
     }
     for (size_t i = 1; i < pts.size(); ++i)
         dl->AddQuadFilled(ImVec2(pts[i - 1].x, yb), pts[i - 1], pts[i], ImVec2(pts[i].x, yb), IM_COL32(98, 179, 94, 45));

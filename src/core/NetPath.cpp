@@ -91,14 +91,39 @@ namespace {
 std::mutex substitutionMutex;
 std::vector<std::pair<std::string,std::string>> substitutions;
 }
+// Use portable separators even when the source belongs to a different operating system.
+static std::string normalized(std::string path) {
+    std::replace(path.begin(), path.end(), '\\', '/');
+    while (path.size() > 1 && !(path.size() == 3 && path[1] == ':') && path.back() == '/') path.pop_back();
+    return path;
+}
 void setSubstitutions(std::vector<std::pair<std::string,std::string>> mappings) {
-    std::lock_guard<std::mutex> guard(substitutionMutex);substitutions=std::move(mappings);
-    std::stable_sort(substitutions.begin(),substitutions.end(),[](const auto& a,const auto& b){return a.first.size()>b.first.size();});
+    for (auto& mapping : mappings) {
+        mapping.first = normalized(mapping.first);
+        mapping.second = normalized(mapping.second);
+    }
+    std::stable_sort(mappings.begin(), mappings.end(), [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
+    std::lock_guard<std::mutex> guard(substitutionMutex);
+    substitutions = std::move(mappings);
+}
+std::vector<std::pair<std::string,std::string>> getSubstitutions() {
+    std::lock_guard<std::mutex> guard(substitutionMutex);
+    return substitutions;
 }
 std::string substitute(const std::string& path) {
+    const auto portable = normalized(path);
     std::lock_guard<std::mutex> guard(substitutionMutex);
-    for(const auto& [from,to]:substitutions)if(!from.empty() && path.compare(0,from.size(),from)==0 &&
-        (path.size()==from.size()||from.back()=='/'||from.back()=='\\'||path[from.size()]=='/'||path[from.size()]=='\\'))return to+path.substr(from.size());
+    for (const auto& [from, to] : substitutions) {
+        if (from.empty() || portable.size() < from.size()) continue;
+        const bool windows = driveLetterPath(from) || from.rfind("//", 0) == 0;
+        const bool matches = std::equal(from.begin(), from.end(), portable.begin(), [windows](unsigned char a, unsigned char b) {
+            return windows ? std::tolower(a) == std::tolower(b) : a == b;
+        });
+        if (!matches || (portable.size() > from.size() && from.back() != '/' && portable[from.size()] != '/')) continue;
+        auto suffix = portable.substr(from.size());
+        while (!suffix.empty() && suffix.front() == '/') suffix.erase(suffix.begin());
+        return suffix.empty() ? to : to + (to.empty() || to.back() == '/' ? "" : "/") + suffix;
+    }
     return path;
 }
 

@@ -35,6 +35,8 @@ inline std::string maybeUnc(const std::string& path) { return enabled() ? toUnc(
 // that's on a mapped drive. Returns how many it changed.
 int convertComp(Comp& c);
 void setSubstitutions(std::vector<std::pair<std::string,std::string>> mappings);
+// A thread-safe snapshot for frame-server invocation context.
+std::vector<std::pair<std::string,std::string>> getSubstitutions();
 std::string substitute(const std::string& path);
 
 }  // namespace strata::netpath

@@ -1,4 +1,5 @@
 #include "core/NetPath.h"
+#include "core/FileSave.h"
 #include "ui/PreferenceSettings.h"
 #include <cstdio>
 #include <stdexcept>
@@ -48,8 +49,45 @@ int main() {
         check(netpath::substitute("/show/shot/plate.exr") == "E:/specific/plate.exr", "longest path mapping wins");
         check(netpath::substitute("/showcase/plate.exr") == "/showcase/plate.exr", "only path component prefixes match");
         check(netpath::substitute("/show") == "D:/show", "exact path mapping");
+        netpath::setSubstitutions({{"D:\\show\\", "/mnt/show/"}});
+        check(netpath::substitute("d:/show/shot\\plate.exr") == "/mnt/show/shot/plate.exr", "Windows to Linux normalizes mixed separators");
+        check(netpath::substitute("D:\\show\\shot\\plate.exr") == "/mnt/show/shot/plate.exr", "Windows source separators recognized on every host");
+        check(netpath::substitute("D:/showcase/plate.exr") == "D:/showcase/plate.exr", "trailing slash cannot match partial folder");
+        for (const auto& from : {"/show", "/show/"})
+            for (const auto& to : {"D:/show", "D:/show/", "D:\\show\\"}) {
+                netpath::setSubstitutions({{from, to}});
+                check(netpath::substitute("/show/shot/plate.exr") == "D:/show/shot/plate.exr", "mapping joins folder and filename with one separator");
+            }
+        netpath::setSubstitutions({{"/", "D:/"}});
+        check(netpath::substitute("/shot/plate.exr") == "D:/shot/plate.exr", "mapping a filesystem root keeps the separator");
+        netpath::setSubstitutions({{"/SHOW", "/mnt/show"}});
+        check(netpath::substitute("/show/a.exr") == "/show/a.exr", "Linux mapping prefixes remain case sensitive");
+        check(netpath::getSubstitutions().size() == 1, "worker mapping snapshot");
         netpath::setSubstitutions({});
         check(netpath::substitute("/show/plate.exr") == "/show/plate.exr", "clearing mappings works");
+        // Save As to the current autosave (including a lexical alias) must preserve
+        // the newly written comp, while other obsolete recovery files are removed.
+        namespace fs = std::filesystem;
+        const auto dir = fs::temp_directory_path() / "welder-save-as-regression";
+        fs::create_directories(dir);
+        const auto destination = (dir / "current-autosave.weld").string();
+        const auto other = (dir / "old-recovery.weld").string();
+        std::string error;
+        for (const auto& candidate : {destination, (dir / "." / "current-autosave.weld").string()}) {
+            check(savefile::writeAtomic(destination, "old recovery", &error), "prepare old autosave");
+            check(savefile::writeAtomic(other, "obsolete recovery", &error), "prepare other autosave");
+            const json saved = {{"nodes", json::array()}, {"artist_saved", true}};
+            check(savefile::saveComp(destination, saved.dump(), {candidate, other}, &error), "Save As succeeds");
+            check(fs::exists(destination), "Save As destination is not deleted by cleanup");
+            std::ifstream file(destination);
+            check(json::parse(file) == saved, "saved comp contains the new contents");
+            check(!fs::exists(other), "unrelated obsolete autosave is cleaned up");
+        }
+        const auto unavailable = (dir / "absent" / "cannot-save.weld").string();
+        check(savefile::writeAtomic(other, "still needed", &error), "prepare recovery for failed Save As");
+        check(!savefile::saveComp(unavailable, "new comp", {other}, &error), "failed Save As reports failure");
+        check(fs::exists(other), "failed Save As preserves recovery");
+        fs::remove(destination); fs::remove(other);
         check(!ui::prefs::supported("monitor_ndi"), "unavailable NDI cannot appear functional");
         check(ui::prefs::supported("max_panels"), "supported panels controls enabled");
         std::printf("PASS: %d preferences validation, persistence and path-mapping checks\n", checks);

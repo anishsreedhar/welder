@@ -465,6 +465,21 @@ int tick(App& app, UiState& ui, float lastFrameMs) {
                 if (exists(app.autosavePath(app.compPath))) fail("discarding didn't remove the autosave");
                 else std::printf("SMOKE autosave: discarded\n");
                 app.autosaveSecs = 0;
+                // Real App::save regression: saving to the current recovery filename
+                // must not delete the destination during obsolete-autosave cleanup.
+                const auto destination = app.autosavePath(app.compPath);
+                const auto expected = app.comp->toJson();
+                std::string saveError;
+                if (!app.save(destination, &saveError)) fail("Save As to autosave path failed: " + saveError);
+                else if (!exists(destination)) fail("Save As cleanup deleted its destination");
+                else {
+                    std::ifstream saved(destination);
+                    if (json::parse(saved) != expected) fail("Save As to autosave path lost comp contents");
+                    else std::printf("SMOKE Save As: autosave destination preserved with current comp contents\n");
+                    saved.close();
+                    std::error_code cleanupError;
+                    fs::remove(destination, cleanupError);
+                }
                 app.dirty = false;
                 s.phase = State::Done;
             } else if (now - s.stepT0 > 15) {

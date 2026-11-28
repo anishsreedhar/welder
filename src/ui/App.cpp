@@ -18,6 +18,7 @@
 #include "nodes/CamSolve.h"
 #include "nodes/CameraTrackerNode.h"
 #include "core/NetPath.h"
+#include "core/FileSave.h"
 #include "nodes/CamTrack.h"
 #include "nodes/Retime.h"
 #include "nodes/Track.h"
@@ -36,44 +37,8 @@ namespace fs = std::filesystem;
 
 namespace strata::ui {
 
-// Write a file so that a crash (or a full disk) part-way through never leaves it half written:
-// into a temporary file next to it, then swapped in. If the swap can't be done (a file locked
-// on a network share), the file is written in place as before.
 bool writeFileAtomic(const std::string& path, const std::string& text, std::string* err) {
-    const std::string tmp = path + ".saving";
-    {
-        std::ofstream f(tmp, std::ios::binary);
-        if (f) {
-            f << text;
-            f.flush();
-        }
-        if (!f) {
-            std::error_code ec;
-            fs::remove(tmp, ec);
-            std::ofstream g(path, std::ios::binary);  // (a folder that can't take a new file)
-            g << text;
-            g.flush();
-            if (!g && err) *err = "cannot write " + path;
-            return (bool)g;
-        }
-    }
-    std::error_code ec;
-    fs::rename(tmp, path, ec);
-    if (ec) {  // (on some systems a rename won't replace a file)
-        std::error_code ec2;
-        fs::remove(path, ec2);
-        fs::rename(tmp, path, ec);
-    }
-    if (ec) {
-        std::error_code ec2;
-        fs::remove(tmp, ec2);
-        std::ofstream g(path, std::ios::binary);
-        g << text;
-        g.flush();
-        if (!g && err) *err = "cannot write " + path + ": " + ec.message();
-        return (bool)g;
-    }
-    return true;
+    return savefile::writeAtomic(path, text, err);
 }
 
 App::App() {
@@ -3307,6 +3272,10 @@ void App::frameServerLoop(const RenderRequest& r, const std::vector<Node*>& writ
     fs::path tmp = fs::path(cacheDir("tmp")) / ("render_" + tag);
     fs::create_directories(tmp, ec);
     fs::path compFile = tmp / "comp.weld";
+    // Invocation context, kept outside the comp: every worker receives the editor's mappings.
+    const fs::path mappingFile = tmp / "path-mappings.json";
+    if (!writeFileAtomic(mappingFile.string(), json(netpath::getSubstitutions()).dump(), nullptr))
+        return fail("frame server: can't write path mappings");
     std::vector<std::string> movies, seqs;
     {
         std::shared_lock<std::shared_timed_mutex> cl(compM);
@@ -3356,7 +3325,7 @@ void App::frameServerLoop(const RenderRequest& r, const std::vector<Node*>& writ
         w.log = tmp / ("worker" + std::to_string(ws.size()) + ".log");
         std::vector<std::string> args = {cli.string(), "render", compFile.string(), "-f", listText(fr), "-w", join(names),
                                           "-t", std::to_string(threadsEach), "--cache-mb",
-                                          std::to_string(platform::renderCacheMB(nWorkers))};
+                                          std::to_string(platform::renderCacheMB(nWorkers)), "--path-mappings", mappingFile.string()};
         if (r.continueOnError) args.push_back("-c");
         if (r.allowWritePython) args.push_back("--allow-write-python");
         if (r.proxy && comp->project.proxyScale > 0 && comp->project.proxyScale < 1) {
@@ -3571,19 +3540,17 @@ App::PerfSnapshot App::perfSnapshot() {
 
 bool App::save(const std::string& path, std::string* err) {
     json j = comp->toJson();
-    if (!writeFileAtomic(path, j.dump(2) + "\n", err)) {
+    // Finish an in-flight autosave before writing: Save As may target that very file.
+    if (autosaveThread_.joinable()) autosaveThread_.join();
+    const std::string destination = absolutePath(path);
+    const std::vector<std::string> obsolete = {autosavePath(compPath), autosavePath(destination)};
+    if (!savefile::saveComp(destination, j.dump(2) + "\n", obsolete, err)) {
         if (err && err->empty()) *err = "cannot write " + path;
         return false;
     }
-    const std::string before = compPath;
-    compPath = absolutePath(path);
+    compPath = destination;
     comp->scriptPath = compPath;  // the Slate's filename / version
     dirty = false;
-    // the autosaves are out of date now (the untitled one too, once an untitled comp is saved)
-    std::error_code ec;
-    if (autosaveThread_.joinable()) autosaveThread_.join();
-    fs::remove(autosavePath(before), ec);
-    fs::remove(autosavePath(compPath), ec);
     lastAutosave_ = steadySeconds();
     addRecent(compPath);
     ++compSaves;

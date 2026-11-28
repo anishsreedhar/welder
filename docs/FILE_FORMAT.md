@@ -291,7 +291,7 @@ All keyers write the matte to alpha and pass other channels through.
 | IBKColour | plate | `screen_type` (`green`, `blue`), `threshold` (0.05), `erode` (px, 2). Output: clean plate rgb, alpha = where the screen was found |
 | IBKGimme | fg, c (clean plate), bg | `screen_type`, `red_weight`, `blue_green_weight` (0.5), `screen_subtraction` (true), `use_bkg_luminance`, `screen_color` (used when c is not connected) |
 | ChromaKeyer | source | `screen_color`, `tolerance` (0.15), `softness` (0.35), `dark_threshold` (0.02), `despill`, `output` (`premultiplied`, `unpremultiplied`, `matte`) |
-| Keyer | source | `operation` (luminance key, red/green/blue/alpha keyer, saturation key, min/max keyer, greenscreen/bluescreen keyer), `range` [A, B, C, D], `invert` |
+| Keyer | source | `operation` (luminance key, red/green/blue/alpha keyer, saturation key, min/max keyer, greenscreen/bluescreen keyer), `range` [A, B, C, D], `invert`, `response` (`legacy` for saved nodes with no marker; `nuke` for newly created nodes) |
 | HueKeyer | source | `hue` (degrees), `width`, `softness`, `sat_threshold`, `invert` |
 | Difference | B, A | `offset`, `gain` |
 | Despill | source | `screen`, `limit` (`average`, `max`, `min`), `amount`, `restore_luminance`, `spill_to_alpha` |

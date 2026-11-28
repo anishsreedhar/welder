@@ -23,6 +23,7 @@
 #include "../core/Brand.h"
 #include "../core/Comp.h"
 #include "../core/Platform.h"
+#include "../core/NetPath.h"
 #include "../core/Engine.h"
 #include "../core/FrameList.h"
 #include "../core/Mcp.h"
@@ -38,7 +39,7 @@ namespace {
 void usage() {
     std::cerr << "welder " STRATA_VERSION " — open-source node-based compositor (headless)\n\n"
                  "usage:\n"
-                 "  welder render <comp.weld> [-f 1-100|1-100x2|1,5,9] [-w Write1,..] [-t threads] [--cache-mb N] [--scale 0.5] [-c] [-v] [--no-gpu] [--allow-write-python]\n"
+                 "  welder render <comp.weld> [-f 1-100|1-100x2|1,5,9] [-w Write1,..] [-t threads] [--cache-mb N] [--scale 0.5] [-c] [-v] [--no-gpu] [--allow-write-python] [--path-mappings mappings.json]\n"
                  "  welder node   <comp.weld> <NodeName> -o out.(exr|dpx|tif|png|jpg) [-f frame]\n"
                  "  welder info   <comp.weld>\n"
                  "  welder nk     <comp.weld> [-o shot.nk]   (export to a .nk script)\n"
@@ -76,7 +77,7 @@ std::vector<std::string> split(const std::string& s, char sep) {
 
 struct Args {
     std::vector<std::string> pos;
-    std::string frames, writes, out;
+    std::string frames, writes, out, pathMappings;
     int threads = 0;
     long cacheMb = 0;  // 0: from the machine's RAM (platform::renderCacheMB)
     bool verbose = false;
@@ -101,6 +102,7 @@ Args parseArgs(int argc, char** argv, int start) {
         else if (s == "-v" || s == "--verbose") a.verbose = true;
         else if (s == "-c" || s == "--continue") a.continueOnError = true;
         else if (s == "--scale") a.scale = std::stod(next());
+        else if (s == "--path-mappings") a.pathMappings = next();
         else if (s == "--allow-write-python") a.allowWritePython = true;
         else if (s == "--no-gpu") gpu::setEnabled(false);
         else a.pos.push_back(s);
@@ -483,6 +485,11 @@ int main(int argc, char** argv) {
         if (cmd == "python") return cmdPython(argc, argv);  // (its arguments are the script's)
         if (cmd == "mcp") return cmdMcp(argc, argv);
         Args a = parseArgs(argc, argv, 2);
+        if (!a.pathMappings.empty()) {
+            std::ifstream mappings(a.pathMappings);
+            if (!mappings) throw std::runtime_error("cannot read path mappings: " + a.pathMappings);
+            netpath::setSubstitutions(json::parse(mappings).get<std::vector<std::pair<std::string,std::string>>>());
+        }
         if (cmd == "render") return cmdRender(a);
         if (cmd == "node") return cmdNode(a);
         if (cmd == "info") return cmdInfo(a);
