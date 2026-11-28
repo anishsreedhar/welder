@@ -7179,18 +7179,28 @@ Connections:  {
             for (int f = 1; f <= 40; ++f) n->execute(be, f);
             n->finishExecute(true);
         };
+        auto mattePath = [&](int frame) {
+            char name[32];
+            std::snprintf(name, sizeof name, "matte.%05d.exr", frame);
+            return bake / name;
+        };
         auto stamps = [&] {
-            std::map<int, fs::file_time_type> t;
+            std::map<int, fs::file_time_type> times;
             for (int f = 1; f <= 40; ++f) {
-                char b[32];
-                std::snprintf(b, sizeof b, "matte.%05d.exr", f);
-                std::error_code ec;
-                t[f] = fs::last_write_time(bake / b, ec);
+                times[f] = fs::last_write_time(mattePath(f));
             }
-            return t;
+            return times;
+        };
+        auto markExistingFiles = [&] {
+            // Give existing files an older timestamp so a rewrite is observable even
+            // when the filesystem reports modification times with coarse precision.
+            const auto old = fs::file_time_type::clock::now() - std::chrono::hours(24);
+            for (int f = 1; f <= 40; ++f)
+                fs::last_write_time(mattePath(f), old);
+            return stamps();
         };
         bakeAll();
-        auto t0 = stamps();
+        const auto t0 = markExistingFiles();
         CHECK(fs::exists(bake / "manifest.json") && fs::exists(bake / "matte.00040.exr"));
         // the files: half floats, Y (grey) + A, and R for the dog
         auto ex = readExr((bake / "matte.00012.exr").string());
@@ -7205,10 +7215,9 @@ Connections:  {
                 for (const char* ch : {"A", "R"}) diff = std::max(diff, (double)std::fabs(px(baked12, x, y, ch) - px(live12, x, y, ch)));
         CHECK(diff < 1e-3);
         // baking again: nothing changed, nothing written
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
         bakeAll();
         int same = 0;
-        for (auto& [f, t] : stamps()) same += t == t0[f];
+        for (auto& [f, t] : stamps()) same += t == t0.at(f);
         CHECK(same == 40);
         // (c) a correction keyframe for the car on frame 20: only frames 11-29 bake again
         s = tmscene::parse(n->params);
@@ -7222,7 +7231,7 @@ Connections:  {
         auto t1 = stamps();
         std::vector<int> rebaked;
         for (int f = 1; f <= 40; ++f)
-            if (t1[f] != t0[f]) rebaked.push_back(f);
+            if (t1[f] != t0.at(f)) rebaked.push_back(f);
         std::vector<int> want;
         for (int f = 11; f <= 29; ++f) want.push_back(f);
         std::printf("  after a keyframe on 20: %zu of 40 frames baked again (%d-%d)\n", rebaked.size(), rebaked.empty() ? 0 : rebaked.front(),
@@ -7252,8 +7261,7 @@ Connections:  {
         n->paramsChanged();
         // a damaged manifest: everything bakes again, nothing breaks
         std::ofstream(bake / "manifest.json", std::ios::trunc) << "{ broken";
-        auto t2 = stamps();
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        auto t2 = markExistingFiles();
         bakeAll();
         int remade = 0;
         for (auto& [f, t] : stamps()) remade += t != t2[f];
