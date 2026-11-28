@@ -864,6 +864,7 @@ int main(int argc, char** argv) {
         ImGui::DockSpaceOverViewport(dock, vp, ui.maximized.empty() ? 0 : ImGuiDockNodeFlags_KeepAliveOnly);
         mark("frame setup");
         drawMenuBar(app, ui);
+        if (!app.panelsToExpand.empty()) ui.closedPanels.erase("Properties");
         mark("menu bar");
         {
             struct PanelFn { const char* name; void (*fn)(App&, UiState&); };
@@ -924,6 +925,7 @@ int main(int argc, char** argv) {
                 if (!f.empty()) ImGui::SetWindowFocus(f.c_str());
             }
         }
+        drawFloatPanels(app, ui);
         paneMenu.drawEmptyPanes();
         if (!ui.focusPanel.empty()) {
             ImGui::SetWindowFocus(ui.focusPanel.c_str());

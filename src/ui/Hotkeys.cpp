@@ -380,6 +380,15 @@ void handleHotkeys(App& app, UiState& ui) {
     if (panel == "Viewer") {
         // keys over a viewer that isn't the active one act on it: it becomes active
         if (!ui.hoverViewer.empty() && ui.hoverViewer != app.activeViewer) activateViewer(app, ui, ui.hoverViewer);
+        if (key(ImGuiKey_Q)) {
+            ui.viewer.overlays = !ui.viewer.overlays;
+            ui.viewer.overlayNoticeUntil = ImGui::GetTime() + 5.0;
+            if (!ui.viewer.overlays && ui.roto.drag == RotoState::Drag::Marquee) {
+                ui.roto.drag = RotoState::Drag::None;
+                ui.roto.marqueePath.clear();
+            }
+            return;
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_Tab, false) && !io.KeyCtrl && !io.KeyAlt && !io.KeyShift) {
             bool on = viewer3DActive(app, ui);
             ui.v3d.on = !on;
@@ -424,7 +433,6 @@ void handleHotkeys(App& app, UiState& ui) {
         if ((d = digitPressed(false, false, true)) >= 0) { v.zoom = zoomPreset(d, false); return; }
         if (key(ImGuiKey_Comma, false, false, false, true)) { v.fstop -= 0.5f; return; }
         if (key(ImGuiKey_Period, false, false, false, true)) { v.fstop += 0.5f; return; }
-        if (key(ImGuiKey_Q)) { v.overlays = !v.overlays; return; }
         if (key(ImGuiKey_S)) { v.openSettings = true; return; }
         if (key(ImGuiKey_P)) { app.viewPaused = !app.viewPaused; if (!app.viewPaused) app.requestView(); return; }
         if (key(ImGuiKey_U)) { app.requestView(true); return; }

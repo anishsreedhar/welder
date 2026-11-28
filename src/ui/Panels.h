@@ -103,6 +103,8 @@ struct ViewerState {
     std::array<float, 4> pickedColor{};
     int sampleDisplay = 0;
     bool overlays = true;    // Q: shapes, handles, trackers, format / bbox lines
+    double overlayNoticeUntil = 0;
+    enum class SelectionShape { Rectangle, Ellipse, Lasso } selectionShape = SelectionShape::Rectangle;
     bool openSettings = false;  // S: viewer settings popup
     ImVec2 viewSize = {800, 450};
     // A/B compare, from the Viewer node: "off", "wipe", "over", "under", "minus", "difference",
@@ -291,6 +293,7 @@ struct RotoState {
                       Freehand, Reshape, ReshapeSize } drag = Drag::None;
     int lineShape = -1, linePoint = -1;  // an open spline's width / feather handle being dragged
     ImVec2 dragStartImg, dragStartScreen;
+    std::vector<ImVec2> marqueePath;
     std::map<int, roto::Pts> orig;      // shape -> control points when the drag started
     std::map<int, json> origStroke;     // stroke -> points when the drag started
     json origTransform;
@@ -623,6 +626,7 @@ void drawProperties(App& app, UiState& ui);
 void drawBackgroundRenders(App& app, UiState& ui);
 void drawSceneGraph(App& app, UiState& ui);
 void openFloatPanel(App& app, UiState& ui, const std::string& name);  // issue #25
+void drawFloatPanels(App& app, UiState& ui);
 void drawMessages(App& app, UiState& ui);
 void drawDialogs(App& app, UiState& ui);
 // Python (ScriptEditor.cpp): the Script Editor window and the Scripts menu.
