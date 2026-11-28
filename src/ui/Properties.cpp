@@ -5224,12 +5224,41 @@ void drawProperties(App& app, UiState& ui) {
     ImGui::End();
 }
 
+// Graph position, size and other workspace edits are independent of the Properties window.
+static constexpr const char* backdropStyleKeys[] = {"note_font", "note_bold", "note_italic", "note_font_color", "bookmark"};
+
+FloatPanel::FloatPanel(const Node& n) : node(n.name), params(n.params.data), backdropStyle(json::object()) {
+    if (n.type == "Backdrop")
+        for (const auto key : backdropStyleKeys)
+            if (n.ui.contains(key)) backdropStyle[key] = n.ui.at(key);
+}
+
+bool FloatPanel::changed(const Node& n) const {
+    if (n.params.data != params) return true;
+    if (n.type == "Backdrop")
+        for (const auto key : backdropStyleKeys) {
+            if (n.ui.contains(key) != backdropStyle.contains(key)) return true;
+            if (n.ui.contains(key) && n.ui.at(key) != backdropStyle.at(key)) return true;
+        }
+    return false;
+}
+
+void FloatPanel::restore(Node& n) const {
+    n.params.data = params;
+    if (n.type == "Backdrop")
+        for (const auto key : backdropStyleKeys) {
+            if (backdropStyle.contains(key)) n.ui[key] = backdropStyle.at(key);
+            else if (n.ui.contains(key)) n.ui.erase(key);
+        }
+    n.paramsChanged();
+}
+
 void openFloatPanel(App& app, UiState& ui, const std::string& name) {
     Node* n = app.node(name);
     if (!n) return;
     for (auto& f : ui.floatPanels)
         if (f.node == name) { f.focus = true; return; }
-    ui.floatPanels.push_back({name, n->params.data, true});
+    ui.floatPanels.emplace_back(*n);
     app.panelsFloating.insert(name);  // (its viewer tools show from now, not from when it is first drawn)
     app.panelFocus = name;
 }
@@ -5256,7 +5285,7 @@ void drawFloatPanels(App& app, UiState& ui) {
             nodePanel(app, ui, n, nullptr);
             ImGui::EndChild();
             ImGui::Separator();
-            const bool changed = n->params.data != f.params;
+            const bool changed = f.changed(*n);
             constexpr float buttonWidth = 69;
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x -
                                  3 * buttonWidth - 2 * ImGui::GetStyle().ItemSpacing.x));
@@ -5266,14 +5295,9 @@ void drawFloatPanels(App& app, UiState& ui) {
             ImGui::SameLine();
             const bool cancel = ImGui::Button("Cancel", ImVec2(buttonWidth, 0));
             if (revert || (cancel && changed)) {
-                const std::string name = f.node;
-                const json before = f.params;
                 app.checkpoint();
-                app.edit([name, before](Comp& c) {
-                    if (Node* m = c.find(name)) {
-                        m->params.data = before;
-                        m->paramsChanged();
-                    }
+                app.edit([snapshot = f](Comp& c) {
+                    if (Node* m = c.find(snapshot.node)) snapshot.restore(*m);
                 });
             }
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))

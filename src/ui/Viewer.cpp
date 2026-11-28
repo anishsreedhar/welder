@@ -1590,9 +1590,12 @@ static bool drawViewerPanel(App& app, UiState& ui, ViewerState& v, Node* vn, boo
         const ViewXf xf = viewXf();
         drawCamTrackerViewer(app, ui, dl, p0, p1, xf, toolsHovered);
     }
-    if (ImGui::GetTime() < v.overlayNoticeUntil)
-        dl->AddText(ImVec2(p0.x + 8, p0.y + 6), IM_COL32(250, 75, 65, 255),
-                    v.overlays ? "overlay on" : "overlay off");
+    if (ImGui::GetTime() < v.overlayNoticeUntil) {
+        const char* notice = v.overlays ? "overlay on" : "overlay off";
+        const ImVec2 textSize = ImGui::CalcTextSize(notice);
+        dl->AddText(ImVec2(std::max(p0.x + 8, p1.x - textSize.x - 8), p0.y + 6),
+                    IM_COL32(250, 75, 65, 255), notice);
+    }
     if (!res.error.empty()) {
         std::string e = "ERROR: " + res.error;
         dl->AddRectFilled(ImVec2(p0.x + 10, p0.y + 10), ImVec2(p0.x + 20 + ImGui::CalcTextSize(e.c_str()).x, p0.y + 32),

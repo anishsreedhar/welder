@@ -437,11 +437,15 @@ struct DopeSheetState {
 // UiState::dropOpenComp for File > New / Close Comp (asks about unsaved changes like an open does)
 inline const char* kNewComp = "\x01new";
 
-// A node's properties in a window of its own (issue #25): OK keeps the changes, Cancel puts the
-// knobs back as they were when it was opened. It can sit anywhere (another screen too).
+// A floating Properties window keeps an opening snapshot for Revert and Cancel.
 struct FloatPanel {
+    explicit FloatPanel(const Node& n);
+    bool changed(const Node& n) const;
+    void restore(Node& n) const;
+
     std::string node;
-    json params;     // the knobs when it opened (what Cancel restores)
+    json params;
+    json backdropStyle;
     bool focus = true;
 };
 

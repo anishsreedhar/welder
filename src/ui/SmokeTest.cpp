@@ -85,6 +85,26 @@ bool isScript(const std::string& p) {
     return e == ".weld" || e == ".strata" || e == ".nk";
 }
 
+void checkBackdropRevert() {
+    Comp comp;
+    Node* n = comp.addNode("Backdrop", "Backdrop1", {{"label", "Comp\nLighting"}},
+                           {{"note_font", "Roboto"}, {"note_font_color", {1, 0, 0}}});
+    const FloatPanel panel(*n);
+    n->ui["x"] = 128;
+    if (panel.changed(*n)) fail("moving a backdrop enabled Revert");
+    n->ui["bookmark"] = true;
+    if (!panel.changed(*n)) fail("a bookmark edit did not enable Revert");
+    n->ui["note_bold"] = true;
+    n->ui["note_italic"] = true;
+    n->ui.erase("note_font");
+    n->ui["note_font_color"] = {0, 1, 0};
+    n->params.data["label"] = "New label";
+    panel.restore(*n);
+    if (panel.changed(*n) || n->params.data.at("label") != "Comp\nLighting" ||
+        n->ui != json{{"note_font", "Roboto"}, {"note_font_color", {1, 0, 0}}, {"x", 128}})
+        fail("reverting backdrop Properties lost the original style, label or graph position");
+}
+
 }  // namespace
 
 void start(const std::vector<std::string>& items) {
@@ -158,6 +178,7 @@ int tick(App& app, UiState& ui, float lastFrameMs) {
     case State::Settle:  // the window, layout and first render
         doing("starting up");
         if (s.frames > 10 && settledFrames(5)) {
+            checkBackdropRevert();
             std::printf("SMOKE startup: %.1f s\n", now - s.t0);
             s.phase = s.items.empty() ? State::Autosave : State::Open;
             s.quiet = 0;
