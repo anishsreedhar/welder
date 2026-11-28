@@ -5401,6 +5401,11 @@ Connections:  {
             {{"name", "Write1"}, {"type", "Write"}, {"inputs", {"Read1"}},
              {"params", {{"file", "/foreign/show/worker.exr"}, {"raw_data", true}}}},
         }), 4, 4);
+        const auto absolutePlate = mapped->resolvePath("/foreign/show/plate.exr");
+        mapped->project.projectDir = "/foreign/show";
+        mapped->find("Read1")->params.data["file"] = "plate.exr";
+        mapped->find("Write1")->params.data["file"] = "worker.exr";
+        CHECK(fs::path(mapped->resolvePath("plate.exr")) == fs::path(absolutePlate));
         const auto viewer = render(*mapped, "Read1");
         const auto compFile = dir / "comp.weld", mappingFile = dir / "path-mappings.json";
         { std::ofstream file(compFile); file << mapped->toJson(); }

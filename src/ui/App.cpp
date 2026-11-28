@@ -3280,13 +3280,9 @@ void App::frameServerLoop(const RenderRequest& r, const std::vector<Node*>& writ
     {
         std::shared_lock<std::shared_timed_mutex> cl(compM);
         json j = comp->toJson();
-        fs::path base = comp->baseDir;
-        if (!comp->project.projectDir.empty()) {
-            fs::path pd(comp->project.projectDir);
-            base = isAbsolutePath(comp->project.projectDir) || base.empty() ? pd : base / pd;
-        }
-        if (base.empty()) base = fs::current_path(ec);
-        j["project"]["project_directory"] = absolutePath(base.string());
+        const auto base = comp->projectBaseDir().string();
+        j["project"]["project_directory"] = base.empty() ? fs::current_path(ec).string()
+            : base.front() == '/' ? base : absolutePath(base);
         std::ofstream f(compFile, std::ios::binary);
         f << j.dump(1);
         if (!f) return fail("frame server: can't write " + compFile.string());
@@ -3543,8 +3539,9 @@ bool App::save(const std::string& path, std::string* err) {
     // Finish an in-flight autosave before writing: Save As may target that very file.
     if (autosaveThread_.joinable()) autosaveThread_.join();
     const std::string destination = absolutePath(path);
-    const std::vector<std::string> obsolete = {autosavePath(compPath), autosavePath(destination)};
-    if (!savefile::saveComp(destination, j.dump(2) + "\n", obsolete, err)) {
+    const savefile::RecoveryFile before{autosavePath(compPath), compPath};
+    const savefile::RecoveryFile after{autosavePath(destination), destination};
+    if (!savefile::saveComp(destination, j.dump(2) + "\n", before, after, err)) {
         if (err && err->empty()) *err = "cannot write " + path;
         return false;
     }
@@ -3569,12 +3566,14 @@ std::string App::autosavePath(const std::string& forComp) const {
     std::snprintf(hex, sizeof hex, "%012llx", (unsigned long long)(h & 0xffffffffffffull));
     std::string pattern=preferences.value("autosave_filename",std::string("${settings}/autosave/${project}-${hash}.weld"));
     if(pattern.empty())pattern="${settings}/autosave/${project}-${hash}.weld";
-    if(forComp.empty() && pattern=="${settings}/autosave/${project}-${hash}.weld")return (dir/"untitled.weld").string();
+    if (forComp.empty() && pattern == "${settings}/autosave/${project}-${hash}.weld") pattern = "untitled.weld";
     auto replace=[&](const std::string& token,const std::string& value){size_t at=0;while((at=pattern.find(token,at))!=std::string::npos){pattern.replace(at,token.size(),value);at+=value.size();}};
     replace("${settings}",dir.parent_path().string());replace("${cache}",cacheRoot());replace("${project}",forComp.empty()?"untitled":fs::path(forComp).stem().string());replace("${hash}",hex);
     const fs::path path(pattern);const fs::path resolved=path.is_absolute()?path:dir/path;
-    if(!forComp.empty() && recentKey(resolved.lexically_normal().string())==recentKey(fs::path(forComp).lexically_normal().string()))return (dir/(fs::path(forComp).stem().string()+"-"+hex+".weld")).string();
-    return resolved.string();
+    const auto legacyFallback = dir / (fs::path(forComp).stem().string() + "-" + hex + ".weld");
+    const auto fallback = savefile::samePath(resolved.string(), legacyFallback.string())
+        ? dir / (std::string("recovery-") + hex + ".weld") : legacyFallback;
+    return savefile::recoveryPath(resolved.string(), fallback.string(), forComp);
 }
 
 void App::tickAutosave(bool userBusy) {
@@ -3588,22 +3587,26 @@ void App::tickAutosave(bool userBusy) {
     // Serialise here (the UI thread owns the comp; this is quick), write on a thread (the disk may not be).
     json j = comp->toJson();
     j["autosave_of"] = compPath;
-    std::string text = j.dump(1) + "\n", path = autosavePath(compPath);
+    const std::string path = autosavePath(compPath);
+    if (path.empty()) {
+        message("Autosave skipped: both recovery filenames are occupied");
+        return;
+    }
+    std::string text = j.dump(1) + "\n";
     if (autosaveThread_.joinable()) autosaveThread_.join();
     autosaveBusy_ = true;
-    autosaveThread_ = std::thread([this, text = std::move(text), path] {
+    autosaveThread_ = std::thread([this, text = std::move(text), path, owner = compPath] {
         std::error_code ec;
         fs::create_directories(fs::path(path).parent_path(), ec);
         std::string err;
-        if (!writeFileAtomic(path, text, &err)) crash::crumb("autosave failed: " + err);
+        if (!savefile::writeRecovery({path, owner}, text, &err)) crash::crumb("autosave failed: " + err);
         autosaveBusy_ = false;
     });
 }
 
 void App::discardAutosave() {
     if (autosaveThread_.joinable()) autosaveThread_.join();
-    std::error_code ec;
-    fs::remove(autosavePath(compPath), ec);
+    savefile::removeRecovery({autosavePath(compPath), compPath});
     if (recovery.original == compPath) recovery = {};
 }
 
@@ -3611,7 +3614,7 @@ void App::checkAutosave() {
     recovery = {};
     const std::string a = autosavePath(compPath);
     std::error_code ec;
-    if (!fs::exists(a, ec)) return;
+    if (!savefile::ownedRecovery({a, compPath})) return;
     const auto ta = fs::last_write_time(a, ec);
     if (ec) return;
     if (!compPath.empty()) {
@@ -3634,6 +3637,10 @@ bool App::recoverAutosave(std::string* err) {
     try {
         std::ifstream f(r.autosave);
         json j = json::parse(f);
+        if (!savefile::matchesOwner(j, r.original)) {
+            if (err) *err = "this file is no longer an autosave of the open comp";
+            return false;
+        }
         // relative paths are relative to the script's folder, not the autosave's
         const fs::path base = r.original.empty() ? fs::current_path() : fs::path(r.original).parent_path();
         loaded = Comp::fromJson(j, base);

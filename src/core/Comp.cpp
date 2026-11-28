@@ -437,17 +437,20 @@ std::string absolutePath(const std::string& p) {
     return ec ? p : a.string();
 }
 
+std::filesystem::path Comp::projectBaseDir() const {
+    const auto& dir = project.projectDir;
+    if (dir.empty()) return baseDir;
+    // Keep a foreign POSIX root intact on Windows until its full path can be mapped.
+    if (dir.front() == '/' || isAbsolutePath(dir)) return dir;
+    return baseDir / dir;
+}
+
 std::string Comp::resolvePath(const std::string& original) const {
-    const std::string p=netpath::substitute(original);
-    if (p.empty() || isAbsolutePath(p)) return p;
-    std::filesystem::path fp(p);
-    std::filesystem::path base = baseDir;
-    if (!project.projectDir.empty()) {
-        std::filesystem::path pd(project.projectDir);
-        base = isAbsolutePath(project.projectDir) || baseDir.empty() ? pd : baseDir / pd;
-    }
-    if (base.empty()) return p;
-    return (base / fp).string();
+    const std::string mapped = netpath::substitute(original);
+    if (mapped.empty() || isAbsolutePath(mapped)) return mapped;
+    const auto base = projectBaseDir();
+    if (base.empty()) return mapped;
+    return netpath::substitute((base / mapped).string());
 }
 
 std::string Comp::defaultWriteFile() const {
