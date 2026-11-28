@@ -749,6 +749,7 @@ public:
     bool isExecutable() const override { return !params.flag("disable", false); }
 
     void beginExecute(Engine& engine,double first,double last) override {
+        checkCallbackPermission(engine);
         callbackEngine_=&engine;
         session_=true;first_=first;last_=last;movie_.reset();callback("before_render",first,0,params.str("file"));
     }
@@ -781,6 +782,7 @@ public:
     }
 
     void execute(Engine& e, double frame) override {
+        if (!session_) checkCallbackPermission(e);
         callbackEngine_=&e;
         // the classic "limit to range": frames outside it aren't written
         if (params.flag("use_limit", false) &&
@@ -880,9 +882,18 @@ private:
     bool session_ = false;
     double first_=1,last_=1;
     Engine* callbackEngine_=nullptr;
+    void checkCallbackPermission(const Engine& engine) const {
+        if (engine.allowsWritePython()) return;
+        for (const char* event : {"before_render", "before_frame", "after_frame", "after_render", "render_progress"}) {
+            if (!params.str(event).empty())
+                throw RenderError(name + ": Python callbacks require permission. For a trusted comp, select "
+                                  "Allow Write Python for this render or pass --allow-write-python to welder render.");
+        }
+    }
     void callback(const std::string& event,double frame,double progress,const std::string& path){
         const auto code=params.str(event);if(code.empty())return;
-        auto args=scripting::pythonCommand(params.str("callback_python"));if(args.empty())throw RenderError(name+": no Python interpreter is configured for "+event);
+        if (!callbackEngine_ || !callbackEngine_->allowsWritePython()) throw RenderError(name + ": Write Python is disabled");
+        auto args=scripting::pythonCommand("");if(args.empty())throw RenderError(name+": no Python interpreter is configured for "+event);
         json context={{"event",event},{"node_name",name},{"frame",frame},{"first_frame",first_},{"last_frame",last_},{"progress",progress},{"output_path",path}};
         args.insert(args.end(),{"-c","import json,sys; globals().update(json.loads(sys.argv[1])); exec(compile(sys.argv[2], '<Write '+event+'>', 'exec'))",context.dump(),code});
         const auto log=(std::filesystem::temp_directory_path()/("welder-write-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".log")).string();

@@ -72,7 +72,7 @@ The OCIO tab provides four context key/value pairs. These are applied when Welde
 
 ![Write OCIO context tab](screenshots/write-controls/ocio.png)
 
-The Python tab exposes Before Render, Before Each Frame, After Each Frame, After Render and Render Progress callbacks. Callbacks execute with the configured Python interpreter and receive `event`, `node_name`, `frame`, `first_frame`, `last_frame`, `progress` and `output_path`. These are Welder callback globals, not a Nuke Python API implementation. Callback failures propagate to the render.
+The Python tab exposes Before Render, Before Each Frame, After Each Frame, After Render and Render Progress callbacks. Rendering stops if a Write has a callback and permission is off. For a trusted comp, select **Allow Write Python for this render** in the render dialog, or pass `--allow-write-python` to `welder render`. Permission lasts for one render and is never saved in the comp. Set `WELDER_PYTHON` on the workstation to choose an interpreter. Callbacks execute with the configured Python interpreter and receive `event`, `node_name`, `frame`, `first_frame`, `last_frame`, `progress` and `output_path`. These are Welder callback globals, not a Nuke Python API implementation. Callback failures propagate to the render.
 
 ![Write Python callbacks](screenshots/write-controls/python.png)
 

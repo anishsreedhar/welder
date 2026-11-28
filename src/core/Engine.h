@@ -78,6 +78,7 @@ struct EngineOptions {
     int threads = 0;  // 0 = hardware concurrency
     bool profile = false;  // time each node (profile()): for a render's report
     bool finalRender = false;  // a render (Write / command line / farm), not the editor's viewer: Precomps read their network copy
+    bool allowWritePython = false; // opt-in from the render invocation, never from the comp
 };
 
 class Engine {
@@ -156,6 +157,7 @@ public:
     // A new tile cache budget (evicting down to it), e.g. after running short of memory.
     void setCacheBudget(size_t bytes);
     int tileSize() const { return tile_; }
+    bool allowsWritePython() const { return allowWritePython_; }
     bool finalRender() const { return finalRender_; }
 
 private:
@@ -177,6 +179,7 @@ private:
     TileCache cache_;
     std::atomic<bool> profile_{false};
     bool finalRender_ = false;
+    bool allowWritePython_ = false;
     std::mutex profM_;
     std::map<std::string, std::pair<double, int>> prof_;
     std::atomic<int> active_{0}, peak_{0};

@@ -88,7 +88,8 @@ int main() {
         auto unmasked = make({{"size", 6}, {"mask_channel", "none"}}, 0);
         near(px(render(*unmasked), "R"), blurred, "Mask none must ignore a connected black mask");
         auto defaultMask = make({{"size", 6}}, 0);
-        near(px(render(*defaultMask), "R"), blurred, "Mask must default to disabled");
+        near(px(render(*defaultMask), "R"), 1, "A saved Blur with an implicit black alpha mask must preserve the original pixel");
+        check(defaultMask->find("Blur1")->params.str("mask_channel") == "A", "The panel must show the effective legacy channel");
         auto maskRed = make({{"size", 6}, {"mask_channel", "R"}}, .25);
         near(px(render(*maskRed), "R"), 1 + .75 * (blurred - 1), "Mask channel selection must use the requested component");
         for (double size : {0., 6., 40.}) {
