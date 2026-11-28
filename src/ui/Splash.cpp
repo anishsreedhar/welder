@@ -222,7 +222,10 @@ void close(GLFWwindow* main, double minSeconds) {
     glfwMakeContextCurrent(gWin);
     while (glfwGetTime() - gShownAt < minSeconds) {
         draw();  // (window systems without a compositor don't keep the picture)
-        glfwWaitEventsTimeout(std::min(0.1, minSeconds - (glfwGetTime() - gShownAt)));
+        // Painting can cross the deadline. GLFW rejects a negative timeout (and
+        // asserts in development builds), so measure again after the draw.
+        const double remaining = minSeconds - (glfwGetTime() - gShownAt);
+        if (remaining > 0) glfwWaitEventsTimeout(std::min(0.1, remaining));
     }
     if (gFB) gDelFB(1, &gFB);
     if (gTex) glDeleteTextures(1, &gTex);

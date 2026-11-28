@@ -330,6 +330,35 @@ Viewer { frame_range 1010-1050 name Viewer1 }
 
 
 class Knobs(unittest.TestCase):
+    def test_blur_reference_controls(self):
+        for algorithm in ("box", "triangle", "quadratic", "gaussian"):
+            _, _, nodes = convert("""
+Constant { inputs 0 name Source }
+Blur {
+ name Blur1
+ channels rgb
+ size {6 3}
+ filter %s
+ quality 25
+ crop false
+ maskChannelInput none
+ inject true
+ invert_mask true
+ fringe true
+ mix 0.5
+}
+""" % algorithm)
+            p = nodes["Blur1"]["params"]
+            self.assertEqual(p["filter"], algorithm)
+            self.assertEqual(p["size"], [6, 3])
+            self.assertEqual(p["quality"], 25)
+            self.assertEqual(p["mask_channel"], "none")
+            self.assertTrue(p["inject"])
+            self.assertTrue(p["invert_mask"])
+            self.assertTrue(p["fringe"])
+            self.assertFalse(p["crop"])
+            self.assertEqual(p["mix"], .5)
+
     def test_root(self):
         comp, _, _ = convert('Root { inputs 0 first_frame 1001 last_frame 1100 fps 23.976 '
                              'format "2048 1152 0 0 2048 1152 1 MyFmt" }\n')
@@ -1756,6 +1785,51 @@ class ColorImport(unittest.TestCase):
         comp, report, n = convert("Root {\n inputs 0\n}\nRead {\n inputs 0\n file a.png\n colorspace linear\n name R\n}\n")
         self.assertEqual(comp["project"]["color"]["working"], "Linear Rec.709 (sRGB)")
         self.assertEqual(n["R"]["params"]["colorspace"], "working")
+
+
+class WriteFormatOptionsImport(unittest.TestCase):
+    def test_format_context_and_callbacks_survive_import(self):
+        _, _, nodes = convert('''
+Write {
+ inputs 0
+ file output.exr
+ name Write1
+ autocrop true
+ write_ACES_compliant_EXR true
+ standard_layer_name_format true
+ write_full_layer_names true
+ truncateChannelNames true
+ noprefix false
+ interleave channels
+ first_part beauty
+ key1 SHOT
+ value1 shot010
+ beforeRender "print('begin')"
+ afterFrameRender "print('frame')"
+}
+''')
+        p = nodes['Write1']['params']
+        for key in ('autocrop', 'aces_compliant', 'standard_layer_names',
+                    'write_full_layer_names', 'truncate_channel_names'):
+            self.assertTrue(p[key], key)
+        self.assertFalse(p['metadata_noprefix'])
+        self.assertEqual(p['interleave'], 'layers')
+        self.assertEqual(p['first_part'], 'beauty')
+        self.assertEqual(p['context_key1'], 'SHOT')
+        self.assertEqual(p['context_value1'], 'shot010')
+        self.assertEqual(p['before_render'], "print('begin')")
+        self.assertEqual(p['after_frame'], "print('frame')")
+
+    def test_jpeg_and_dpx_controls(self):
+        _, _, nodes = convert('''
+Write { inputs 0 file output.jpeg name J _jpeg_quality 0.63 _jpeg_sub_sampling 4:4:4 }
+Write { inputs 0 file output.dpx name D datatype "12 bit" bigEndian false fill false }
+''')
+        self.assertAlmostEqual(nodes['J']['params']['jpeg_quality'], .63)
+        self.assertEqual(nodes['J']['params']['jpeg_subsampling'], '4:4:4')
+        self.assertFalse(nodes['D']['params']['dpx_big_endian'])
+        self.assertFalse(nodes['D']['params']['dpx_fill'])
+        self.assertEqual(nodes['D']['params']['bit_depth'], '12')
 
 
 class DeepWriteImport(unittest.TestCase):

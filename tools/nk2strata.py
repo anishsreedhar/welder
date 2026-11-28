@@ -2207,6 +2207,7 @@ class Translator:
                 num("last", dest="last")
             if flag("autocrop"):
                 params["data_window"] = "bbox"
+                params["autocrop"] = True
             if flag("disable"):
                 params["disable"] = True
             cs = nk_colorspace(str(k.get("colorspace", "")))
@@ -2214,6 +2215,21 @@ class Translator:
                 params["colorspace"] = cs
             if flag("raw"):
                 params["raw"] = True
+            for source, dest in {"proxy":"proxy", "frame_mode":"frame_mode", "frame":"frame", "views":"views", "beforeRender":"before_render", "beforeFrameRender":"before_frame", "afterFrameRender":"after_frame", "afterRender":"after_render", "renderProgress":"render_progress", "on_error":"missing_frames", "first_part":"first_part", "_jpeg_sub_sampling":"jpeg_subsampling"}.items():
+                if source in k:
+                    params[dest] = str(k[source])
+            for source, dest in {"premultiplied":"premultiplied", "create_directories":"create_directories", "reading":"read_file", "read_all_lines":"read_all_lines", "write_ACES_compliant_EXR":"aces_compliant", "noprefix":"metadata_noprefix", "standard_layer_name_format":"standard_layer_names", "write_full_layer_names":"write_full_layer_names", "truncateChannelNames":"truncate_channel_names", "bigEndian":"dpx_big_endian", "fill":"dpx_fill"}.items():
+                if source in k:
+                    params[dest] = flag(source)
+            for source, dest in {"render_order":"render_order", "_jpeg_quality":"jpeg_quality", "mov64_fps":"fps", "mov64_audio_offset":"audio_offset"}.items():
+                if source in k:
+                    num(source, dest=dest)
+            if "interleave" in k:
+                params["interleave"] = {"channels":"layers", "channels and layers":"views"}.get(str(k["interleave"]), "all")
+            for index in range(1, 5):
+                for source, dest in (("key", "context_key"), ("value", "context_value")):
+                    if source + str(index) in k:
+                        params[dest + str(index)] = str(k[source + str(index)])
             self.translated += 1
             return self.emit(nk_name, klass, "Write", main[:1], params, k)
 
@@ -2739,6 +2755,12 @@ class Translator:
             if "crop" in k:
                 params["crop"] = flag("crop", True)
             common_mix_mask()
+            num("quality", dest="quality")
+            if "inject" in k:
+                params["inject"] = flag("inject")
+            if "maskChannelInput" in k:
+                ch = str(k["maskChannelInput"])
+                params["mask_channel"] = "none" if ch == "none" else channel_name(ch)
             self.translated += 1
             return self.emit(nk_name, klass, "Blur", [main[0] if main else None] + masks[:1], params, k)
 

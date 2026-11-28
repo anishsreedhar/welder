@@ -1,0 +1,27 @@
+{
+  "strata": 1,
+  "format": {"width": 1280, "height": 720},
+  "frame_range": [1, 100],
+  "nodes": [
+    {
+      "name": "CheckerBoard1",
+      "type": "CheckerBoard",
+      "params": {"format": [1280, 720]},
+      "ui": {"x": 0, "y": 0}
+    },
+    {
+      "name": "Blur1",
+      "type": "Blur",
+      "inputs": ["CheckerBoard1"],
+      "params": {"channels": "all", "size": 0, "filter": "gaussian", "quality": 15, "crop": true, "mask_channel": "none", "mix": 1},
+      "ui": {"x": 0, "y": 100}
+    },
+    {
+      "name": "Viewer1",
+      "type": "Viewer",
+      "inputs": ["Blur1"],
+      "params": {"a_pipe": 1},
+      "ui": {"x": 0, "y": 220}
+    }
+  ]
+}

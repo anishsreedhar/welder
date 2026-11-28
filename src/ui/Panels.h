@@ -46,6 +46,7 @@ struct ThemeColors {
 };
 ThemeColors& theme();
 void loadNodeLabelFonts();
+void prepareNodeLabelFonts();  // load requested faces before ImGui starts its next frame
 const std::vector<std::string>& nodeLabelFamilies();
 ImFont* nodeLabelFont(const Node* node);
 // the theme's accent at an alpha (0-255)
@@ -498,6 +499,7 @@ struct UiState {
     std::vector<std::string> renderWrites;  // set: just these (a Write's Render button)
     int renderRangeMode = 0;                // 0 input, 1 global, 2 in-out, 3 visible, 4 custom
     std::string renderRange;                // "1040-1105", "1-100x2", "1,5,9"
+    bool renderAllowWritePython = false;
     bool renderProxy = false, renderFrameServer = false, renderContinue = true;
     bool renderStarted = false;             // OK pressed: the dialog shows progress
     // Hotkey routing: the panel under the mouse ("Viewer", "Node Graph", "Properties", "Timeline", ...)

@@ -37,10 +37,10 @@ fi
 export PKG_CONFIG_PATH="$HW/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 
 DEC=prores,h264,hevc,dnxhd,mjpeg,mpeg4,mpeg2video,mpeg1video,vp9,ffv1,png,qtrle,v210,v210x,dvvideo,rawvideo,tiff,dpx,exr
-ENC=prores_ks,dnxhd,mjpeg,mpeg4,ffv1,png,rawvideo,v210
+ENC=prores_ks,dnxhd,mjpeg,mpeg4,ffv1,png,rawvideo,v210,qtrle
 HWENC=h264_nvenc,hevc_nvenc,h264_amf,hevc_amf,h264_vulkan,hevc_vulkan  # H.264 / H.265: hardware only
 HWARGS=(--enable-ffnvcodec --enable-nvenc --enable-amf --enable-vulkan)
-DMX=mov,matroska,avi,mxf,mpegts,mpegps,m4v,h264,hevc,rawvideo,image2
+DMX=mov,matroska,avi,mxf,mpegts,mpegps,m4v,h264,hevc,rawvideo,image2,wav,mp3,aac,flac
 MUX=mov,mp4,matroska,avi,mxf
 PAR=h264,hevc,mpeg4video,mpegvideo,mjpeg,dnxhd,vp9,png,dvd_nav,prores
 BSF=h264_mp4toannexb,hevc_mp4toannexb,vp9_superframe_split
